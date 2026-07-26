@@ -4112,6 +4112,8 @@ dependencies = [
  "chrono",
  "dirs",
  "libc",
+ "objc2",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "tauri",

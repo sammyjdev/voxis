@@ -9,3 +9,7 @@
 # CI stages the frozen engine here before bundling; keep only its placeholder.
 engine/*
 !engine/.gitkeep
+
+# Built by build-mic-helper.sh at bundle time from grant-mic.swift.
+/resources/GrantMic.app
+/binaries

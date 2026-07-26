@@ -32,6 +32,13 @@ dirs = "6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# macOS mic prompt: only VOXIS.app's own signed bundle binary can present the
+# TCC dialog (a spawned bundle-less Python helper cannot), so the tray requests
+# it via AVFoundation. Versions match what tauri already pulls in transitively.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+
 [dev-dependencies]
 tempfile = "3"
 

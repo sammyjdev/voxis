@@ -165,6 +165,56 @@ fn notify(app: &AppHandle, body: &str) {
     let _ = app.notification().builder().title("VOXIS").body(body).show();
 }
 
+/// Raise the macOS microphone prompt when it hasn't been decided yet. laris
+/// opens the mic from a spawned, bundle-less Python daemon that TCC won't show a
+/// dialog for; an in-process objc2 `requestAccess` also stayed a silent no-op.
+/// Reading the status via objc2 works, so we do that here and, only when it's
+/// notDetermined, spawn the bundled Swift sidecar (grant-mic) which CAN present
+/// the prompt. It is signed with the app identity, so the grant lands on
+/// VOXIS.app and unblocks the daemon's capture. No-op once decided.
+#[cfg(target_os = "macos")]
+fn ensure_mic_access() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
+    use objc2_foundation::NSString;
+
+    #[link(name = "AVFoundation", kind = "framework")]
+    extern "C" {
+        static AVMediaTypeAudio: *const NSString;
+    }
+    let audio: &NSString = unsafe { &*AVMediaTypeAudio };
+    let Some(av_capture_device) = AnyClass::get(c"AVCaptureDevice") else {
+        return;
+    };
+    // AVAuthorizationStatus: 0 = notDetermined, 3 = authorized
+    let status: isize =
+        unsafe { msg_send![av_capture_device, authorizationStatusForMediaType: audio] };
+    if status != 0 {
+        return;
+    }
+    // Raise the prompt via the bundled GrantMic.app - a short-lived Regular-policy
+    // Swift app sharing VOXIS's identity, launched through LaunchServices (the
+    // tray's own objc2 requestAccess and bare-subprocess spawns both stayed
+    // silent no-ops). It MUST run de-nested: a .app nested inside another bundle
+    // is auto-denied mic, a standalone copy gets the dialog - so ditto it out
+    // (ditto preserves the signature) and open that. Absent in dev (unbundled).
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(bundled) = exe
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|contents| contents.join("Resources/resources/GrantMic.app"))
+    else {
+        return;
+    };
+    if !bundled.exists() {
+        return;
+    }
+    let dest = std::env::temp_dir().join("VOXIS-GrantMic.app");
+    if std::process::Command::new("ditto").arg(&bundled).arg(&dest).status().is_ok() {
+        let _ = std::process::Command::new("open").arg("-n").arg(&dest).spawn();
+    }
+}
+
 fn handle_menu(app: &AppHandle, id: &str) {
     let state = app.state::<AppState>();
     state.menu_dirty.store(true, Ordering::SeqCst);
@@ -292,6 +342,8 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            #[cfg(target_os = "macos")]
+            ensure_mic_access();
 
             let config = settings::load_tray_config();
             let daemon = {
