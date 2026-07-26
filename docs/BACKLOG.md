@@ -31,13 +31,12 @@ thing between here and a v0.1.0 release is a real Windows smoke test. See
 
 ## P1 - macOS UX gap (found 2026-07-17)
 
-- [ ] **Surface the Accessibility permission requirement.** When the tray
-      (VOXIS.app) spawns laris, the dictation hotkey silently does nothing if
-      VOXIS.app is not granted **Accessibility** AND **Input Monitoring** -
-      `daemon.py` calls `ptt.start()` unconditionally and blocks in
-      `_wait_for_ptt`, with no error. laris should check
-      `PushToTalk.check_trusted()` at boot and, when false, emit a clear
-      message; the tray should guide the user to grant both permissions.
+- [x] **Surface the Accessibility permission requirement.** (done 2026-07-25)
+      `PushToTalk.check_trusted()` now probes a listen-only `CGEventTap`
+      (catches BOTH Accessibility and Input Monitoring - `AXIsProcessTrusted`
+      alone gave false positives), laris caches it at boot into
+      `app.state.ptt_trusted`, `/theme` carries it, and the tray notifies once
+      on the edge into "daemon up but untrusted" (`should_warn_untrusted`).
 - [ ] **INSTALL.md:** document that the **tray path** needs VOXIS.app in
       Accessibility + Input Monitoring (the doc currently only covers the
       source-install path, section 1).

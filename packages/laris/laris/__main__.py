@@ -58,6 +58,11 @@ def main() -> None:
 
     voice_queue = queue.Queue()
     app = build_app(token=laris_token, voice_queue=voice_queue)
+    # probe once at boot: macOS applies permission changes only on restart, so
+    # a cached value is exact for this process's lifetime and the tray reads it
+    # over /theme to warn when push-to-talk lacks Accessibility/Input Monitoring
+    from laris.hotkey import PushToTalk
+    app.state.ptt_trusted = PushToTalk.check_trusted()
     threading.Thread(
         # access_log=False: the token rides in the query string, and the
         # default access log would write it to the daemon's stdout/log

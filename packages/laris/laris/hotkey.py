@@ -63,13 +63,32 @@ class PushToTalk:
 
     @staticmethod
     def check_trusted() -> bool:
-        """True when macOS Accessibility permissions allow keyboard monitoring."""
-        try:
-            from ApplicationServices import AXIsProcessTrusted
+        """True when this process can actually receive global keyboard events.
 
-            return bool(AXIsProcessTrusted())
+        Probes by creating a listen-only CGEventTap and checking it is non-None:
+        on macOS 10.15+ the tap comes back None unless BOTH Accessibility and
+        Input Monitoring are granted, so this is the accurate 'push-to-talk will
+        work' signal. AXIsProcessTrusted reports Accessibility only and can be
+        True while the tap silently fails - the exact trap that let PTT die with
+        no error. Non-macOS (no Quartz): nothing to gate, assume True.
+        """
+        try:
+            import Quartz
         except ImportError:
             return True
+
+        tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionListenOnly,
+            Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
+            lambda *_a: None,
+            None,
+        )
+        if tap is None:
+            return False
+        Quartz.CFMachPortInvalidate(tap)  # probe only - don't leak the tap
+        return True
 
     def _on_press(self, key) -> None:
         if key != self._target:
