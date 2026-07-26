@@ -67,16 +67,20 @@ pub struct LarisDaemon {
     child: Option<Child>,
     laris_dir: PathBuf,
     engine_bin: Option<PathBuf>, // frozen engine (Windows); None = dev venv python
-    log_path: Option<PathBuf>,   // where the frozen engine's stdout/stderr are captured
+    log_path: Option<PathBuf>,   // where the daemon's stdout/stderr are captured
 }
 
 impl LarisDaemon {
-    pub fn new(laris_dir: PathBuf) -> Self {
+    /// log_path captures the dev-venv daemon's stdout/stderr. On macOS the tray
+    /// spawns `python -m laris` with no console, so without this its [Voice]
+    /// prints and tracebacks (e.g. an intermittent mic-stream open failure) are
+    /// lost - the log is the only diagnostics a field failure leaves behind.
+    pub fn new(laris_dir: PathBuf, log_path: Option<PathBuf>) -> Self {
         Self {
             child: None,
             laris_dir,
             engine_bin: None,
-            log_path: None,
+            log_path,
         }
     }
 
@@ -111,29 +115,33 @@ impl LarisDaemon {
             Some(bin) => {
                 let mut cmd = Command::new(bin);
                 cmd.current_dir(&self.laris_dir);
-                // Capture the windowed engine's output; on failure just inherit
-                // (a missing log must never stop the engine from starting).
-                if let Some(log) = &self.log_path {
-                    if let Ok(f) = std::fs::File::create(log) {
-                        if let Ok(f2) = f.try_clone() {
-                            cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
-                        }
-                    }
-                }
+                self.redirect_log(&mut cmd);
                 cmd.spawn()
                     .map_err(|e| format!("{}: {e}", bin.display()))?
             }
             None => {
                 let python = self.laris_dir.join(".venv/bin/python");
-                Command::new(&python)
-                    .args(["-m", "laris"])
-                    .current_dir(&self.laris_dir)
-                    .spawn()
+                let mut cmd = Command::new(&python);
+                cmd.args(["-m", "laris"]).current_dir(&self.laris_dir);
+                self.redirect_log(&mut cmd);
+                cmd.spawn()
                     .map_err(|e| format!("{}: {e}", python.display()))?
             }
         };
         self.child = Some(child);
         Ok(())
+    }
+
+    /// Capture the child's stdout/stderr to log_path; on any failure just
+    /// inherit (a missing log must never stop the daemon from starting).
+    fn redirect_log(&self, cmd: &mut Command) {
+        if let Some(log) = &self.log_path {
+            if let Ok(f) = std::fs::File::create(log) {
+                if let Ok(f2) = f.try_clone() {
+                    cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
+                }
+            }
+        }
     }
 
     /// SIGTERM first (laris tears down overlay + keyboard listener), SIGKILL
@@ -188,7 +196,7 @@ mod tests {
         fs::write(&py, "#!/bin/sh\nsleep 60\n").unwrap();
         fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let mut daemon = LarisDaemon::new(tmp.path().to_path_buf());
+        let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), None);
         assert!(!daemon.owns_running());
         daemon.spawn().unwrap();
         assert!(daemon.owns_running());
@@ -196,8 +204,38 @@ mod tests {
         daemon.stop();
         assert!(!daemon.owns_running());
 
-        let mut missing = LarisDaemon::new(tmp.path().join("nope"));
+        let mut missing = LarisDaemon::new(tmp.path().join("nope"), None);
         assert!(missing.spawn().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_venv_branch_captures_stdout_to_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join(".venv/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let py = bin_dir.join("python");
+        fs::write(&py, "#!/bin/sh\necho hello-from-laris\nsleep 60\n").unwrap();
+        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        let log = tmp.path().join("laris.log");
+
+        let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), Some(log.clone()));
+        daemon.spawn().unwrap();
+
+        // the dev-venv daemon's stdout is redirected to the log (poll: echo races)
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut captured = false;
+        while std::time::Instant::now() < deadline {
+            if fs::read_to_string(&log).map(|s| s.contains("hello-from-laris")).unwrap_or(false) {
+                captured = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(captured, "venv daemon stdout was not captured to the log");
+        daemon.stop();
     }
 
     #[cfg(unix)]
