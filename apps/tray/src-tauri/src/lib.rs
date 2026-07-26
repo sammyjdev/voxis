@@ -360,12 +360,18 @@ pub fn run() {
                             bin,
                             settings::config_dir().join("laris-engine.log"),
                         ),
-                        None => laris::LarisDaemon::new(PathBuf::from(&config.laris_dir)),
+                        None => laris::LarisDaemon::new(
+                            PathBuf::from(&config.laris_dir),
+                            Some(settings::config_dir().join("laris.log")),
+                        ),
                     }
                 }
                 #[cfg(not(windows))]
                 {
-                    laris::LarisDaemon::new(PathBuf::from(&config.laris_dir))
+                    laris::LarisDaemon::new(
+                        PathBuf::from(&config.laris_dir),
+                        Some(settings::config_dir().join("laris.log")),
+                    )
                 }
             };
             app.manage(AppState {
