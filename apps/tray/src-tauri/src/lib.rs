@@ -35,9 +35,16 @@ struct Snapshot {
     recording: Option<(String, i64)>, // (session id, minutes)
     processing: bool,
     laris_alive: bool,
+    ptt_trusted: bool, // false = daemon up but macOS denies keyboard monitoring
     hands_free: bool,
     has_last_note: bool,
     theme: Option<(String, String, String)>, // (archetype, palette, position)
+}
+
+// Warn once when the daemon comes up without keyboard permission: the edge
+// INTO the bad state, so the tray nags on transition, not every poll tick.
+fn should_warn_untrusted(last: &Snapshot, current: &Snapshot) -> bool {
+    current.laris_alive && !current.ptt_trusted && (!last.laris_alive || last.ptt_trusted)
 }
 
 fn peers_path() -> PathBuf {
@@ -61,17 +68,20 @@ fn take_snapshot(state: &AppState) -> Snapshot {
     let laris_alive = peer.as_ref().map(|p| laris::alive(&p.url)).unwrap_or(false);
     // ponytail: theme fetched every tick while laris is up - localhost HTTP,
     // negligible; cache only if it ever shows up in a profile
-    let theme = peer
-        .filter(|_| laris_alive)
-        .and_then(|p| laris::get_theme(&p).ok())
-        .and_then(|body| {
-            let t = body.get("theme")?;
-            Some((
-                t.get("archetype")?.as_str()?.to_owned(),
-                t.get("palette")?.as_str()?.to_owned(),
-                t.get("position")?.as_str()?.to_owned(),
-            ))
-        });
+    let theme_body = peer.filter(|_| laris_alive).and_then(|p| laris::get_theme(&p).ok());
+    // absent field = old daemon: default trusted so we never nag on unknowns
+    let ptt_trusted = theme_body
+        .as_ref()
+        .and_then(|b| b.get("ptt_trusted")?.as_bool())
+        .unwrap_or(true);
+    let theme = theme_body.and_then(|body| {
+        let t = body.get("theme")?;
+        Some((
+            t.get("archetype")?.as_str()?.to_owned(),
+            t.get("palette")?.as_str()?.to_owned(),
+            t.get("position")?.as_str()?.to_owned(),
+        ))
+    });
     let laris_settings = settings::read_json_map(&settings::laris_settings_path());
     let hands_free =
         laris_settings.get("ASSISTANT_MODE").and_then(|v| v.as_str()) == Some("always_on");
@@ -79,6 +89,7 @@ fn take_snapshot(state: &AppState) -> Snapshot {
         recording,
         processing: state.processing.load(Ordering::SeqCst),
         laris_alive,
+        ptt_trusted,
         hands_free,
         has_last_note: miris::last_note(&sessions).is_some(),
         theme,
@@ -339,6 +350,11 @@ pub fn run() {
                     }
                     let recording_changed =
                         current.recording.is_some() != last.recording.is_some();
+                    if should_warn_untrusted(&last, &current) {
+                        notify(&handle, "Ditado sem permissão: ative VOXIS em Ajustes › \
+                            Privacidade e Segurança › Acessibilidade E Monitoramento de \
+                            Entrada, depois reinicie o VOXIS.");
+                    }
                     last = current.clone();
                     let handle2 = handle.clone();
                     let _ = handle.run_on_main_thread(move || {
@@ -364,4 +380,31 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(laris_alive: bool, ptt_trusted: bool) -> Snapshot {
+        Snapshot { laris_alive, ptt_trusted, ..Default::default() }
+    }
+
+    #[test]
+    fn warns_on_transition_into_untrusted() {
+        // daemon just came up (menu -> Ditado) without keyboard permission
+        assert!(should_warn_untrusted(&snap(false, true), &snap(true, false)));
+        // was trusted, permission lost/re-probed as denied
+        assert!(should_warn_untrusted(&snap(true, true), &snap(true, false)));
+    }
+
+    #[test]
+    fn silent_when_already_untrusted_or_fine() {
+        // steady bad state must not nag every 2s tick
+        assert!(!should_warn_untrusted(&snap(true, false), &snap(true, false)));
+        // trusted daemon
+        assert!(!should_warn_untrusted(&snap(false, true), &snap(true, true)));
+        // daemon down
+        assert!(!should_warn_untrusted(&snap(true, false), &snap(false, true)));
+    }
 }

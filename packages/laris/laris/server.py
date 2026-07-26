@@ -48,7 +48,14 @@ def build_app(token: str, voice_queue: "thread_queue.Queue[VoiceEvent] | None" =
     def get_theme(token: str | None = None):
         if not laris_auth.token_valid(token, app.state.token):
             raise HTTPException(status_code=403, detail="invalid token")
-        return {"theme": orb_theme.load_theme(), "palettes": orb_theme.PALETTES}
+        # ptt_trusted rides the poll the tray already makes each tick: it lets
+        # the tray surface a missing-permission daemon instead of PTT dying
+        # silently. Default True so old daemons that never set it don't nag.
+        return {
+            "theme": orb_theme.load_theme(),
+            "palettes": orb_theme.PALETTES,
+            "ptt_trusted": getattr(app.state, "ptt_trusted", True),
+        }
 
     @app.post("/theme")
     def post_theme(updates: dict, token: str | None = None):

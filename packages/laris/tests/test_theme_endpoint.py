@@ -23,6 +23,23 @@ def test_get_theme_returns_defaults_and_palettes(tmp_path, monkeypatch):
     assert body["palettes"]["blade"]["accent"] == "#3fb6c4"
 
 
+def test_get_theme_defaults_ptt_trusted_true_when_unset(tmp_path, monkeypatch):
+    """Old/unknown daemons that never set the flag must not trigger a nag."""
+    client = _client(tmp_path, monkeypatch)
+    assert client.get("/theme", params={"token": "tok"}).json()["ptt_trusted"] is True
+
+
+def test_get_theme_reports_untrusted_when_state_false(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORB_THEME_PATH", str(tmp_path / "orb-theme.json"))
+    import importlib
+
+    from laris import config as laris_config
+    importlib.reload(laris_config)
+    app = build_app(token="tok")
+    app.state.ptt_trusted = False
+    assert TestClient(app).get("/theme", params={"token": "tok"}).json()["ptt_trusted"] is False
+
+
 def test_get_theme_rejects_bad_token(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     assert client.get("/theme", params={"token": "nope"}).status_code == 403

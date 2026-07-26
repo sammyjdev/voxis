@@ -115,3 +115,48 @@ def test_other_keys_are_ignored(monkeypatch):
 
     assert not ptt.pressed.is_set()
     assert not ptt.hands_free.is_set()
+
+
+def _fake_quartz(tap_result):
+    """Stand-in for the Quartz module: CGEventTapCreate returns tap_result,
+    and CFMachPortInvalidate records what the probe releases."""
+    invalidated = []
+    q = SimpleNamespace(
+        kCGSessionEventTap=0,
+        kCGHeadInsertEventTap=0,
+        kCGEventTapOptionListenOnly=1,
+        kCGEventKeyDown=10,
+        CGEventMaskBit=lambda e: 1 << e,
+        CGEventTapCreate=lambda *a: tap_result,
+        CFMachPortInvalidate=invalidated.append,
+    )
+    return q, invalidated
+
+
+def test_check_trusted_false_when_event_tap_denied(monkeypatch):
+    """A listen-only tap comes back None without Input Monitoring (even if
+    Accessibility is granted) - that is the accurate 'PTT will not work'."""
+    from laris.hotkey import PushToTalk
+
+    q, _ = _fake_quartz(None)
+    monkeypatch.setitem(sys.modules, "Quartz", q)
+    assert PushToTalk.check_trusted() is False
+
+
+def test_check_trusted_true_and_releases_tap_when_granted(monkeypatch):
+    from laris.hotkey import PushToTalk
+
+    sentinel = object()
+    q, invalidated = _fake_quartz(sentinel)
+    monkeypatch.setitem(sys.modules, "Quartz", q)
+
+    assert PushToTalk.check_trusted() is True
+    assert invalidated == [sentinel]  # the probe must not leak the tap
+
+
+def test_check_trusted_true_without_quartz(monkeypatch):
+    """Non-macOS (no Quartz): nothing to gate, never block."""
+    from laris.hotkey import PushToTalk
+
+    monkeypatch.setitem(sys.modules, "Quartz", None)  # import Quartz -> ImportError
+    assert PushToTalk.check_trusted() is True
