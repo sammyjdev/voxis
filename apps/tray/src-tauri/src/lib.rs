@@ -436,13 +436,38 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if should_prevent_exit(code) {
+                    api.prevent_exit();
+                }
+            }
+        });
+}
+
+/// The tray owns no permanent window, so closing Settings leaves the runtime
+/// with none and it asks to exit - taking dictation down with it. Exit code
+/// None is that request; Some means "Sair" called app.exit and must proceed.
+fn should_prevent_exit(code: Option<i32>) -> bool {
+    code.is_none()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_the_settings_window_must_not_exit_the_tray() {
+        // VOXIS is an Accessory app with no permanent window: when Settings
+        // closes, the runtime asks to exit because no window is left. code
+        // None = that runtime request; Some = the user picked "Sair"
+        // (app.exit), which must still go through.
+        assert!(should_prevent_exit(None), "closing a window must not kill the tray");
+        assert!(!should_prevent_exit(Some(0)), "the Sair menu item must still exit");
+    }
+
 
     fn snap(laris_alive: bool, ptt_trusted: bool) -> Snapshot {
         Snapshot { laris_alive, ptt_trusted, ..Default::default() }
