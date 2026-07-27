@@ -7,6 +7,11 @@ whatever app is focused, via local `mlx-whisper` STT. No TTS, no LLM - see
 [KIRIS](https://github.com/sammyjdev/kiris) for the voice-assistant layer
 built on top.
 
+On Windows, LARIS ships inside the VOXIS tray installer as a frozen
+faster-whisper engine. The supported flow is push-to-talk with Right Shift;
+no system Python is required. This README documents standalone development on
+macOS.
+
 ## Running standalone
 
 ```bash
