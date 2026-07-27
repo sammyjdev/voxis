@@ -84,13 +84,27 @@ def _denoise_chunk(chunk: np.ndarray, enabled: bool = True) -> np.ndarray:
 
 def _open_stream(callback):
     import sounddevice as sd
-    return sd.InputStream(
-        samplerate=config.SAMPLE_RATE,
-        channels=1,
-        dtype="float32",
-        blocksize=config.CHUNK_SAMPLES,
-        callback=callback,
-    )
+
+    def _new_stream():
+        return sd.InputStream(
+            samplerate=config.SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            blocksize=config.CHUNK_SAMPLES,
+            callback=callback,
+        )
+
+    try:
+        return _new_stream()
+    except sd.PortAudioError:
+        # PortAudio enumerates devices once at Pa_Initialize and never sees USB
+        # hotplug: unplugging a mic leaves it holding a dead device id, and every
+        # later open fails with -9986 until the process restarts. Re-initializing
+        # re-enumerates. Only on failure - doing it upfront would add latency to
+        # every utterance.
+        sd._terminate()
+        sd._initialize()
+        return _new_stream()
 
 
 def record_while(
