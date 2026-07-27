@@ -122,7 +122,10 @@ impl LarisDaemon {
             None => {
                 let python = self.laris_dir.join(".venv/bin/python");
                 let mut cmd = Command::new(&python);
-                cmd.args(["-m", "laris"]).current_dir(&self.laris_dir);
+                // -u: stdout goes to a file below, and Python block-buffers a
+                // non-tty stdout - the [Voice] prints would sit in the buffer
+                // instead of reaching the log this exists to produce.
+                cmd.args(["-u", "-m", "laris"]).current_dir(&self.laris_dir);
                 self.redirect_log(&mut cmd);
                 cmd.spawn()
                     .map_err(|e| format!("{}: {e}", python.display()))?
@@ -236,6 +239,41 @@ mod tests {
         }
         assert!(captured, "venv daemon stdout was not captured to the log");
         daemon.stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_venv_branch_runs_python_unbuffered() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join(".venv/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let py = bin_dir.join("python");
+        fs::write(&py, "#!/bin/sh\necho \"argv: $@\"\nsleep 60\n").unwrap();
+        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        let log = tmp.path().join("laris.log");
+
+        let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), Some(log.clone()));
+        daemon.spawn().unwrap();
+
+        // stdout redirected to a file makes Python block-buffer it, so the
+        // [Voice] prints sit in an 8KB buffer instead of reaching the log -
+        // which is the only diagnostics a field failure leaves behind.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut argv = String::new();
+        while std::time::Instant::now() < deadline {
+            argv = fs::read_to_string(&log).unwrap_or_default();
+            if argv.contains("argv:") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        daemon.stop();
+        assert!(
+            argv.contains("-u"),
+            "venv daemon must run python unbuffered, got: {argv:?}"
+        );
     }
 
     #[cfg(unix)]
