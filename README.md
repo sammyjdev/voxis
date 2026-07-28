@@ -6,8 +6,8 @@
 </p>
 
 <p align="center">
-  Local voice tools for dictation and meeting notes. The "O" is the orb that
-  reacts while VOXIS listens.
+  Native macOS voice tools for dictation and meeting notes. The "O" is the orb
+  that reacts while VOXIS listens.
 </p>
 
 ---
@@ -17,31 +17,23 @@ in the app you already have focused. MIRIS records meetings, transcribes them,
 and writes notes to an Obsidian vault. The tray app is the shared control
 surface.
 
+**macOS on Apple Silicon only.** Speech recognition runs on `mlx-whisper`,
+which requires Apple Silicon, and the tray drives macOS-specific menu bar and
+permission APIs. A Windows port lives in its own fork:
+[Allyhgf/voxis-windows](https://github.com/Allyhgf/voxis-windows).
+
 ## Family
 
-| Component | Purpose | Availability |
-|-----------|---------|--------------|
-| `packages/laris` | Local dictation with an orb overlay. | macOS standalone, Windows in the VOXIS installer. |
-| `packages/miris` | Meeting recording, transcription, and Obsidian notes. | macOS on Apple Silicon. |
-| `apps/tray` | Tauri v2 controls for dictation, meetings, themes, and settings. | Windows, macOS, and Linux. |
-| `brand/` | Wordmark, mark, and menu bar SVG assets. | Shared assets. |
-
-On Windows, the installer bundles LARIS push-to-talk dictation and needs no
-system Python. On macOS, LARIS and MIRIS run from their own Python
-environments. Linux currently ships the tray only.
+| Component | Purpose |
+|-----------|---------|
+| `packages/laris` | Local dictation with an orb overlay. |
+| `packages/miris` | Meeting recording, transcription, and Obsidian notes. |
+| `apps/tray` | Tauri v2 controls for dictation, meetings, themes, and settings. |
+| `brand/` | Wordmark, mark, and menu bar SVG assets. |
 
 ## Install
 
-Full steps per component and per OS: [docs/INSTALL.md](docs/INSTALL.md).
-
-### Windows
-
-Install the `.msi` or `-setup.exe` from the
-[Releases page](https://github.com/sammyjdev/voxis/releases). The installer
-includes the tray and LARIS. First use downloads the `small` Whisper model.
-CPU int8 is included. CUDA is a manual upgrade.
-
-### macOS, Apple Silicon
+Full steps per component: [docs/INSTALL.md](docs/INSTALL.md).
 
 ```bash
 git clone https://github.com/sammyjdev/voxis.git ~/code/voxis
@@ -56,8 +48,12 @@ cd ~/code/voxis/packages/miris && python3.11 -m venv .venv && \
 
 The tray app installs from the
 [Releases page](https://github.com/sammyjdev/voxis/releases). Builds are
-unsigned. See [docs/INSTALL.md](docs/INSTALL.md) for the one-time
-Gatekeeper or SmartScreen step.
+unsigned. See [docs/INSTALL.md](docs/INSTALL.md) for the one-time Gatekeeper
+step.
+
+Dictation is always on while the tray runs: `cmd_r` is the control, and the
+model loads once at startup instead of on every use. Starting VOXIS at login
+means it is ready before you press the key - see INSTALL.md.
 
 ## Privacy & security
 
@@ -72,7 +68,7 @@ Gatekeeper or SmartScreen step.
 
 ## Status
 
-- Windows ships LARIS push-to-talk dictation in the tray installer. MIRIS is
-  still macOS-only.
+- Dictation: push-to-talk with a live orb, transcribing through
+  `whisper-large-v3-turbo-q4`.
 - Meetings: two-channel recording ("Eu"/"Eles") gives speaker separation for
   free; notes route to the vault by user-defined categories.

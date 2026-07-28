@@ -1,17 +1,12 @@
 # Installing VOXIS
 
-VOXIS installs differently per platform:
+VOXIS runs on **macOS with Apple Silicon only**. Dictation (`laris`) and
+meeting recording (`miris`) install from source into Python venvs; they use
+`mlx-whisper` and Core Audio. The **tray** (`apps/tray`) is the shared control
+surface and starts the dictation daemon for you.
 
-- **macOS (Apple Silicon)** - dictation (`laris`) and meeting recording
-  (`miris`) install from source into Python venvs; they use `mlx-whisper` and
-  Core Audio. The **tray** (`apps/tray`) is optional sugar on top.
-- **Windows** - **dictation only** (meetings are a later phase). One installer
-  ships the tray plus a self-contained dictation engine (frozen with
-  PyInstaller, no system Python). Download it, hold a key, dictate. See
-  [Windows: dictation](#windows-dictation) below.
-
-If you just want dictation or meeting notes on macOS, install the engines. On
-Windows, install the tray - the engine rides inside it.
+A Windows port lives in its own fork:
+[Allyhgf/voxis-windows](https://github.com/Allyhgf/voxis-windows).
 
 ---
 
@@ -101,14 +96,8 @@ channel echoes the other side.
 
 ### From a release (recommended)
 
-Download the installer for your OS from the
-[Releases page](https://github.com/sammyjdev/voxis/releases):
-
-| OS | File |
-|----|------|
-| macOS | `VOXIS_<version>_aarch64.dmg` |
-| Windows | `VOXIS_<version>_x64-setup.exe` / `.msi` |
-| Linux | `.deb` or `.AppImage` |
+Download `VOXIS_<version>_aarch64.dmg` from the
+[Releases page](https://github.com/sammyjdev/voxis/releases).
 
 ### From source
 
@@ -133,40 +122,10 @@ this enabled the model is ready before you ever press the dictation key.
 
 ---
 
-## Windows: dictation
-
-Windows gets dictation through a single installer - no Python, no venv, no
-source clone.
-
-1. **Install.** Download `VOXIS_<version>_x64-setup.exe` (or `.msi`) from the
-   [Releases page](https://github.com/sammyjdev/voxis/releases) and run it.
-   SmartScreen will warn (unsigned) - "More info" > "Run anyway".
-2. **Grant the microphone.** Windows has no accessibility prompt like macOS;
-   enable it under **Settings > Privacy & security > Microphone** (allow
-   desktop apps).
-3. **Dictate.** Hold the activation key (**Right-Shift** by default), speak,
-   release - the text lands in the focused app. Change the key in the tray
-   settings window.
-
-**First run downloads the speech model.** The Whisper model (`small`, a few
-hundred MB) is fetched from HuggingFace the first time you dictate, so the
-first use needs internet and takes a moment. After that it runs fully offline.
-
-**CPU vs CUDA.** The bundled engine runs on **CPU** (int8) on any machine - the
-guaranteed baseline. An NVIDIA GPU is **not** used automatically in this build;
-CUDA acceleration is a manual upgrade (install the CUDA CTranslate2 runtime),
-not required and not bundled.
-
-**If something breaks.** The engine is windowed (no console), so it logs to
-`%USERPROFILE%\.config\voice-at\laris-engine.log`. Send that file when
-reporting a problem - it holds the startup output and any crash traceback.
-
----
-
 ## Unsigned builds
 
-VOXIS is **not code-signed or notarized** (that needs paid Apple/Windows
-developer certificates). The app is safe; the OS just cannot verify the
+VOXIS is **not code-signed or notarized** (that needs a paid Apple
+developer certificate). The app is safe; the OS just cannot verify the
 publisher. First launch:
 
 - **macOS**: Gatekeeper blocks it ("damaged" or "cannot be verified"). After
@@ -179,15 +138,12 @@ publisher. First launch:
   On macOS 15 (Sequoia) and newer, right-click > Open is no longer enough -
   use the `xattr` command, or go to System Settings > Privacy & Security >
   "Open Anyway".
-- **Windows**: SmartScreen shows "Windows protected your PC / unknown
-  publisher" - click "More info" > "Run anyway".
-- **Linux**: `.deb` / AppImage are unaffected.
 
 ---
 
 ## Uninstall / reset
 
-- Tray: delete `/Applications/VOXIS.app` (macOS) or uninstall the package.
+- Tray: delete `/Applications/VOXIS.app`.
 - Engines: remove the `.venv` folders and the `~/.local/bin/miris` symlink.
 - State and config: `~/.config/voice-at/`, `~/.miris/`, and any notes already
   written into your vault.

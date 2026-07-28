@@ -1,11 +1,11 @@
 # VOXIS Tray
 
-Cross-platform tray app (Tauri v2) for LARIS dictation and MIRIS meeting
-recording.
+macOS tray app (Tauri v2) for LARIS dictation and MIRIS meeting recording.
 
-Windows release installers bundle a frozen LARIS push-to-talk engine, so they
-need no system Python. The `small` Whisper model downloads on first use. CPU
-int8 is included; CUDA is a manual upgrade. MIRIS remains macOS-only.
+It spawns the LARIS daemon at startup and stops it on "Sair". Dictation has no
+on/off switch: `cmd_r` is the control, so the menu shows the daemon's state
+("Carregando modelo..." while the model loads, then "Ditado ativo") instead of
+a toggle that would reload the model on every flip.
 
 ## Dev
 
@@ -28,6 +28,5 @@ Signing/notarization is documented as out of scope for v1.
 | ~/.config/voice-at/peers.json | laris | overlay URL + token (read-only for the tray) |
 | ~/.miris/config.toml | user/tray | vault, categories, llm_command (comments preserved) |
 
-On macOS, the tray uses the local LARIS and MIRIS installations in this
-repository. On Windows, it starts the bundled LARIS engine. The tray disables
-controls for any engine that is unavailable.
+The tray uses the LARIS and MIRIS installations in this repository, and
+disables controls for any engine that is unavailable.
