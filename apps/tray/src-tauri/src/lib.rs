@@ -58,6 +58,10 @@ fn dictation_status_label(alive: bool, ready: bool) -> &'static str {
     }
 }
 
+fn hands_free_enabled(alive: bool, ready: bool) -> bool {
+    alive && ready
+}
+
 fn peers_path() -> PathBuf {
     settings::config_dir().join("peers.json")
 }
@@ -122,10 +126,21 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
     };
     let last_note =
         MenuItem::with_id(app, "last_note", "Última nota", snap.has_last_note, None::<&str>)?;
-    let dictation =
-        CheckMenuItem::with_id(app, "dictation", "Ditado", true, snap.laris_alive, None::<&str>)?;
+    // status, not a switch: dictation is always on and cmd_r is the control.
+    // Own id, not "noop" - the meeting item already uses that one while
+    // processing, and two items sharing an id in one menu is asking for a
+    // handler to fire on the wrong row.
+    let dictation = MenuItem::with_id(
+        app,
+        "dictation_status",
+        dictation_status_label(snap.laris_alive, snap.laris_ready),
+        false, // disabled: nothing to click
+        None::<&str>,
+    )?;
     let hands_free = CheckMenuItem::with_id(
-        app, "hands_free", "Hands-free", snap.laris_alive, snap.hands_free, None::<&str>,
+        app, "hands_free", "Hands-free",
+        hands_free_enabled(snap.laris_alive, snap.laris_ready),
+        snap.hands_free, None::<&str>,
     )?;
 
     let (cur_arch, cur_pal, cur_pos) = snap.theme.clone().unwrap_or_default();
@@ -148,8 +163,11 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
         )?));
     }
     let refs: Vec<&dyn IsMenuItem<Wry>> = theme_children.iter().map(|b| b.as_ref()).collect();
-    let theme_menu =
-        Submenu::with_id_and_items(app, "theme", "Tema do orb", snap.laris_alive, &refs)?;
+    let theme_menu = Submenu::with_id_and_items(
+        app, "theme", "Tema do orb",
+        hands_free_enabled(snap.laris_alive, snap.laris_ready),
+        &refs,
+    )?;
 
     let settings_item =
         MenuItem::with_id(app, "settings", "Configurações...", true, None::<&str>)?;
@@ -278,28 +296,6 @@ fn handle_menu(app: &AppHandle, id: &str) {
             if let Some(note) = miris::last_note(&sessions_dir(&state)) {
                 let _ = tauri_plugin_opener::open_path(note, None::<&str>);
             }
-        }
-        "dictation" => {
-            // off the menu thread: stop() blocks up to 3s and alive() up to
-            // 300ms - holding the daemon mutex here would freeze the tray
-            let app2 = app.clone();
-            std::thread::spawn(move || {
-                let state = app2.state::<AppState>();
-                let mut daemon = state.daemon.lock().unwrap();
-                if daemon.owns_running() {
-                    daemon.stop();
-                } else {
-                    let external = laris::read_peer(&peers_path())
-                        .map(|p| laris::alive(&p.url))
-                        .unwrap_or(false);
-                    if external {
-                        // the tray never kills a daemon it didn't start
-                        notify(&app2, "Ditado foi iniciado fora do VOXIS - encerre-o por lá");
-                    } else if let Err(e) = daemon.spawn() {
-                        notify(&app2, &format!("Falha ao iniciar ditado: {e}"));
-                    }
-                }
-            });
         }
         "hands_free" => {
             let app2 = app.clone();
@@ -516,5 +512,14 @@ mod tests {
         assert_eq!(dictation_status_label(false, false), "Ditado indisponível");
         // a dead daemon is never ready, whatever a stale payload claims
         assert_eq!(dictation_status_label(false, true), "Ditado indisponível");
+    }
+
+    #[test]
+    fn hands_free_is_only_offered_once_the_model_is_loaded() {
+        // toggling hands-free against a daemon that has not finished warming
+        // silently does nothing, which is the failure mode being removed
+        assert!(!hands_free_enabled(true, false));
+        assert!(hands_free_enabled(true, true));
+        assert!(!hands_free_enabled(false, true));
     }
 }
