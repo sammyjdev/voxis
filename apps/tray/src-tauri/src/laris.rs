@@ -66,7 +66,6 @@ pub fn set_theme(
 pub struct LarisDaemon {
     child: Option<Child>,
     laris_dir: PathBuf,
-    engine_bin: Option<PathBuf>, // frozen engine (Windows); None = dev venv python
     log_path: Option<PathBuf>,   // where the daemon's stdout/stderr are captured
 }
 
@@ -79,21 +78,7 @@ impl LarisDaemon {
         Self {
             child: None,
             laris_dir,
-            engine_bin: None,
             log_path,
-        }
-    }
-
-    /// Run a self-contained frozen engine binary (Windows packaged build). The
-    /// frozen exe is windowed (no console), so its stdout/stderr - including
-    /// Python tracebacks and native-lib errors - are redirected to log_path,
-    /// the only diagnostics a remote tester's crash leaves behind.
-    pub fn with_engine(engine_bin: PathBuf, log_path: PathBuf) -> Self {
-        Self {
-            child: None,
-            laris_dir: engine_bin.parent().map(Path::to_path_buf).unwrap_or_default(),
-            engine_bin: Some(engine_bin),
-            log_path: Some(log_path),
         }
     }
 
@@ -111,26 +96,16 @@ impl LarisDaemon {
         if self.owns_running() {
             return Ok(()); // don't orphan a live child by overwriting its handle
         }
-        let child = match &self.engine_bin {
-            Some(bin) => {
-                let mut cmd = Command::new(bin);
-                cmd.current_dir(&self.laris_dir);
-                self.redirect_log(&mut cmd);
-                cmd.spawn()
-                    .map_err(|e| format!("{}: {e}", bin.display()))?
-            }
-            None => {
-                let python = self.laris_dir.join(".venv/bin/python");
-                let mut cmd = Command::new(&python);
-                // -u: stdout goes to a file below, and Python block-buffers a
-                // non-tty stdout - the [Voice] prints would sit in the buffer
-                // instead of reaching the log this exists to produce.
-                cmd.args(["-u", "-m", "laris"]).current_dir(&self.laris_dir);
-                self.redirect_log(&mut cmd);
-                cmd.spawn()
-                    .map_err(|e| format!("{}: {e}", python.display()))?
-            }
-        };
+        let python = self.laris_dir.join(".venv/bin/python");
+        let mut cmd = Command::new(&python);
+        // -u: stdout goes to a file below, and Python block-buffers a
+        // non-tty stdout - the [Voice] prints would sit in the buffer
+        // instead of reaching the log this exists to produce.
+        cmd.args(["-u", "-m", "laris"]).current_dir(&self.laris_dir);
+        self.redirect_log(&mut cmd);
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("{}: {e}", python.display()))?;
         self.child = Some(child);
         Ok(())
     }
@@ -274,41 +249,6 @@ mod tests {
             argv.contains("-u"),
             "venv daemon must run python unbuffered, got: {argv:?}"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn daemon_spawns_explicit_engine_binary() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let engine = tmp.path().join("laris-engine");
-        fs::write(&engine, "#!/bin/sh\necho booted\nsleep 60\n").unwrap();
-        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-        let log = tmp.path().join("laris-engine.log");
-
-        // when given an explicit engine binary, the daemon runs it directly
-        // instead of `.venv/bin/python -m laris`, capturing its output to the log
-        let mut daemon = LarisDaemon::with_engine(engine, log.clone());
-        assert!(!daemon.owns_running());
-        daemon.spawn().unwrap();
-        assert!(daemon.owns_running());
-
-        // the engine's stdout is redirected to the log (poll: the echo races the read)
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let mut captured = false;
-        while std::time::Instant::now() < deadline {
-            if fs::read_to_string(&log).map(|s| s.contains("booted")).unwrap_or(false) {
-                captured = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(captured, "engine stdout was not captured to the log file");
-
-        daemon.stop();
-        assert!(!daemon.owns_running());
     }
 
     #[test]
