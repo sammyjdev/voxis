@@ -51,6 +51,13 @@ class Transcriber:
     def transcribe(self, audio: np.ndarray, sample_rate: int = config.SAMPLE_RATE) -> str:
         if len(audio) == 0:
             return ""
+        # omitted entirely when unset: an empty initial_prompt still primes the
+        # decoder and can leak into the transcript
+        extra = (
+            {"initial_prompt": config.INITIAL_PROMPT}
+            if config.INITIAL_PROMPT
+            else {}
+        )
         result = self._mlx_whisper.transcribe(
             audio.astype(np.float32),
             path_or_hf_repo=self.model,
@@ -59,5 +66,6 @@ class Transcriber:
             word_timestamps=False,   # do NOT change: known memory leak with True
             fp16=True,
             condition_on_previous_text=False,
+            **extra,
         )
         return (result.get("text") or "").strip()

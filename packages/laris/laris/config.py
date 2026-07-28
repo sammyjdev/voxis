@@ -42,6 +42,11 @@ STT_MODEL_FASTER: str = _setting("STT_MODEL_FASTER", "small")
 # bilingual meetings); laris dictation keeps the pt-BR lock by default
 STT_LANGUAGE: str = os.environ.get("STT_LANGUAGE", "pt")
 
+# Primes Whisper's decoder with domain vocabulary. Dictated prompts are short,
+# and an ICAART 2026 pt-BR study measured 3-4x higher WER on 1-5 word sentences
+# than on 11+ word ones - the cause is missing context. Empty = not sent.
+INITIAL_PROMPT: str = _setting("INITIAL_PROMPT", "")
+
 ORB_THEME_PATH: str = os.environ.get(
     "ORB_THEME_PATH", "~/.config/voice-at/orb-theme.json"
 )
