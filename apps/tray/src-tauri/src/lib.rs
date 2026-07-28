@@ -393,6 +393,18 @@ pub fn run() {
                 menu_dirty: AtomicBool::new(false),
             });
 
+            // The model costs ~3.6s and 276MB to load. Loading it once per
+            // session beats reloading it per toggle; "Sair" is what releases it.
+            {
+                let state = app.state::<AppState>();
+                let mut daemon = state.daemon.lock().unwrap();
+                if let Err(e) = daemon.spawn() {
+                    // a bad laris_dir would otherwise fail silently at boot -
+                    // the old code path surfaced this from the menu handler
+                    notify(app.handle(), &format!("Falha ao iniciar ditado: {e}"));
+                }
+            }
+
             let snap = take_snapshot(&app.state::<AppState>());
             let menu = build_menu(app.handle(), &snap)?;
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-idle.png"))?;
