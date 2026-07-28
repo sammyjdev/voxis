@@ -20,12 +20,20 @@ def test_overlay_route_serves_html():
 
 
 def test_ws_voice_rejects_missing_token():
+    """A missing token is refused during the handshake, not after it. The old
+    behaviour accepted the socket and sent an error frame, which the client
+    read as a successful connection."""
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+
     from laris.server import build_app
 
     app = build_app(token="test-token")
-    with TestClient(app).websocket_connect("/ws/voice") as ws:
-        data = ws.receive_json()
-        assert "error" in data
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with TestClient(app).websocket_connect("/ws/voice"):
+            pass
+
+    assert exc.value.code == 1008
 
 
 def test_ws_voice_streams_queued_events():
@@ -63,3 +71,23 @@ def test_theme_defaults_ready_to_true_when_unset():
     client = TestClient(build_app(token="t"))
 
     assert client.get("/theme?token=t").json()["ready"] is True
+
+
+def test_ws_rejects_a_bad_token_without_accepting_it():
+    """Accepting first and closing after still fires onopen on the client, which
+    reads it as a good connection and resets its reconnect backoff - a stale
+    token then reconnects in a tight loop. Reject before the handshake so the
+    client sees a failure and backs off. 1008 = policy violation."""
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+    import pytest
+
+    from laris.server import build_app
+
+    client = TestClient(build_app(token="good"))
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect("/ws/voice?token=wrong"):
+            pass
+
+    assert exc.value.code == 1008
