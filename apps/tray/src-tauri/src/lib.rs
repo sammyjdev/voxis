@@ -1,7 +1,6 @@
 mod commands;
 mod laris;
 mod miris;
-mod overlay;
 mod settings;
 
 use std::path::PathBuf;
@@ -374,34 +373,10 @@ pub fn run() {
             ensure_mic_access();
 
             let config = settings::load_tray_config();
-            let daemon = {
-                #[cfg(windows)]
-                {
-                    let engine = app
-                        .path()
-                        .resource_dir()
-                        .ok()
-                        .map(|r| r.join("engine").join("laris-engine.exe"))
-                        .filter(|p| p.exists());
-                    match engine {
-                        Some(bin) => laris::LarisDaemon::with_engine(
-                            bin,
-                            settings::config_dir().join("laris-engine.log"),
-                        ),
-                        None => laris::LarisDaemon::new(
-                            PathBuf::from(&config.laris_dir),
-                            Some(settings::config_dir().join("laris.log")),
-                        ),
-                    }
-                }
-                #[cfg(not(windows))]
-                {
-                    laris::LarisDaemon::new(
-                        PathBuf::from(&config.laris_dir),
-                        Some(settings::config_dir().join("laris.log")),
-                    )
-                }
-            };
+            let daemon = laris::LarisDaemon::new(
+                PathBuf::from(&config.laris_dir),
+                Some(settings::config_dir().join("laris.log")),
+            );
             app.manage(AppState {
                 config,
                 daemon: Mutex::new(daemon),
@@ -486,13 +461,6 @@ pub fn run() {
                             if recording_changed {
                                 set_tray_icon(&tray, current.recording.is_some());
                             }
-                        }
-                        if current.laris_alive {
-                            if let Some(peer) = laris::read_peer(&peers_path()) {
-                                let _ = overlay::open(&handle2, &overlay::overlay_url(&peer));
-                            }
-                        } else {
-                            overlay::close(&handle2);
                         }
                     });
                 }
