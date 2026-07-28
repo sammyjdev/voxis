@@ -254,3 +254,56 @@ def test_kiris_dispatch_skipped_when_offline_returns_false():
     assert phase == PHASE_IDLE
     # Utterance is typed as dictation (kiris offline -> fallback)
     typer.assert_called_once_with("kiris abre o axon")
+
+
+def test_run_signals_ready_only_after_push_to_talk_started(monkeypatch):
+    """The tray shows "Ditado ativo" off this signal. Firing it before
+    ptt.start() would reintroduce the exact lie this work removes: a menu
+    claiming dictation works while cmd_r does nothing."""
+    from laris import daemon
+
+    events = []
+
+    class _FakeBackend:
+        def warm(self):
+            events.append("warm")
+
+        def transcribe(self, audio, sample_rate):
+            return ""
+
+        def type_text(self, text):
+            pass
+
+        def make_overlay(self, url):
+            return MagicMock()
+
+        def make_ducker(self):
+            return MagicMock()
+
+    class _FakePtt:
+        def __init__(self, key):
+            self.pressed = MagicMock()
+            self.hands_free = MagicMock()
+
+        def start(self):
+            events.append("ptt.start")
+
+    class _StopTheLoop(Exception):
+        pass
+
+    def _stop(*_args, **_kwargs):
+        raise _StopTheLoop
+
+    monkeypatch.setattr("laris.platform.get_backend", lambda: _FakeBackend())
+    monkeypatch.setattr("laris.hotkey.PushToTalk", _FakePtt)
+    monkeypatch.setattr(daemon, "_wait_for_ptt", _stop)
+
+    try:
+        daemon.run(
+            make_voice_session=lambda: MagicMock(),
+            on_ready=lambda: events.append("ready"),
+        )
+    except _StopTheLoop:
+        pass
+
+    assert events == ["warm", "ptt.start", "ready"]

@@ -38,3 +38,28 @@ def test_ws_voice_streams_queued_events():
     with TestClient(app).websocket_connect("/ws/voice?token=test-token") as ws:
         data = ws.receive_json()
         assert data == {"phase": "recording", "amplitude": 0.5}
+
+
+def test_theme_reports_ready_false_until_the_daemon_says_otherwise():
+    from fastapi.testclient import TestClient
+    from laris.server import build_app
+
+    app = build_app(token="t")
+    app.state.ready = False
+    client = TestClient(app)
+
+    assert client.get("/theme?token=t").json()["ready"] is False
+
+    app.state.ready = True
+    assert client.get("/theme?token=t").json()["ready"] is True
+
+
+def test_theme_defaults_ready_to_true_when_unset():
+    """An older daemon never sets the flag; treating that as "not ready"
+    would leave the tray stuck on "Carregando modelo..." forever."""
+    from fastapi.testclient import TestClient
+    from laris.server import build_app
+
+    client = TestClient(build_app(token="t"))
+
+    assert client.get("/theme?token=t").json()["ready"] is True

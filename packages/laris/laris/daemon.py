@@ -126,6 +126,7 @@ def run(
     kiris_dispatch: Callable[[str], bool] | None = None,
     voice_queue=None,
     overlay_url: str = "",
+    on_ready: Callable[[], None] | None = None,
 ) -> None:
     """Runs the PTT voice loop on the calling thread - callers run this on a
     background daemon thread (see claude-code-ops's backend/main.py)."""
@@ -146,6 +147,11 @@ def run(
     ducker = backend.make_ducker()
     ptt = PushToTalk(config.DICTATE_KEY)
     ptt.start()
+    # only now is dictation real: the model is loaded and the key listener is
+    # attached. The tray polls this to stop claiming "Ditado" during the ~3.6s
+    # it takes to get here.
+    if on_ready is not None:
+        on_ready()
     vad = None
     kiris = "com Kiris (assistente)" if assistant else "pura (VOICE_ASSISTANT=0, muda)"
     print(f"[Voice] Laris (transcritora) pronta, {kiris} - PTT: {config.DICTATE_KEY}")
