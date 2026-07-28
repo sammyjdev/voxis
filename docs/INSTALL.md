@@ -124,6 +124,13 @@ the engines from `~/.config/voice-at/tray.json`; the defaults assume
 `~/code/voxis` and `~/.local/bin/miris`, so adjust that file if you cloned
 elsewhere.
 
+### Start VOXIS at login (macOS)
+
+System Settings > General > Login Items > "+" > `/Applications/VOXIS.app`.
+
+VOXIS loads the dictation model at startup (~3.6s, 276 MB resident), so with
+this enabled the model is ready before you ever press the dictation key.
+
 ---
 
 ## Windows: dictation

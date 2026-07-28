@@ -68,7 +68,10 @@ thing between here and a v0.1.0 release is a real Windows smoke test. See
 - [ ] **Code signing / notarization.** Builds are unsigned (macOS Gatekeeper,
       Windows SmartScreen); workarounds are documented in INSTALL.md. Real
       signing needs paid Apple/Windows developer certificates. Deferred.
-- [ ] **Tray autostart on login** (macOS/Windows). v1.1 nicety.
+- [ ] **Tray autostart on login** (macOS/Windows). v1.1 nicety. macOS users can
+      already do this via Login Items (documented in INSTALL.md); this item is
+      only about shipping it as an in-app toggle, which costs a
+      `tauri-plugin-autostart` dependency.
 
 ---
 
