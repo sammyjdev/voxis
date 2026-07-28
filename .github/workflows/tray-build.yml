@@ -11,11 +11,10 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [macos-latest, ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.platform }}
+    # macOS only: LARIS transcribes with mlx-whisper (Apple Silicon) and the
+    # tray drives macOS-specific TCC and menu-bar APIs. The Windows port has
+    # its own fork.
+    runs-on: macos-latest
     steps:
       # actions pinned by commit SHA (a moved tag can ship malicious code) -
       # comments track the human-readable version
@@ -35,13 +34,6 @@ jobs:
         with:
           workspaces: apps/tray/src-tauri
 
-      - name: Linux system deps (webkit + tray)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-
       - name: Install frontend deps
         working-directory: apps/tray
         run: npm install
@@ -50,32 +42,13 @@ jobs:
         working-directory: apps/tray/src-tauri
         run: cargo test
 
-      - name: Set up Python (Windows engine)
-        if: matrix.platform == 'windows-latest'
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5
-        with:
-          python-version: "3.11"
-
-      - name: Build frozen laris engine (Windows)
-        if: matrix.platform == 'windows-latest'
-        working-directory: packages/laris
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-windows.txt pyinstaller
-          pyinstaller packaging/laris.spec --noconfirm
-          # stage the onedir output where tauri.windows.conf.json expects it
-          New-Item -ItemType Directory -Force -Path ../../apps/tray/src-tauri/engine | Out-Null
-          Copy-Item -Recurse -Force dist/laris-engine/* ../../apps/tray/src-tauri/engine/
-        shell: pwsh
-
       # On tag pushes this drafts a GitHub release with the installers
-      # (.dmg / .msi / .deb / .AppImage); on manual dispatch it only builds.
+      # (.dmg); on manual dispatch it only builds.
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: apps/tray
-          args: ${{ matrix.platform == 'windows-latest' && '--config src-tauri/tauri.windows.conf.json' || '' }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('VOXIS {0}', github.ref_name) || '' }}
           releaseDraft: true
@@ -84,12 +57,8 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: voxis-tray-${{ matrix.platform }}
+          name: voxis-tray-macos
           path: |
             apps/tray/src-tauri/target/release/bundle/dmg/*.dmg
             apps/tray/src-tauri/target/release/bundle/macos/*.app/**
-            apps/tray/src-tauri/target/release/bundle/msi/*.msi
-            apps/tray/src-tauri/target/release/bundle/nsis/*.exe
-            apps/tray/src-tauri/target/release/bundle/deb/*.deb
-            apps/tray/src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: warn
