@@ -72,11 +72,14 @@ def build_app(token: str, voice_queue: "thread_queue.Queue[VoiceEvent] | None" =
 
     @app.websocket("/ws/voice")
     async def ws_voice(websocket: WebSocket, token: str | None = None):
-        await websocket.accept()
+        # reject BEFORE the handshake: accepting first still fires onopen on the
+        # client, which reads it as a good connection and resets its reconnect
+        # backoff, so a stale token reconnects in a tight loop. 1008 = policy
+        # violation.
         if not laris_auth.token_valid(token, websocket.app.state.token):
-            await websocket.send_json({"error": "invalid or missing session token"})
-            await websocket.close()
+            await websocket.close(code=1008, reason="invalid or missing session token")
             return
+        await websocket.accept()
 
         voice_queue = get_voice_event_queue(websocket.app)
         try:
