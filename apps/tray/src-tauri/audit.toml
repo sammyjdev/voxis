@@ -1,9 +1,10 @@
 # cargo-audit config. These are all `unmaintained`/`unsound` WARNINGS (not
 # vulnerabilities - `cargo audit` reports 0 of those). Every one is a GTK3 /
 # glib / proc-macro binding pulled in transitively by Tauri's Linux webview
-# backend (webkit2gtk); none compile on macOS/Windows, and the code paths are
-# never hit by this app. They clear when Tauri migrates its Linux backend off
-# gtk-rs 0.18. Reviewed 2026-07-17; revisit when Tauri bumps its webview deps.
+# backend (webkit2gtk). VOXIS is macOS only, so none of them compile here and
+# none of their code paths run - but they stay in Cargo.lock, so cargo-audit
+# still reports them. They clear when Tauri migrates its Linux backend off
+# gtk-rs 0.18. Reviewed 2026-07-28; revisit when Tauri bumps its webview deps.
 [advisories]
 ignore = [
     "RUSTSEC-2024-0370", # proc-macro-error unmaintained (transitive)
