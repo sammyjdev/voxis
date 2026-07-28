@@ -74,12 +74,16 @@ time, where nobody is dictating.
 in the 2 s poll it already runs (it already reads `ptt_trusted` from the same
 payload) and shows "Carregando modelo..." instead of "Ditado".
 
-### A failed load must not become limbo
+### warm() stays on the main path
 
-Moving `warm()` off the main path means an exception there would die silently
-and leave the menu on "Carregando modelo..." forever - trading one lie for
-another. The load reports failure through `/theme`; the tray surfaces it and
-notifies.
+An earlier round of this design moved `warm()` to a thread so push-to-talk could
+answer during the load, and then needed failure plumbing so a crashed thread
+would not strand the menu on "Carregando modelo..." forever.
+
+Both were consequences of the orb `loading` state, which is cut (below). With
+nothing needing to respond mid-load, `warm()` stays blocking: `ready` flips
+after it, and a load failure kills the process exactly as it does today - the
+tray sees the daemon go away and says so. No thread, no limbo, no plumbing.
 
 ### The orb "loading" state is cut
 
@@ -130,8 +134,8 @@ HuggingFace) is the instrument - it needs no recording effort.
 1. Remove the dictation toggle; `cmd_r` is the only control
 2. Daemon persists: `spawn()` in `setup()`, `stop()` only on "Sair"
 3. VOXIS at login via macOS Login Items (no code)
-4. `ready` in `/theme`; tray shows "Carregando modelo..."; load failure surfaces
-   as an error, never as permanent "loading"
+4. `ready` in `/theme`; tray shows "Carregando modelo..." until push-to-talk
+   is listening
 5. Model, language and denoise state in the boot log and in Settings
 6. `initial_prompt` behind a setting
 
@@ -143,8 +147,7 @@ as a product feature.
 | Behaviour | Seam |
 |-----------|------|
 | `ready` is false until `ptt.start()` has run | laris daemon |
-| a failing model load surfaces an error instead of staying "loading" | laris daemon |
-| `/theme` carries `ready` and the error field | laris server |
+| `/theme` carries `ready`, defaulting true when absent | laris server |
 | the tray renders "Carregando modelo..." off `ready` | tray snapshot |
 | quitting still stops the daemon; closing a window does not | tray |
 | `initial_prompt` reaches `mlx_whisper.transcribe` when set | transcriber |
