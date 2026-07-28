@@ -1,84 +1,64 @@
 # VOXIS - Backlog
 
-Running list of open work, most actionable first. Last updated 2026-07-17.
+Running list of open work, most actionable first. Last updated 2026-07-28.
 
-Context: Phase 3 (Windows dictation) is code-complete and CI-green - a 174MB
-Windows installer with a frozen torch-free engine builds end-to-end. The only
-thing between here and a v0.1.0 release is a real Windows smoke test. See
-`docs/superpowers/specs/2026-07-17-windows-dictation-design.md` and the three
-`docs/superpowers/plans/2026-07-17-windows-dictation-p*.md` for the design.
+VOXIS is macOS on Apple Silicon only. The Windows port was split off to
+[Allyhgf/voxis-windows](https://github.com/Allyhgf/voxis-windows) on
+2026-07-28; its code, packaging, CI matrix and design docs were removed here.
+They remain in git history and in that fork.
 
 ---
 
-## P0 - Ship Windows dictation (the active thread)
+## P0 - Decide the relationship with the Windows fork
 
-- [ ] **Windows smoke test.** Install the built installer on a real Windows
-      machine (a friend, or SammyJrDesktop over Tailscale/RDP), grant the mic
-      under Settings > Privacy > Microphone, hold Right-Shift, speak, confirm
-      the text lands in Notepad and the orb appears/reacts.
-      - Installer: CI run artifact `voxis-tray-windows-latest`
-        (`gh run download <run-id> --repo sammyjdev/voxis -n voxis-tray-windows-latest`),
-        or a local copy at `~/Downloads/voxis-v0.1.0-win/nsis/VOXIS_0.1.0_x64-setup.exe`.
-      - Risk: the engine *builds* but has never *run* - PyInstaller can produce
-        a binary that crashes at launch on a missing runtime hidden-import.
-- [ ] **If the smoke fails:** read `%USERPROFILE%\.config\voice-at\laris-engine.log`
-      (the tray redirects the windowed engine's stdout/stderr there), fix the
-      PyInstaller hidden-import / DLL gap in `packages/laris/packaging/laris.spec`,
-      re-dispatch `tray-build.yml`, re-test.
-- [ ] **On a green smoke:** tag `v0.1.0` (`git tag v0.1.0 && git push origin v0.1.0`)
-      to draft the public GitHub release with all installers - then friends
-      download the `.exe` directly (repo is public now, no account needed).
+- [ ] **Triage the fork's 44 commits.** The fork diverged with work that is not
+      all Windows-specific. At least two look worth porting back to macOS:
+      - `d75b04d` "Make the orb actually recover from a daemon restart"
+      - `4c051b7` "Make the tray 'Hands-free' toggle actually do something at boot"
 
-## P1 - macOS UX gap (found 2026-07-17)
+      Add the remote (`git remote add ally https://github.com/Allyhgf/voxis-windows.git`),
+      read the diff, cherry-pick what applies.
+- [ ] **Settle versioning after that.** Both repos currently declare `0.1.0`.
+      The fork already tagged `v0.1.0-alpha` and `v0.2.0` on its own line, and
+      those tags were never pushed here. Pick a scheme that does not read as a
+      regression before tagging anything.
 
-- [x] **Surface the Accessibility permission requirement.** (done 2026-07-25)
-      `PushToTalk.check_trusted()` now probes a listen-only `CGEventTap`
-      (catches BOTH Accessibility and Input Monitoring - `AXIsProcessTrusted`
-      alone gave false positives), laris caches it at boot into
-      `app.state.ptt_trusted`, `/theme` carries it, and the tray notifies once
-      on the edge into "daemon up but untrusted" (`should_warn_untrusted`).
+## P1 - macOS UX gaps
+
 - [ ] **INSTALL.md:** document that the **tray path** needs VOXIS.app in
-      Accessibility + Input Monitoring (the doc currently only covers the
-      source-install path, section 1).
+      Accessibility + Input Monitoring. The doc currently only covers the
+      source-install path (section 1).
+- [ ] **Finish the tray smoke matrix:** meeting stop -> note written,
+      hands-free, theme switching, and "Sair" tearing down the daemon.
+- [ ] **Confirm "Sair" reaps the daemon.** An orphaned laris daemon (PPID=1,
+      holding `:8421`) was seen after the tray exited. This matters more now
+      that the daemon is spawned at startup and lives for the whole session:
+      `LarisDaemon::stop` must actually reap the child, and a stale daemon must
+      not block a fresh tray from spawning.
 
-## P1 - Tray lifecycle / remaining macOS smoke
+## P2 - Deferred by design
 
-- [ ] **Confirm "Sair" kills the spawned daemon.** An orphaned laris daemon
-      (PPID=1, holding `:8421`) was seen after the tray exited. Verify the
-      tray's quit path (`LarisDaemon::stop`) actually reaps the child, and that
-      a stale daemon does not block a fresh tray from spawning (port conflict).
-- [ ] **Finish the macOS tray smoke matrix:** stop -> note written, dictation /
-      hands-free / theme switching, "Sair" tears down the daemon.
-
-## P2 - Deferred by design (open a phase when needed)
-
-- [ ] **CUDA acceleration (Windows).** v1 ships CPU int8 only; CUDA is a
-      documented manual upgrade. The spec's original opportunistic
-      CUDA-runtime-swap was deferred as too fragile to build without Windows
-      hardware to test. Revisit if CPU latency is a real complaint.
-- [ ] **Linux dictation (Phase 4).** Not built. Needs a `LinuxBackend`
-      (largely reusable from `WindowsBackend`), engine packaging on the Linux
-      runner (`tauri.linux.conf.json` overlay, same pattern as Windows), and a
-      Linux orb window. **Real blocker:** input injection - pynput global
-      hotkey + synthetic Ctrl+V work on **X11** but are restricted on
-      **Wayland** (the modern default). X11 is tractable; Wayland needs heavy
-      work. Only start with a concrete Linux tester (ask X11 vs Wayland first).
-- [ ] **MIRIS meetings on Windows.** Dictation-only today; meetings need WASAPI
-      loopback capture. A phase of its own after Windows dictation lands.
-- [ ] **Code signing / notarization.** Builds are unsigned (macOS Gatekeeper,
-      Windows SmartScreen); workarounds are documented in INSTALL.md. Real
-      signing needs paid Apple/Windows developer certificates. Deferred.
-- [ ] **Tray autostart on login** (macOS/Windows). v1.1 nicety. macOS users can
-      already do this via Login Items (documented in INSTALL.md); this item is
-      only about shipping it as an in-app toggle, which costs a
-      `tauri-plugin-autostart` dependency.
+- [ ] **Code signing / notarization.** Builds are unsigned, so Gatekeeper needs
+      a one-time `xattr -cr` (documented in INSTALL.md). Real signing needs a
+      paid Apple developer certificate.
+- [ ] **Tray autostart on login.** macOS users can already do this via Login
+      Items (documented in INSTALL.md); this item is only about shipping it as
+      an in-app toggle, which costs a `tauri-plugin-autostart` dependency.
+- [ ] **A WER harness, if transcription quality ever becomes a complaint.**
+      Nothing measures it today. CORAA ASR v1.1 (290 h of pt-BR, dev split on
+      HuggingFace) needs no recording effort and would settle questions like
+      "is `initial_prompt` helping?" or "is DeepFilterNet worth its 17% of
+      per-utterance latency?" with data instead of impressions. See
+      `docs/superpowers/specs/2026-07-27-laris-estado-inicial-design.md`.
 
 ---
 
 ## Done recently (for context)
 
-- Phase 3 Windows dictation: platform abstraction, faster-whisper backend,
-  clipboard/Ctrl+V, Tauri orb window, PyInstaller packaging, CI installer -
-  all merged, CI green (run 29607463362).
-- Windows engine logging to `laris-engine.log` (crash diagnostics for testers).
+- Honest startup state: the tray reads a `ready` flag instead of port
+  liveness, the dictation toggle is gone (`cmd_r` is the control), and the
+  daemon persists for the session instead of reloading the model per toggle.
+- PortAudio now recovers from a USB replug instead of holding a dead device.
+- The daemon runs unbuffered, so `laris.log` actually captures `[Voice]` lines.
+- Closing the settings window no longer quits the tray.
 - Repo made public + MIT license added.
