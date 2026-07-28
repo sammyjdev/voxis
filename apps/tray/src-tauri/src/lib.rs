@@ -36,6 +36,7 @@ struct Snapshot {
     processing: bool,
     laris_alive: bool,
     ptt_trusted: bool, // false = daemon up but macOS denies keyboard monitoring
+    laris_ready: bool, // false = daemon up, model still loading
     hands_free: bool,
     has_last_note: bool,
     theme: Option<(String, String, String)>, // (archetype, palette, position)
@@ -45,6 +46,16 @@ struct Snapshot {
 // INTO the bad state, so the tray nags on transition, not every poll tick.
 fn should_warn_untrusted(last: &Snapshot, current: &Snapshot) -> bool {
     current.laris_alive && !current.ptt_trusted && (!last.laris_alive || last.ptt_trusted)
+}
+
+/// Liveness is not readiness: uvicorn answers on :8421 seconds before the
+/// model is loaded and the key listener attached.
+fn dictation_status_label(alive: bool, ready: bool) -> &'static str {
+    match (alive, ready) {
+        (false, _) => "Ditado indisponível",
+        (true, false) => "Carregando modelo...",
+        (true, true) => "Ditado ativo",
+    }
 }
 
 fn peers_path() -> PathBuf {
@@ -74,6 +85,10 @@ fn take_snapshot(state: &AppState) -> Snapshot {
         .as_ref()
         .and_then(|b| b.get("ptt_trusted")?.as_bool())
         .unwrap_or(true);
+    let laris_ready = theme_body
+        .as_ref()
+        .and_then(|b| b.get("ready")?.as_bool())
+        .unwrap_or(true);
     let theme = theme_body.and_then(|body| {
         let t = body.get("theme")?;
         Some((
@@ -90,6 +105,7 @@ fn take_snapshot(state: &AppState) -> Snapshot {
         processing: state.processing.load(Ordering::SeqCst),
         laris_alive,
         ptt_trusted,
+        laris_ready,
         hands_free,
         has_last_note: miris::last_note(&sessions).is_some(),
         theme,
@@ -489,5 +505,16 @@ mod tests {
         assert!(!should_warn_untrusted(&snap(false, true), &snap(true, true)));
         // daemon down
         assert!(!should_warn_untrusted(&snap(true, false), &snap(false, true)));
+    }
+
+    #[test]
+    fn dictation_label_distinguishes_loading_from_ready() {
+        // The whole point of this work: "Ditado" must not appear while the model
+        // is still loading, because cmd_r does nothing during that window.
+        assert_eq!(dictation_status_label(true, true), "Ditado ativo");
+        assert_eq!(dictation_status_label(true, false), "Carregando modelo...");
+        assert_eq!(dictation_status_label(false, false), "Ditado indisponível");
+        // a dead daemon is never ready, whatever a stale payload claims
+        assert_eq!(dictation_status_label(false, true), "Ditado indisponível");
     }
 }
