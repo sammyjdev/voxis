@@ -63,6 +63,9 @@ def main() -> None:
     # over /theme to warn when push-to-talk lacks Accessibility/Input Monitoring
     from laris.hotkey import PushToTalk
     app.state.ptt_trusted = PushToTalk.check_trusted()
+    # uvicorn binds the port before the model loads, so /theme answers long
+    # before dictation works. Start explicitly not-ready.
+    app.state.ready = False
     threading.Thread(
         # access_log=False: the token rides in the query string, and the
         # default access log would write it to the daemon's stdout/log
@@ -107,6 +110,7 @@ def main() -> None:
         kiris_dispatch=kiris_client.ask if kiris_online else None,
         voice_queue=voice_queue,
         overlay_url=f"http://127.0.0.1:{LARIS_PORT}/overlay?token={laris_token}",
+        on_ready=lambda: setattr(app.state, "ready", True),
     )
 
 

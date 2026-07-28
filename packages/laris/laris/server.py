@@ -55,6 +55,9 @@ def build_app(token: str, voice_queue: "thread_queue.Queue[VoiceEvent] | None" =
             "theme": orb_theme.load_theme(),
             "palettes": orb_theme.PALETTES,
             "ptt_trusted": getattr(app.state, "ptt_trusted", True),
+            # False while the model loads. Same default-permissive rule as
+            # ptt_trusted: an old daemon that never sets it reads as ready.
+            "ready": getattr(app.state, "ready", True),
         }
 
     @app.post("/theme")
