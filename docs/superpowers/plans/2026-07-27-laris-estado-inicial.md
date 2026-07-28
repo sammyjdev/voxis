@@ -402,15 +402,20 @@ In `build_menu`, replace the `dictation` binding:
 
 ```rust
     // status, not a switch: dictation is always on and cmd_r is the control.
-    // id "noop" is already the menu's inert id (see the processing branch).
+    // Own id, not "noop" - the meeting item already uses that one while
+    // processing, and two items sharing an id in one menu is asking for a
+    // handler to fire on the wrong row.
     let dictation = MenuItem::with_id(
         app,
-        "noop",
+        "dictation_status",
         dictation_status_label(snap.laris_alive, snap.laris_ready),
-        false,
+        false, // disabled: nothing to click
         None::<&str>,
     )?;
 ```
+
+`handle_menu` needs no arm for `dictation_status` - the item is disabled, so
+it never emits an event. Do not add one.
 
 Change the `hands_free` binding's enabled argument from `snap.laris_alive` to
 the helper:
