@@ -100,6 +100,12 @@ def main() -> None:
         f"kiris={'on' if kiris_online else 'off'}, "
         f"PTT: {config.DICTATE_KEY}"
     )
+    # answering "which model is running?" should not require reading config.py
+    print(
+        f"[Laris] STT: {config.STT_MODEL} "
+        f"(lang={config.STT_LANGUAGE or 'auto'}, "
+        f"denoise={config.NOISE_REDUCTION})"
+    )
 
     from laris import daemon
 
