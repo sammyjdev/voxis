@@ -153,8 +153,18 @@ def run(
     if on_ready is not None:
         on_ready()
     vad = None
+    # ASSISTANT_MODE=always_on is the tray's "Hands-free" checkbox. Arm the
+    # in-loop flag rather than calling run_always_on(): that path builds
+    # VadCapture() eagerly, and a missing silero-vad would SystemExit the whole
+    # daemon at boot - plain dictation included. Armed here it degrades to PTT
+    # through the loop's VAD-unavailable guard instead.
+    if config.MODE == "always_on":
+        ptt.hands_free.set()
     kiris = "com Kiris (assistente)" if assistant else "pura (VOICE_ASSISTANT=0, muda)"
-    print(f"[Voice] Laris (transcritora) pronta, {kiris} - PTT: {config.DICTATE_KEY}")
+    print(
+        f"[Voice] Laris (transcritora) pronta, {kiris} - "
+        f"PTT: {config.DICTATE_KEY}, modo: {config.MODE}"
+    )
 
     def _reset_orb_if_stale():
         if voice_session.expire_if_stale():

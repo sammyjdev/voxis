@@ -307,3 +307,72 @@ def test_run_signals_ready_only_after_push_to_talk_started(monkeypatch):
         pass
 
     assert events == ["warm", "ptt.start", "ready"]
+
+
+class _StopLoop(Exception):
+    """Breaks out of run()'s infinite PTT loop once we've seen what we need."""
+
+
+def _run_with_fakes(monkeypatch, mode):
+    """Drive daemon.run() far enough to observe the loop's first iteration."""
+    import threading
+
+    import laris.config as config_mod
+    import laris.daemon as daemon_mod
+    import laris.hotkey as hotkey_mod
+    import laris.platform as platform_mod
+
+    class FakeBackend:
+        def warm(self):
+            pass
+
+        def transcribe(self, audio, sample_rate):
+            return ""
+
+        def type_text(self, text):
+            pass
+
+        def make_overlay(self, url):
+            return MagicMock()
+
+        def make_ducker(self):
+            return MagicMock()
+
+    class FakePTT:
+        def __init__(self, key):
+            self.pressed = threading.Event()
+            self.hands_free = threading.Event()
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(platform_mod, "get_backend", lambda: FakeBackend())
+    monkeypatch.setattr(hotkey_mod, "PushToTalk", FakePTT)
+    monkeypatch.setattr(config_mod, "MODE", mode)
+
+    seen = {}
+
+    def fake_wait(pressed, hands_free=None, on_tick=lambda: None):
+        # the flag must already be set the first time the loop asks for input
+        seen["armed_at_entry"] = hands_free.is_set()
+        raise _StopLoop
+
+    monkeypatch.setattr(daemon_mod, "_wait_for_ptt", fake_wait)
+
+    try:
+        daemon_mod.run(make_voice_session=lambda: MagicMock())
+    except _StopLoop:
+        pass
+    return seen
+
+
+def test_always_on_boots_into_hands_free(monkeypatch):
+    """ASSISTANT_MODE=always_on is the tray's "Hands-free" checkbox. It was
+    written to the settings file and read into config.MODE, and then nothing
+    consumed it - ticking the box did nothing at all."""
+    assert _run_with_fakes(monkeypatch, "always_on")["armed_at_entry"] is True
+
+
+def test_ptt_mode_does_not_arm_hands_free(monkeypatch):
+    """The default must still wait for a real key press, not a VAD session."""
+    assert _run_with_fakes(monkeypatch, "ptt")["armed_at_entry"] is False
