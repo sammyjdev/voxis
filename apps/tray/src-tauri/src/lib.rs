@@ -66,6 +66,22 @@ fn peers_path() -> PathBuf {
     settings::config_dir().join("peers.json")
 }
 
+/// True when a daemon we did not spawn is already answering on the peer url
+/// (e.g. `python -m laris` started by hand per docs/INSTALL.md). Spawning a
+/// second daemon on top of it fights over peers.json and the keyboard
+/// listener - the tray must defer instead.
+fn external_daemon_alive() -> bool {
+    laris::read_peer(&peers_path()).map(|p| laris::alive(&p.url)).unwrap_or(false)
+}
+
+/// Un-owned and unreachable is the only state worth recovering: an external
+/// daemon (alive=true) is not ours to manage, and an owned daemon is either
+/// alive or on its way up. Capped so a daemon that fails on every start
+/// (bad laris_dir, model download failing repeatedly) doesn't spin forever.
+fn should_respawn(owns: bool, alive: bool, attempts: u32, cap: u32) -> bool {
+    !owns && !alive && attempts < cap
+}
+
 fn sessions_dir(state: &AppState) -> PathBuf {
     PathBuf::from(&state.config.miris_home).join("sessions")
 }
@@ -398,7 +414,12 @@ pub fn run() {
             {
                 let state = app.state::<AppState>();
                 let mut daemon = state.daemon.lock().unwrap();
-                if let Err(e) = daemon.spawn() {
+                if external_daemon_alive() {
+                    // don't spawn on top of it: second process overwrites
+                    // peers.json with a token the first server rejects, and
+                    // still starts its own keyboard listener alongside it
+                    notify(app.handle(), "Ditado foi iniciado fora do VOXIS - encerre-o por lá");
+                } else if let Err(e) = daemon.spawn() {
                     // a bad laris_dir would otherwise fail silently at boot -
                     // the old code path surfaced this from the menu handler
                     notify(app.handle(), &format!("Falha ao iniciar ditado: {e}"));
@@ -422,11 +443,29 @@ pub fn run() {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut last = snap;
+                // process-lifetime cap, not per-tick: a daemon that fails on
+                // every start (bad install, model download broken) must stop
+                // retrying, not burn CPU/notifications until the app quits
+                let mut respawn_attempts: u32 = 0;
+                const RESPAWN_CAP: u32 = 3;
                 loop {
                     std::thread::sleep(Duration::from_secs(2));
                     let state = handle.state::<AppState>();
                     let dirty = state.menu_dirty.swap(false, Ordering::SeqCst);
                     let current = take_snapshot(&state);
+
+                    // recover from a dead tray-owned daemon (crash, OOM, a
+                    // model download that failed on first boot) - every other
+                    // restart path is gated on owns_running() and stays a
+                    // permanent no-op once the child has exited
+                    let owns = state.daemon.lock().unwrap().owns_running();
+                    if should_respawn(owns, current.laris_alive, respawn_attempts, RESPAWN_CAP) {
+                        respawn_attempts += 1;
+                        if let Err(e) = state.daemon.lock().unwrap().spawn() {
+                            notify(&handle, &format!("Falha ao reiniciar ditado: {e}"));
+                        }
+                    }
+
                     if current == last && !dirty {
                         continue;
                     }
@@ -533,5 +572,34 @@ mod tests {
         assert!(!hands_free_enabled(true, false));
         assert!(hands_free_enabled(true, true));
         assert!(!hands_free_enabled(false, true));
+    }
+
+    #[test]
+    fn respawns_a_dead_unowned_daemon_below_the_cap() {
+        // this is the recovery path itself: our child exited (crash, OOM,
+        // failed model download) and nothing else will bring it back
+        assert!(should_respawn(false, false, 0, 3));
+        assert!(should_respawn(false, false, 2, 3));
+    }
+
+    #[test]
+    fn stops_respawning_once_the_cap_is_reached() {
+        // a daemon that fails on every start must not spin forever
+        assert!(!should_respawn(false, false, 3, 3));
+        assert!(!should_respawn(false, false, 10, 3));
+    }
+
+    #[test]
+    fn never_respawns_over_a_reachable_external_daemon() {
+        // alive but not owned by us = someone else's process (docs/INSTALL.md
+        // standalone run) - not ours to manage, whatever the attempt count
+        assert!(!should_respawn(false, true, 0, 3));
+    }
+
+    #[test]
+    fn never_respawns_a_live_owned_daemon() {
+        assert!(!should_respawn(true, true, 0, 3));
+        // owned but not yet answering the TCP probe - still starting, not dead
+        assert!(!should_respawn(true, false, 0, 3));
     }
 }
