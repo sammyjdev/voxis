@@ -6,11 +6,12 @@ use tauri::{AppHandle, Manager};
 
 use crate::{laris, settings, AppState};
 
-const KNOWN_LARIS_KEYS: [&str; 4] = [
+const KNOWN_LARIS_KEYS: [&str; 5] = [
     "ASSISTANT_MODE",
     "DICTATE_KEY",
     "STT_MODEL",
     "NOISE_REDUCTION",
+    "INITIAL_PROMPT",
 ];
 
 // mirror of laris/hotkey.py _ALLOWED
@@ -28,6 +29,8 @@ fn valid_value(key: &str, value: &serde_json::Value) -> bool {
         "NOISE_REDUCTION" => matches!(s, "on" | "off"),
         "DICTATE_KEY" => DICTATE_KEYS.contains(&s),
         "STT_MODEL" => !s.trim().is_empty(),
+        // empty is meaningful: it is how the user disables priming
+        "INITIAL_PROMPT" => s.chars().count() <= 900,
         _ => false,
     }
 }
@@ -123,4 +126,18 @@ pub fn show_settings_window(app: &AppHandle) {
         .title("VOXIS - Configurações")
         .inner_size(560.0, 680.0)
         .build();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_prompt_is_an_accepted_setting() {
+        assert!(valid_value("INITIAL_PROMPT", &serde_json::json!("PortAudio, AXON")));
+        // empty is how the user turns it off, so it must round-trip
+        assert!(valid_value("INITIAL_PROMPT", &serde_json::json!("")));
+        assert!(!valid_value("INITIAL_PROMPT", &serde_json::json!(42)));
+        assert!(KNOWN_LARIS_KEYS.contains(&"INITIAL_PROMPT"));
+    }
 }

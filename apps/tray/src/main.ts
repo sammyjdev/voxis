@@ -61,6 +61,7 @@ async function load() {
   $<HTMLInputElement>("#stt-model").value =
     s.laris.STT_MODEL ?? "mlx-community/whisper-large-v3-turbo-q4";
   $<HTMLSelectElement>("#noise").value = s.laris.NOISE_REDUCTION ?? "on";
+  $<HTMLTextAreaElement>("#initial-prompt").value = s.laris.INITIAL_PROMPT ?? "";
 
   $<HTMLInputElement>("#vault-root").value = s.miris.vault_root ?? "~/vault";
   $<HTMLTextAreaElement>("#llm-command").value =
@@ -100,6 +101,7 @@ function bind() {
             : "ptt",
           STT_MODEL: $<HTMLInputElement>("#stt-model").value.trim(),
           NOISE_REDUCTION: $<HTMLSelectElement>("#noise").value,
+          INITIAL_PROMPT: $<HTMLTextAreaElement>("#initial-prompt").value.trim(),
         },
       });
       feedback("Ditado salvo.");

@@ -5,7 +5,10 @@ import json
 import os
 from pathlib import Path
 
-KNOWN_KEYS = ("ASSISTANT_MODE", "DICTATE_KEY", "STT_MODEL", "NOISE_REDUCTION")
+KNOWN_KEYS = (
+    "ASSISTANT_MODE", "DICTATE_KEY", "STT_MODEL", "NOISE_REDUCTION",
+    "INITIAL_PROMPT",
+)
 
 
 def settings_path() -> Path:
@@ -22,7 +25,7 @@ def load_settings() -> dict[str, str]:
         loaded = json.loads(settings_path().read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         # RecursionError: pathological nesting is "corrupt" too - the real
-        # file is always a flat dict of at most 4 str keys
+        # file is always a flat dict of at most 5 str keys
         return {}
     if not isinstance(loaded, dict):
         return {}
