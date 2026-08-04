@@ -48,6 +48,45 @@ def test_ws_voice_streams_queued_events():
         assert data == {"phase": "recording", "amplitude": 0.5}
 
 
+def test_a_closed_ws_does_not_eat_the_next_orb_event():
+    """The orb only listens, so sending is the sole thing that notices it left -
+    and while idle nothing is sent. A closed socket's handler outlived it, took
+    the next event off the shared queue and died on the send, so the event never
+    reached the reconnected orb. Needs a real server: TestClient cancels the
+    handler task on exit, which hides the leak entirely."""
+    import threading
+    import time
+
+    import uvicorn
+    from websockets.sync.client import connect
+
+    from laris.events import VoiceEvent
+    from laris.server import build_app, get_voice_event_queue
+
+    app = build_app(token="test-token")
+    queue = get_voice_event_queue(app)
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
+    )
+    threading.Thread(target=server.run, daemon=True).start()
+    try:
+        while not server.started:
+            time.sleep(0.05)
+        port = server.servers[0].sockets[0].getsockname()[1]
+
+        with connect(f"ws://127.0.0.1:{port}/ws/voice?token=test-token") as ws:
+            queue.put(VoiceEvent(phase="recording", amplitude=0.5))
+            ws.recv()
+        time.sleep(1.0)  # let the handler notice the disconnect, as it would in life
+
+        queue.put(VoiceEvent(phase="idle", amplitude=0.0))
+        time.sleep(1.5)  # > the handler's 0.5s queue poll
+
+        assert queue.qsize() == 1, "the closed socket's handler took the orb's next event"
+    finally:
+        server.should_exit = True
+
+
 def test_theme_reports_ready_false_until_the_daemon_says_otherwise():
     from fastapi.testclient import TestClient
     from laris.server import build_app

@@ -82,14 +82,23 @@ def build_app(token: str, voice_queue: "thread_queue.Queue[VoiceEvent] | None" =
         await websocket.accept()
 
         voice_queue = get_voice_event_queue(websocket.app)
+        # The orb only listens, so sending is the sole thing that ever notices
+        # it left - and while idle we never send. Without this the handler of a
+        # closed socket outlives it, takes the next event off the shared queue,
+        # and dies on the send: the reconnected orb never sees that event.
+        gone = asyncio.create_task(websocket.receive())
         try:
-            while True:
+            while not gone.done():
                 try:
                     event = await asyncio.to_thread(voice_queue.get, timeout=0.5)
                 except thread_queue.Empty:
                     continue
                 await websocket.send_json(asdict(event))
-        except WebSocketDisconnect:
-            return
+        except (WebSocketDisconnect, RuntimeError):
+            # RuntimeError: uvicorn raises it (not WebSocketDisconnect) when the
+            # send races a client that already closed.
+            pass
+        finally:
+            gone.cancel()
 
     return app

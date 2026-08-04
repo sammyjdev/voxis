@@ -115,14 +115,28 @@
       }, 100);
       return;
     }
-    const ws = new WebSocket(`ws://${window.location.host}/ws/voice?token=${encodeURIComponent(token)}`);
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.error) return;
-      targetEnergy = data.amplitude;
-      setPhase(data.phase);
-    };
-    ws.onclose = () => setPhase("idle");
+    // The orb process lives as long as the daemon (hours), so a single dropped
+    // socket used to leave it frozen in idle for the rest of the session: the
+    // panel still showed and hid over stdin, but no phase or amplitude ever
+    // arrived again. Backoff caps at 10s and only resets on a real open, so a
+    // stale token (refused before the handshake, no onopen) backs off instead
+    // of hammering.
+    let delay = 500;
+    (function open() {
+      const ws = new WebSocket(`ws://${window.location.host}/ws/voice?token=${encodeURIComponent(token)}`);
+      ws.onopen = () => { delay = 500; };
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.error) return;
+        targetEnergy = data.amplitude;
+        setPhase(data.phase);
+      };
+      ws.onclose = () => {
+        setPhase("idle");
+        setTimeout(open, delay);
+        delay = Math.min(delay * 2, 10000);
+      };
+    })();
   }
 
   fetchTheme().then(() => { if (!instance) mountTheme(); });
