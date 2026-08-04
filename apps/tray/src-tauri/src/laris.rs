@@ -119,6 +119,11 @@ impl LarisDaemon {
     /// inherit (a missing log must never stop the daemon from starting).
     fn redirect_log(&self, cmd: &mut Command) {
         if let Some(log) = &self.log_path {
+            // Keep one generation: the interesting run is the one that just
+            // died, and truncating on respawn destroyed the only record of it -
+            // twice during a live diagnosis. Best-effort, a failed rename must
+            // never stop the daemon from starting.
+            let _ = std::fs::rename(log, log.with_extension("log.1"));
             if let Ok(f) = std::fs::File::create(log) {
                 if let Ok(f2) = f.try_clone() {
                     cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
@@ -288,6 +293,53 @@ mod tests {
             out.contains(&format!("parent: {}", std::process::id())),
             "daemon must be told which pid to watch, got: {out:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawning_keeps_the_previous_run_as_one_generation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join(".venv/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let py = bin_dir.join("python");
+        let log = tmp.path().join("laris.log");
+
+        let write_script = |marker: &str| {
+            fs::write(&py, format!("#!/bin/sh\necho {marker}\nsleep 60\n")).unwrap();
+            fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let wait_for = |needle: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if fs::read_to_string(&log).map(|s| s.contains(needle)).unwrap_or(false) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+
+        let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), Some(log.clone()));
+        write_script("run-one");
+        daemon.spawn().unwrap();
+        assert!(wait_for("run-one"));
+        daemon.stop();
+
+        write_script("run-two");
+        daemon.spawn().unwrap();
+        assert!(wait_for("run-two"));
+        daemon.stop();
+
+        // the crash we are diagnosing is in the run that just died, and a
+        // respawn used to overwrite the only record of it
+        let previous = fs::read_to_string(tmp.path().join("laris.log.1")).unwrap_or_default();
+        assert!(
+            previous.contains("run-one"),
+            "previous run's log was lost on respawn, got: {previous:?}"
+        );
+        assert!(fs::read_to_string(&log).unwrap().contains("run-two"));
     }
 
     #[test]
