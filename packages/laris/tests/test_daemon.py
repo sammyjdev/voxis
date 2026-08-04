@@ -378,6 +378,69 @@ def test_ptt_mode_does_not_arm_hands_free(monkeypatch):
     assert _run_with_fakes(monkeypatch, "ptt")["armed_at_entry"] is False
 
 
+def test_missing_vad_degrades_hands_free_to_ptt(monkeypatch):
+    """always_on arms the in-loop flag instead of calling run_always_on()
+    precisely so a missing silero-vad degrades to PTT. VadCapture() raises
+    SystemExit when the package is absent and nothing caught it, so the whole
+    daemon died at the first hands-free session - plain dictation included."""
+    import threading
+
+    import laris.audio_capture as audio_mod
+    import laris.config as config_mod
+    import laris.daemon as daemon_mod
+    import laris.hotkey as hotkey_mod
+    import laris.platform as platform_mod
+
+    class FakeBackend:
+        def warm(self):
+            pass
+
+        def transcribe(self, audio, sample_rate):
+            return ""
+
+        def type_text(self, text):
+            pass
+
+        def make_overlay(self, url):
+            return MagicMock()
+
+        def make_ducker(self):
+            return MagicMock()
+
+    class FakePTT:
+        def __init__(self, key):
+            self.pressed = threading.Event()
+            self.hands_free = threading.Event()
+
+        def start(self):
+            pass
+
+    def no_silero_vad():
+        raise SystemExit("[Audio] silero-vad not installed: pip install silero-vad")
+
+    monkeypatch.setattr(platform_mod, "get_backend", lambda: FakeBackend())
+    monkeypatch.setattr(hotkey_mod, "PushToTalk", FakePTT)
+    monkeypatch.setattr(config_mod, "MODE", "always_on")
+    monkeypatch.setattr(audio_mod, "VadCapture", no_silero_vad)
+
+    armed = []
+
+    def fake_wait(pressed, hands_free=None, on_tick=lambda: None):
+        armed.append(hands_free.is_set())
+        if len(armed) > 1:
+            raise _StopLoop
+        return "hands_free", hands_free
+
+    monkeypatch.setattr(daemon_mod, "_wait_for_ptt", fake_wait)
+
+    try:
+        daemon_mod.run(make_voice_session=lambda: MagicMock())
+    except _StopLoop:
+        pass
+
+    assert armed == [True, False], "hands-free must disarm and fall back to PTT"
+
+
 def test_boot_refuses_to_start_beside_a_live_daemon(monkeypatch):
     """A second daemon can't bind :8421, but it still starts its own keyboard
     listener: one key press then records and types the utterance twice."""

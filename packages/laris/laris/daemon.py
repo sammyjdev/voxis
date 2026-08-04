@@ -174,8 +174,16 @@ def run(
         kind, pressed = _wait_for_ptt(ptt.pressed, hands_free=ptt.hands_free, on_tick=_reset_orb_if_stale)
         if kind == "hands_free":
             if vad is None:
-                from laris.audio_capture import VadCapture
-                vad = VadCapture()
+                from laris import audio_capture
+                try:
+                    vad = audio_capture.VadCapture()
+                except SystemExit as exc:
+                    # this is the VAD-unavailable guard the boot-time arming
+                    # above counts on: without silero-vad, disarm hands-free
+                    # and keep serving plain PTT instead of killing the daemon
+                    print(f"[Voice] {exc} - hands-free off, PTT still works")
+                    pressed.clear()
+                    continue
             _run_hands_free_session(vad, stt, type_text, overlay, voice_queue, pressed, ducker=ducker)
             continue
 
