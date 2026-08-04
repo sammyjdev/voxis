@@ -441,6 +441,78 @@ def test_missing_vad_degrades_hands_free_to_ptt(monkeypatch):
     assert armed == [True, False], "hands-free must disarm and fall back to PTT"
 
 
+def test_parent_watchdog_only_fires_for_a_tray_spawned_daemon(monkeypatch):
+    """A daemon started by hand in a terminal has no VOXIS_PARENT_PID and must
+    never be killed by this - the tray deliberately leaves external daemons
+    alone. A malformed value is ignored for the same reason."""
+    import os
+
+    from laris.daemon import _parent_gone
+
+    monkeypatch.delenv("VOXIS_PARENT_PID", raising=False)
+    assert _parent_gone() is False
+
+    monkeypatch.setenv("VOXIS_PARENT_PID", str(os.getppid()))
+    assert _parent_gone() is False
+
+    monkeypatch.setenv("VOXIS_PARENT_PID", "not-a-pid")
+    assert _parent_gone() is False
+
+    monkeypatch.setenv("VOXIS_PARENT_PID", str(os.getppid() + 1))
+    assert _parent_gone() is True
+
+
+def test_run_exits_when_the_tray_that_spawned_it_dies(monkeypatch):
+    """Force Quit, a crash or a logout never reaches the tray's "Sair" handler,
+    so nothing signalled the daemon: one was found still holding the model, the
+    mic and a keyboard listener six days after its tray had gone."""
+    import threading
+
+    import pytest
+
+    import laris.config as config_mod
+    import laris.daemon as daemon_mod
+    import laris.hotkey as hotkey_mod
+    import laris.platform as platform_mod
+
+    class FakeBackend:
+        def warm(self):
+            pass
+
+        def transcribe(self, audio, sample_rate):
+            return ""
+
+        def type_text(self, text):
+            pass
+
+        def make_overlay(self, url):
+            return MagicMock()
+
+        def make_ducker(self):
+            return MagicMock()
+
+    class FakePTT:
+        def __init__(self, key):
+            self.pressed = threading.Event()  # never pressed: only the tick runs
+            self.hands_free = threading.Event()
+
+        def start(self):
+            pass
+
+    def fake_wait(pressed, hands_free=None, on_tick=lambda: None):
+        on_tick()  # the watchdog rides the tick the idle loop already runs
+        raise _StopLoop  # reached only if the watchdog stayed silent
+
+    monkeypatch.setattr(platform_mod, "get_backend", lambda: FakeBackend())
+    monkeypatch.setattr(hotkey_mod, "PushToTalk", FakePTT)
+    monkeypatch.setattr(config_mod, "MODE", "ptt")
+    monkeypatch.setattr(daemon_mod, "_wait_for_ptt", fake_wait)
+    monkeypatch.setenv("VOXIS_PARENT_PID", "999999")  # a tray that is not our parent
+
+    with pytest.raises(SystemExit):
+        daemon_mod.run(make_voice_session=lambda: MagicMock())
+
+
 def test_boot_refuses_to_start_beside_a_live_daemon(monkeypatch):
     """A second daemon can't bind :8421, but it still starts its own keyboard
     listener: one key press then records and types the utterance twice."""

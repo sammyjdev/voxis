@@ -4,6 +4,7 @@ never imports tmux or session-registry code - see claude-code-ops's
 backend/main.py for the composition root that builds those factories."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -76,6 +77,24 @@ def _make_live_amplitude_pusher(voice_queue, now: Callable[[], float] = time.mon
         voice_queue.put(VoiceEvent(phase="recording", amplitude=compute_amplitude(chunk)))
 
     return push
+
+
+def _parent_gone() -> bool:
+    """True when the tray that spawned us has died.
+
+    Only the tray's "Sair" ever signalled the daemon, so a Force Quit, a crash
+    or a logout left a full daemon - model, mic, keyboard listener - running
+    with nothing able to stop it; one was found six days after its tray. The
+    tray passes its own pid in VOXIS_PARENT_PID, and losing it reparents us. A
+    daemon started by hand has no such variable and is never touched by this.
+    """
+    spawner = os.environ.get("VOXIS_PARENT_PID")
+    if not spawner:
+        return False
+    try:
+        return os.getppid() != int(spawner)
+    except ValueError:
+        return False  # malformed env is not a reason to kill dictation
 
 
 def _wait_for_ptt(pressed, hands_free=None, on_tick=lambda: None):
@@ -167,6 +186,8 @@ def run(
     )
 
     def _reset_orb_if_stale():
+        if _parent_gone():
+            raise SystemExit("[Laris] the tray that started this daemon is gone - exiting")
         if voice_session.expire_if_stale():
             voice_queue.put(VoiceEvent(phase=PHASE_IDLE, amplitude=0.0))
 

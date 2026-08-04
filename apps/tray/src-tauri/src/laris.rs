@@ -102,6 +102,11 @@ impl LarisDaemon {
         // non-tty stdout - the [Voice] prints would sit in the buffer
         // instead of reaching the log this exists to produce.
         cmd.args(["-u", "-m", "laris"]).current_dir(&self.laris_dir);
+        // Only "Sair" ever signalled the daemon, so a Force Quit, a crash or a
+        // logout left it running with no tray to stop it. The daemon watches
+        // this pid and exits when it goes; a daemon started by hand never sees
+        // the variable and keeps the hands-off treatment it has today.
+        cmd.env("VOXIS_PARENT_PID", std::process::id().to_string());
         self.redirect_log(&mut cmd);
         let child = cmd
             .spawn()
@@ -248,6 +253,40 @@ mod tests {
         assert!(
             argv.contains("-u"),
             "venv daemon must run python unbuffered, got: {argv:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_is_spawned_with_the_tray_pid_to_watch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join(".venv/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let py = bin_dir.join("python");
+        fs::write(&py, "#!/bin/sh\necho \"parent: $VOXIS_PARENT_PID\"\nsleep 60\n").unwrap();
+        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        let log = tmp.path().join("laris.log");
+
+        let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), Some(log.clone()));
+        daemon.spawn().unwrap();
+
+        // without this the daemon cannot tell a dead tray from a live one and
+        // survives Force Quit / crash / logout indefinitely
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut out = String::new();
+        while std::time::Instant::now() < deadline {
+            out = fs::read_to_string(&log).unwrap_or_default();
+            if out.contains("parent:") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        daemon.stop();
+        assert!(
+            out.contains(&format!("parent: {}", std::process::id())),
+            "daemon must be told which pid to watch, got: {out:?}"
         );
     }
 
