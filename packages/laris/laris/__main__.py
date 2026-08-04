@@ -10,6 +10,7 @@ import queue
 import socket
 import threading
 import time
+import urllib.request
 
 import uvicorn
 
@@ -36,6 +37,25 @@ def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _daemon_already_running(http_get=urllib.request.urlopen) -> str | None:
+    """URL of a laris daemon that is already up, or None.
+
+    A second daemon fails to bind :8421 but carries on regardless: uvicorn dies
+    on its background thread while the voice loop keeps its own keyboard
+    listener attached. Two listeners on one key records and types every
+    utterance twice. Probing the recorded peer (not just the port) keeps an
+    unrelated process squatting on 8421 from blocking dictation entirely."""
+    url = peer_discovery.peer_url("laris")
+    token = peer_discovery.peer_token("laris")
+    if not url or not token:
+        return None
+    try:
+        with http_get(f"{url}/theme?token={token}", timeout=1.0) as resp:
+            return url if 200 <= resp.status < 300 else None
+    except Exception:  # noqa: BLE001 - anything but a clean 2xx means "not ours"
+        return None
+
+
 def _make_voice_session() -> VoiceSession:
     panel_url = peer_discovery.peer_url("panel")
     panel_token = peer_discovery.peer_token("panel")
@@ -53,6 +73,13 @@ def _make_voice_session() -> VoiceSession:
 
 
 def main() -> None:
+    running = _daemon_already_running()
+    if running is not None:
+        raise SystemExit(
+            f"[Laris] another daemon is already running on {running} - "
+            "stop it before starting a second one"
+        )
+
     laris_token = generate_token()
     peer_discovery.write_peer("laris", f"http://127.0.0.1:{LARIS_PORT}", token=laris_token)
 

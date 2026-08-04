@@ -376,3 +376,41 @@ def test_always_on_boots_into_hands_free(monkeypatch):
 def test_ptt_mode_does_not_arm_hands_free(monkeypatch):
     """The default must still wait for a real key press, not a VAD session."""
     assert _run_with_fakes(monkeypatch, "ptt")["armed_at_entry"] is False
+
+
+def test_boot_refuses_to_start_beside_a_live_daemon(monkeypatch):
+    """A second daemon can't bind :8421, but it still starts its own keyboard
+    listener: one key press then records and types the utterance twice."""
+    import laris.__main__ as main_mod
+    from laris import peer_discovery
+
+    monkeypatch.setattr(peer_discovery, "peer_url", lambda name: "http://127.0.0.1:8421")
+    monkeypatch.setattr(peer_discovery, "peer_token", lambda name: "abc")
+
+    class _Ok:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    assert main_mod._daemon_already_running(http_get=lambda *a, **k: _Ok()) == (
+        "http://127.0.0.1:8421"
+    )
+
+
+def test_boot_proceeds_when_the_recorded_daemon_is_gone(monkeypatch):
+    """peers.json outlives the daemon that wrote it - a stale entry must not
+    block the next boot."""
+    import laris.__main__ as main_mod
+    from laris import peer_discovery
+
+    monkeypatch.setattr(peer_discovery, "peer_url", lambda name: "http://127.0.0.1:8421")
+    monkeypatch.setattr(peer_discovery, "peer_token", lambda name: "abc")
+
+    def refused(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    assert main_mod._daemon_already_running(http_get=refused) is None
