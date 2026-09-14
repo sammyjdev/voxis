@@ -11,6 +11,8 @@ NOTES = {
     "action_items": ["Enviar case até sexta"],
 }
 
+FIXED_DATE = dt.date(2026, 9, 14)
+
 
 def _cfg(tmp_path) -> Config:
     return Config(
@@ -54,3 +56,19 @@ def test_save_note_avoids_filename_collision(tmp_path):
     p1 = vault.save_note(cfg, NOTES, "t", "s1", date=dt.date(2026, 7, 16))
     p2 = vault.save_note(cfg, NOTES, "t", "s2", date=dt.date(2026, 7, 16))
     assert p1 != p2 and p2.name.endswith("-2.md")
+
+
+def test_save_note_reuses_same_session_after_crash(tmp_path):
+    cfg = _cfg(tmp_path)
+    first = vault.save_note(cfg, NOTES, "old", "session-1", date=FIXED_DATE)
+    second = vault.save_note(cfg, NOTES, "new", "session-1", date=FIXED_DATE)
+    assert second == first
+    assert "new" in first.read_text(encoding="utf-8")
+
+
+def test_same_title_different_session_keeps_collision_behavior(tmp_path):
+    cfg = _cfg(tmp_path)
+    first = vault.save_note(cfg, NOTES, "a", "session-1", date=FIXED_DATE)
+    second = vault.save_note(cfg, NOTES, "b", "session-2", date=FIXED_DATE)
+    assert first != second
+    assert second.name.endswith("-2.md")

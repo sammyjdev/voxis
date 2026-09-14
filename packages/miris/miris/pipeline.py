@@ -1,14 +1,23 @@
 """Post-meeting pipeline: WAVs -> transcript -> notes -> vault note."""
 import json
 import os
+import datetime as dt
+import dataclasses
 from pathlib import Path
 
 from miris import notes as notes_mod
+from miris import session
 from miris import transcribe, vault
 from miris.config import Config
 
 CHANNELS = (("mic.wav", "Eu"), ("system.wav", "Eles"))
 WAV_HEADER_BYTES = 44
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _default_transcriber_factory():
@@ -41,29 +50,40 @@ def build_transcript(session_dir: Path, transcriber_factory=None) -> str:
 
 
 def process_session(cfg: Config, session_dir: Path, transcriber_factory=None) -> Path:
-    """Session dir -> saved vault note path. Transcript is cached; LLM failure
-    still produces a transcript-only note routed to the inbox."""
-    transcript_path = session_dir / "transcript.md"
-    if transcript_path.exists():
-        transcript = transcript_path.read_text(encoding="utf-8")
-    else:
-        transcript = build_transcript(session_dir, transcriber_factory)
-        transcript_path.write_text(transcript, encoding="utf-8")
-
+    """Process a captured session, preserving it for retry after failures."""
+    manifest = session.load(session_dir)
+    if manifest.state is not session.SessionState.CAPTURED:
+        raise ValueError("session must be captured")
+    session.transition(session_dir, session.SessionState.PROCESSING,
+                       processing_pid=os.getpid())
     try:
+        transcript_path = session_dir / "transcript.md"
+        if (manifest.transcript_ready and transcript_path.exists()
+                and transcript_path.stat().st_size > 0):
+            transcript = transcript_path.read_text(encoding="utf-8")
+        else:
+            transcript = build_transcript(session_dir, transcriber_factory)
+            _write_text_atomic(transcript_path, transcript)
+            session.write(session_dir, dataclasses.replace(
+                session.load(session_dir), transcript_ready=True))
+
         notes = notes_mod.generate(cfg, transcript)
-    except notes_mod.NotesError as exc:
-        print(f"[notes] failed: {exc} - saving transcript-only note to inbox; "
-              f"run `miris retry {session_dir.name}` to regenerate")
-        notes = {
-            "categoria": "__falha__",
-            "titulo": f"Reunião {session_dir.name}",
-            "resumo": f"(resumo indisponível: {exc})",
-            "action_items": [],
-        }
-    (session_dir / "notes.json").write_text(
-        json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8")
-    note = vault.save_note(cfg, notes, transcript, session_dir.name)
-    # the VOXIS tray reads this to open the last note without parsing CLI stdout
-    (session_dir / "note.path").write_text(str(note), encoding="utf-8")
-    return note
+        _write_text_atomic(
+            session_dir / "notes.json",
+            json.dumps(notes, ensure_ascii=False, indent=2),
+        )
+        note = vault.save_note(cfg, notes, transcript, session_dir.name)
+        _write_text_atomic(session_dir / "note.path", str(note))
+        session.transition(session_dir, session.SessionState.COMPLETED,
+                           processing_pid=None, note_path=str(note), error=None)
+        return note
+    except Exception as exc:
+        session.transition(
+            session_dir,
+            session.SessionState.CAPTURED,
+            processing_pid=None,
+            error=session.SessionError(
+                "processing_failed", str(exc), dt.datetime.now().astimezone().isoformat()
+            ),
+        )
+        raise
