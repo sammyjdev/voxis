@@ -82,6 +82,18 @@ for src in [termSrc, intSrc] {
 }
 signal(SIGTERM, SIG_IGN)
 signal(SIGINT, SIG_IGN)
+
+// 7. Exit alongside the parent recorder: a recorder killed by SIGKILL cannot
+// stop us, and an orphaned helper must not keep capturing system audio.
+// Parent death runs the same teardown as SIGTERM, finalizing the WAV header.
+let initialParent = getppid()
+let parentWatch = DispatchSource.makeTimerSource()
+parentWatch.schedule(deadline: .now() + 2, repeating: 2)
+parentWatch.setEventHandler {
+    if getppid() != initialParent { stop.signal() }
+}
+parentWatch.resume()
+
 stop.wait()
 
 AudioDeviceStop(aggID, procID!)
