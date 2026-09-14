@@ -436,6 +436,8 @@ the exact schema and transitions in this document.
 
 ## Limitations
 
+- Session manifests are written by several short-lived Python processes (recorder heartbeat, CLI, pipeline) through load-modify-atomic-replace without a file lock. The lifecycle sequences these writers through state polling, so concurrent lost updates are considered unreachable by construction; if a future change lets two writers touch one active manifest simultaneously, add a lock then.
+
 - The release is validated on one Mac and does not establish reliability on
   other hardware or macOS versions.
 - The four-hour test is one bounded soak test, not a statistical reliability

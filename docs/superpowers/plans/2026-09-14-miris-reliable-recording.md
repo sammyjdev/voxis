@@ -10,6 +10,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-14-miris-reliable-recording-design.md`
 
+**Execution status (2026-09-14):** Tasks 1-4 and 6 are implemented and committed
+(single-session execution, not the luna subagent fleet). Automated gates at
+commit `74f9611`: MIRIS pytest 76 passed, tray `cargo test --lib` 34 passed,
+tray `npm run build` passed. The Task 2 Step 8 fault probe found that a
+SIGKILLed recorder leaves a truncated `system.wav` (stale RIFF/data lengths)
+and an orphaned capture helper; the deterministic PCM repair is implemented
+(`session.repair_wav`) and the helper now exits with its parent. Task 5 (tray)
+and Task 7 (owner-Mac validation, v1.0.0) remain open.
+
 ## Global Constraints
 
 - macOS 14.2 or newer on Apple Silicon only.
@@ -82,7 +91,7 @@ worker that implemented the task.
 - Produces: `inspect_wav(path: Path) -> ChannelInfo` and `validate_capture(session_dir: Path, max_duration_delta_s: float | None) -> dict[str, ChannelInfo]`.
 - Produces: `ensure_legacy_manifest(session_dir: Path) -> SessionManifest` for existing pre-manifest sessions.
 
-- [ ] **Step 1: Create the project environment and record the baseline**
+- [x] **Step 1: Create the project environment and record the baseline**
 
 Run:
 
@@ -97,7 +106,7 @@ Expected: either 34 PASS, or a real dependency/platform failure recorded
 verbatim before changes. Do not use the system interpreter's missing
 `torchaudio` result as the project baseline.
 
-- [ ] **Step 2: Write failing manifest serialization and transition tests**
+- [x] **Step 2: Write failing manifest serialization and transition tests**
 
 Add:
 
@@ -159,7 +168,7 @@ def test_processing_failure_returns_to_captured(tmp_path):
     assert result.state is session.SessionState.CAPTURED
 ```
 
-- [ ] **Step 3: Run the focused tests and verify red**
+- [x] **Step 3: Run the focused tests and verify red**
 
 Run:
 
@@ -170,7 +179,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_session.p
 
 Expected: FAIL because `miris.session` does not exist.
 
-- [ ] **Step 4: Implement the schema and atomic transition core**
+- [x] **Step 4: Implement the schema and atomic transition core**
 
 Use `StrEnum`, frozen dataclasses, `dataclasses.asdict`, and stdlib JSON. Keep
 the transition table literal and exhaustive:
@@ -202,7 +211,7 @@ dataclass fields with `dataclasses.replace`, refreshes `updated_at`, writes,
 and returns the new value. Always clear `recorder_pid` when leaving capture
 states and `processing_pid` when leaving `PROCESSING`.
 
-- [ ] **Step 5: Write failing process identity and stale discovery tests**
+- [x] **Step 5: Write failing process identity and stale discovery tests**
 
 Add:
 
@@ -235,7 +244,7 @@ def test_reconcile_dead_processing_as_captured(tmp_path):
     assert changed[0].error.code == "processor_gone"
 ```
 
-- [ ] **Step 6: Implement process identity, discovery, and stale reconciliation**
+- [x] **Step 6: Implement process identity, discovery, and stale reconciliation**
 
 The default command reader runs exactly:
 
@@ -255,7 +264,7 @@ missing exact session path. `latest_active` considers `starting`, `recording`,
 `interrupted`. Sort timestamp-named directories newest first and skip malformed
 manifests without deleting them.
 
-- [ ] **Step 7: Write failing WAV and legacy-session tests**
+- [x] **Step 7: Write failing WAV and legacy-session tests**
 
 Add tests that create real stdlib WAV files:
 
@@ -294,7 +303,7 @@ def test_legacy_note_session_becomes_completed(tmp_path):
     assert session.ensure_legacy_manifest(session_dir).state is session.SessionState.COMPLETED
 ```
 
-- [ ] **Step 8: Implement WAV inspection and legacy migration**
+- [x] **Step 8: Implement WAV inspection and legacy migration**
 
 `inspect_wav` opens with `wave.open`, requires PCM sample width 2, positive
 sample rate, one or two channels, and positive frame count. It returns a
@@ -310,7 +319,7 @@ creates and writes exactly one inferred manifest:
 - `interrupted` when files exist but do not both validate.
 - `failed` when no capture files exist.
 
-- [ ] **Step 9: Run Task 1 tests and the MIRIS suite**
+- [x] **Step 9: Run Task 1 tests and the MIRIS suite**
 
 Run:
 
@@ -323,7 +332,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
 Expected: Task 1 tests PASS and the full suite matches or improves the recorded
 baseline.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add packages/miris/miris/session.py packages/miris/tests/test_session.py
@@ -347,7 +356,7 @@ git commit -m "feat(miris): add durable session lifecycle"
 - Produces: `record(session_dir: Path, stop: threading.Event, tap_factory=SystemTap, open_stream=None, now: Callable[[], float] = time.monotonic) -> SessionState`.
 - Produces constants `START_TIMEOUT_S = 5.0`, `STALL_TIMEOUT_S = 2.0`, `WATCHDOG_INTERVAL_S = 0.25`, `QUEUE_CHUNKS = 50`, and `MANIFEST_INTERVAL_S = 1.0`.
 
-- [ ] **Step 1: Write failing SystemTap progress tests**
+- [x] **Step 1: Write failing SystemTap progress tests**
 
 Add:
 
@@ -368,7 +377,7 @@ def test_stop_kills_helper_after_grace(tmp_path, monkeypatch):
     assert proc.killed and proc.waited_after_kill
 ```
 
-- [ ] **Step 2: Run SystemTap tests and verify red**
+- [x] **Step 2: Run SystemTap tests and verify red**
 
 Run:
 
@@ -380,7 +389,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_systemtap
 Expected: FAIL because `bytes_written` does not exist and the injected timeout
 case is not covered.
 
-- [ ] **Step 3: Implement minimal progress observation**
+- [x] **Step 3: Implement minimal progress observation**
 
 Add only:
 
@@ -396,7 +405,7 @@ Keep `stop` as SIGTERM, bounded wait, SIGKILL, final wait. Do not add a helper
 protocol unless the real fault probe later proves file size does not progress
 while recording.
 
-- [ ] **Step 4: Write failing recorder readiness and failure tests**
+- [x] **Step 4: Write failing recorder readiness and failure tests**
 
 Use deterministic fakes with `bytes_written`, `alive`, callback delivery, and a
 fake monotonic clock. Add these cases:
@@ -491,7 +500,7 @@ Also test a missing first microphone frame, missing first system frame, a
 two-second stall after readiness, writer exception, and normal duration delta
 beyond two seconds.
 
-- [ ] **Step 5: Run recorder tests and verify red**
+- [x] **Step 5: Run recorder tests and verify red**
 
 Run:
 
@@ -503,7 +512,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_recorder.
 Expected: FAIL because the current recorder publishes only a PID, uses an
 unbounded queue, ignores callback status, and never watches the helper.
 
-- [ ] **Step 6: Implement the minimal watchdog**
+- [x] **Step 6: Implement the minimal watchdog**
 
 Use `queue.Queue(maxsize=QUEUE_CHUNKS)`. In the callback, call `put_nowait` and
 set one shared first-error value on `queue.Full` or a truthy status. The main
@@ -529,7 +538,7 @@ manifest before capture, preserve the existing restrictive umask and signal
 handlers, and remove only the compatibility `recorder.pid` file on exit. The
 manifest retains the lifecycle result after the process ends.
 
-- [ ] **Step 7: Add the 48 kHz helper cap**
+- [x] **Step 7: Add the 48 kHz helper cap**
 
 Change the Swift output format line to:
 
@@ -547,7 +556,7 @@ make -C packages/miris/helper
 
 Expected: `helper/audiotap` builds successfully.
 
-- [ ] **Step 8: Fault-probe abrupt writer termination**
+- [x] **Step 8: Fault-probe abrupt writer termination**
 
 Run a disposable local capture through `miris.recorder`, wait until the
 manifest reaches `recording`, send SIGKILL, and inspect both WAVs with
@@ -560,7 +569,7 @@ implementation. If either produces a reproducible RIFF length error, add one
 failing `test_repair_pcm_riff_*` to `test_session.py` and implement only the
 deterministic RIFF/data length rewrite specified by the design.
 
-- [ ] **Step 9: Run focused and full Python tests**
+- [x] **Step 9: Run focused and full Python tests**
 
 ```bash
 cd packages/miris
@@ -571,7 +580,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
 
 Expected: PASS.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add packages/miris/miris/recorder.py packages/miris/miris/systemtap.py \
@@ -596,7 +605,7 @@ git commit -m "feat(miris): stop unreliable two-channel recordings"
 - Produces commands `miris recover <session-id>` and `miris process <session-id>`.
 - Keeps `miris retry <session-id>` as a compatibility alias for `process`.
 
-- [ ] **Step 1: Write failing start and process-identity tests**
+- [x] **Step 1: Write failing start and process-identity tests**
 
 Add:
 
@@ -630,7 +639,7 @@ def test_stop_refuses_reused_pid(tmp_path, monkeypatch):
     assert kill_calls == []
 ```
 
-- [ ] **Step 2: Run CLI tests and verify red**
+- [x] **Step 2: Run CLI tests and verify red**
 
 ```bash
 cd packages/miris
@@ -640,7 +649,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_cli.py -v
 Expected: FAIL because start returns on PID creation and stop does not verify
 process identity or enforce a deadline.
 
-- [ ] **Step 3: Implement manifest-based start and bounded stop**
+- [x] **Step 3: Implement manifest-based start and bounded stop**
 
 `cmd_start` must call `reconcile_stale`, reject only `latest_active`, create the
 session manifest, spawn the existing detached recorder, and wait at most five
@@ -653,7 +662,7 @@ path, send SIGTERM, and wait at most ten seconds for `CAPTURED` or
 `INTERRUPTED`, and return without processing. Only `CAPTURED` proceeds to the
 pipeline.
 
-- [ ] **Step 4: Write failing manual recovery tests**
+- [x] **Step 4: Write failing manual recovery tests**
 
 Add:
 
@@ -705,7 +714,7 @@ def test_process_requires_captured_and_calls_pipeline(tmp_path, monkeypatch):
     assert called == [session_dir]
 ```
 
-- [ ] **Step 5: Implement recover, process, status, and retry alias**
+- [x] **Step 5: Implement recover, process, status, and retry alias**
 
 `cmd_recover` refuses an identity-matching live recorder, validates both WAVs
 with no duration threshold, updates channel metadata, and transitions only
@@ -720,7 +729,7 @@ with no duration threshold, updates channel metadata, and transitions only
 
 Wire `recover` and `process` into argparse with one required `session_id`.
 
-- [ ] **Step 6: Run Task 3 tests and suite**
+- [x] **Step 6: Run Task 3 tests and suite**
 
 ```bash
 cd packages/miris
@@ -730,7 +739,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add packages/miris/miris/cli.py packages/miris/tests/test_cli.py
@@ -752,7 +761,7 @@ git commit -m "feat(miris): add bounded stop and manual recovery"
 - Changes: `process_session` requires `CAPTURED`, transitions through `PROCESSING`, and returns to `CAPTURED` on any processing failure.
 - Changes: `save_note` returns an existing note whose frontmatter contains the same exact JSON-quoted `session_id`.
 
-- [ ] **Step 1: Write failing state and cache tests**
+- [x] **Step 1: Write failing state and cache tests**
 
 Add:
 
@@ -805,7 +814,7 @@ def test_empty_transcript_cache_is_rebuilt(tmp_path, monkeypatch):
     assert (session_dir / "transcript.md").read_text(encoding="utf-8") == "rebuilt"
 ```
 
-- [ ] **Step 2: Run pipeline tests and verify red**
+- [x] **Step 2: Run pipeline tests and verify red**
 
 ```bash
 cd packages/miris
@@ -815,7 +824,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_pipeline.
 Expected: FAIL because the pipeline has no lifecycle transitions and accepts an
 empty cache.
 
-- [ ] **Step 3: Implement lifecycle-safe processing**
+- [x] **Step 3: Implement lifecycle-safe processing**
 
 At entry, require `CAPTURED` and transition to `PROCESSING` with
 `processing_pid=os.getpid()`. Write `transcript.md`, `notes.json`, and
@@ -838,7 +847,7 @@ then re-raise so the tray can notify.
 Do not create a transcript-only vault note for LLM failure. The valid capture
 and transcript remain in the session for retry.
 
-- [ ] **Step 4: Write failing idempotent-note tests**
+- [x] **Step 4: Write failing idempotent-note tests**
 
 Add:
 
@@ -862,7 +871,7 @@ def test_same_title_different_session_keeps_collision_behavior(tmp_path):
     assert second.name.endswith("-2.md")
 ```
 
-- [ ] **Step 5: Implement idempotent atomic vault writes**
+- [x] **Step 5: Implement idempotent atomic vault writes**
 
 Before choosing a collision suffix, inspect existing candidates for the exact
 frontmatter line:
@@ -875,7 +884,7 @@ Reuse only a file whose frontmatter contains that whole line. Write the final
 note atomically through a temp file in the vault directory and `os.replace`.
 Do not scan outside the target category directory.
 
-- [ ] **Step 6: Run Task 4 tests and suite**
+- [x] **Step 6: Run Task 4 tests and suite**
 
 ```bash
 cd packages/miris
@@ -886,7 +895,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add packages/miris/miris/pipeline.py packages/miris/miris/vault.py \
@@ -1056,7 +1065,7 @@ git commit -m "feat(tray): surface reliable meeting lifecycle"
 - Consumes: completed Task 2 recorder contract.
 - Changes: `miris doctor` verifies microphone and system audio in one bounded three-second temporary capture and reports each channel separately.
 
-- [ ] **Step 1: Write a failing doctor orchestration test**
+- [x] **Step 1: Write a failing doctor orchestration test**
 
 Add:
 
@@ -1075,7 +1084,7 @@ def test_doctor_checks_both_capture_channels(tmp_path, monkeypatch, capsys):
 
 Also test either missing channel returns false and always tears down the helper.
 
-- [ ] **Step 2: Run the focused test and verify red**
+- [x] **Step 2: Run the focused test and verify red**
 
 ```bash
 cd packages/miris
@@ -1084,7 +1093,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_cli.py -k
 
 Expected: FAIL because current doctor captures only system audio.
 
-- [ ] **Step 3: Implement bounded two-channel doctor capture**
+- [x] **Step 3: Implement bounded two-channel doctor capture**
 
 Add `run_doctor_capture(cfg, duration_s=3.0) -> dict[str, ChannelInfo]`. It uses
 the real recorder in a temporary session, schedules the stop event after three
@@ -1093,7 +1102,7 @@ existing helper, vault, categories, and LLM checks. `cmd_doctor` prints separate
 microphone and system results and returns a bool when `exit_on_finish=False`;
 the CLI path still exits 0 or 1.
 
-- [ ] **Step 4: Run every automated gate**
+- [x] **Step 4: Run every automated gate**
 
 ```bash
 cd packages/miris
@@ -1108,7 +1117,7 @@ npm run build
 
 Expected: all commands exit 0. Record exact counts in the task report.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/miris/miris/cli.py packages/miris/tests/test_cli.py

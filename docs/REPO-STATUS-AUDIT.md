@@ -117,3 +117,24 @@ Perform a single reconciliation pass across the planning documents:
 5. Decide the versioning scheme before creating a release tag.
 
 This audit intentionally does not modify the backlog, specs, plans, source code, or tests.
+
+## Update 2026-09-14: reliable recording implementation
+
+After this audit was written, the MIRIS reliable-recording plan (`docs/superpowers/plans/2026-09-14-miris-reliable-recording.md`) executed Tasks 1-4 and 6. The implementation replaced the PID-based state described above with a manifest-based session lifecycle (`packages/miris/miris/session.py`), and the numbers in this section supersede the verification table.
+
+Automated gates at commit `74f9611`:
+
+| Command | Result |
+|---|---|
+| `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q` (packages/miris) | 76 passed |
+| `cargo test --lib` (apps/tray/src-tauri) | 34 passed |
+| `npm run build` (apps/tray) | passed |
+
+The MIRIS suite grew from 34 to 76 tests. The cargo-cache blocker reported above did not reproduce in this environment.
+
+Fault-probe evidence (plan Task 2, Step 8), run on this Mac against a live two-channel capture:
+
+- SIGKILL to the recorder left `mic.wav` valid and `system.wav` with stale RIFF/data lengths (ExtAudioFile finalization never ran). This triggered the design's repair branch: deterministic 16-bit PCM container repair is implemented (`session.repair_wav`, used by `miris recover`) and was verified against the real damaged file (`interrupted` -> `captured`, 3.5 s mic recovered).
+- The same probe revealed the Swift helper outlived the killed recorder and kept capturing system audio (69 MB orphan). Fixed: the helper now watches `getppid()` and runs its normal teardown when the parent dies, which also finalizes the WAV header. Re-probe: helper exits on its own within seconds; both WAVs reopen valid with a 0.3 s duration delta.
+
+Remaining work: plan Task 5 (manifest-driven tray UI), Task 7 (owner-Mac failure matrix, four-hour soak, documentation reconciliation, versioning, `v1.0.0`).
