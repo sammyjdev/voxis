@@ -1,4 +1,5 @@
 """Own the audiotap helper process (system-audio capture)."""
+
 import os
 import signal
 import subprocess
@@ -23,6 +24,12 @@ class SystemTap:
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
+
+    def bytes_written(self) -> int:
+        try:
+            return self.out_wav.stat().st_size
+        except FileNotFoundError:
+            return 0
 
     def stop(self, grace_s: float = 5.0) -> None:
         if self.proc is None or self.proc.poll() is not None:

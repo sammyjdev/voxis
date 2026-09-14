@@ -48,7 +48,7 @@ check(AudioHardwareCreateAggregateDevice(aggDict as CFDictionary, &aggID), "crea
 
 // 4. WAV writer: ExtAudioFile converts tap float32 -> 16-bit PCM on disk.
 var outFmt = AudioStreamBasicDescription(
-    mSampleRate: asbd.mSampleRate,
+    mSampleRate: min(asbd.mSampleRate, 48_000),
     mFormatID: kAudioFormatLinearPCM,
     mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
     mBytesPerPacket: 2 * asbd.mChannelsPerFrame,
