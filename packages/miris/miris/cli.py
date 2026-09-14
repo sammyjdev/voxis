@@ -226,10 +226,31 @@ def cmd_process(cfg: config.Config, session_id: str) -> None:
     print(f"note: {note}")
 
 
-def cmd_doctor(cfg: config.Config) -> None:
-    """End-to-end smoke: binary, vault, llm, 3s system-audio capture."""
+def run_doctor_capture(cfg: config.Config, duration_s: float = 3.0) -> dict:
+    """Bounded two-channel capture through the real recorder and helper."""
     import tempfile
+    import threading
 
+    from miris import recorder
+
+    with tempfile.TemporaryDirectory() as tmp:
+        session_dir = Path(tmp) / "doctor-capture"
+        session_dir.mkdir()
+        session.create(session_dir)
+        stop = threading.Event()
+        timer = threading.Timer(duration_s, stop.set)
+        timer.start()
+        try:
+            state = recorder.record(session_dir, stop)
+        finally:
+            timer.cancel()
+        if state is not session.SessionState.CAPTURED:
+            raise session.CaptureInvalid(f"doctor capture ended as {state.value}")
+        return session.validate_capture(session_dir, max_duration_delta_s=2.0)
+
+
+def cmd_doctor(cfg: config.Config, exit_on_finish: bool = True) -> bool:
+    """End-to-end smoke: binary, vault, llm, bounded two-channel capture."""
     from miris.systemtap import SystemTap
     ok = True
 
@@ -253,20 +274,25 @@ def cmd_doctor(cfg: config.Config) -> None:
     ok &= llm_ok
 
     if tap_bin.exists():
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "tap-smoke.wav"
-            tap = SystemTap(out)
-            tap.start()
-            try:
-                time.sleep(3)
-            finally:
-                tap.stop()  # never leave an orphan capture process
-            tap_worked = out.exists() and out.stat().st_size > 44
-            print(f"[{'ok' if tap_worked else 'FAIL'}] system-audio smoke "
-                  f"(3s): {out.stat().st_size if out.exists() else 0} bytes")
-            ok &= tap_worked
+        try:
+            channels = run_doctor_capture(cfg)
+            for name, label in (("mic", "microphone capture"),
+                                ("system", "system-audio capture")):
+                info = channels.get(name)
+                if info:
+                    seconds = info.frames / info.sample_rate
+                    print(f"[ok] {label}: {info.frames} frames ({seconds:.1f}s "
+                          f"@ {info.sample_rate} Hz)")
+                else:
+                    print(f"[FAIL] {label}: no frames")
+                    ok = False
+        except (session.CaptureInvalid, OSError) as exc:
+            print(f"[FAIL] two-channel capture (3s): {exc}")
+            ok = False
 
-    sys.exit(0 if ok else 1)
+    if exit_on_finish:
+        sys.exit(0 if ok else 1)
+    return ok
 
 
 def main() -> None:

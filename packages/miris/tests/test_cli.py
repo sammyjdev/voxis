@@ -139,3 +139,37 @@ def test_process_requires_captured_and_calls_pipeline(tmp_path, monkeypatch):
                         lambda cfg, path: called.append(path) or path / "note.md")
     cli.cmd_process(cfg, session_dir.name)
     assert called == [session_dir]
+
+
+def test_doctor_checks_both_capture_channels(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path)
+    cfg.vault_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess([], 0, stdout="OK"))
+    monkeypatch.setattr(cli, "run_doctor_capture", lambda cfg, duration_s=3.0: {
+        "mic": session.ChannelInfo("mic.wav", 48_000, 16_000, 1),
+        "system": session.ChannelInfo("system.wav", 144_000, 48_000, 2),
+    })
+    assert cli.cmd_doctor(cfg, exit_on_finish=False) is True
+    output = capsys.readouterr().out
+    assert "[ok] microphone capture" in output
+    assert "[ok] system-audio capture" in output
+
+
+def test_doctor_reports_missing_channel_and_returns_false(tmp_path, monkeypatch,
+                                                          capsys):
+    cfg = _cfg(tmp_path)
+    cfg.vault_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess([], 0, stdout="OK"))
+
+    def missing_mic(cfg, duration_s=3.0):
+        raise session.CaptureInvalid("missing capture: mic.wav")
+
+    monkeypatch.setattr(cli, "run_doctor_capture", missing_mic)
+    assert cli.cmd_doctor(cfg, exit_on_finish=False) is False
+    output = capsys.readouterr().out
+    assert "[FAIL]" in output
+    assert "missing capture: mic.wav" in output
