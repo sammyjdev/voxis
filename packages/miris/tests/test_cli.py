@@ -1,9 +1,11 @@
 import os
 import subprocess
+import wave
+import pytest
 from pathlib import Path
 
 from miris.config import Config
-from miris import cli
+from miris import cli, session
 
 
 def _cfg(tmp_path) -> Config:
@@ -43,7 +45,9 @@ def test_cmd_start_detaches_recorder_stdio(tmp_path, monkeypatch):
 
     def fake_popen(args, **kwargs):
         seen.update(kwargs)
-        (Path(args[-1]) / "recorder.pid").write_text("12345")
+        session_dir = Path(args[-1])
+        session.transition(session_dir, session.SessionState.RECORDING,
+                           recorder_pid=12345)
 
     monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
     cli.cmd_start(cfg)
@@ -59,3 +63,79 @@ def test_live_session_cleans_stale_pid(tmp_path):
     (session / "recorder.pid").write_text("999999999")
     assert cli._live_session(cfg) == (None, None)
     assert not (session / "recorder.pid").exists()
+
+
+def test_cmd_start_waits_for_recording_manifest(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+
+    def fake_popen(args, **kwargs):
+        session_dir = Path(args[-1])
+        session.transition(session_dir, session.SessionState.RECORDING,
+                           recorder_pid=os.getpid())
+        return object()
+
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    cli.cmd_start(cfg)
+    created = next(cfg.sessions_dir.iterdir())
+    assert session.load(created).state is session.SessionState.RECORDING
+
+
+def test_stop_refuses_reused_pid(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    session_dir = cfg.sessions_dir / "20260914-143000"
+    session_dir.mkdir(parents=True)
+    session.create(session_dir)
+    session.transition(session_dir, session.SessionState.RECORDING, recorder_pid=42)
+    kill_calls = []
+    monkeypatch.setattr(cli.os, "kill", lambda *args: kill_calls.append(args))
+    monkeypatch.setattr(session, "process_matches", lambda *args, **kwargs: False)
+    with pytest.raises(SystemExit, match="does not belong"):
+        cli.cmd_stop(cfg)
+    assert kill_calls == []
+
+
+def write_valid_wav(path, sample_rate, channels):
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\0\0" * sample_rate * channels)
+
+
+def session_in_state(tmp_path, state):
+    cfg = _cfg(tmp_path)
+    session_dir = cfg.sessions_dir / "20260914-143000"
+    session_dir.mkdir(parents=True)
+    session.create(session_dir)
+    session.transition(session_dir, session.SessionState.RECORDING, recorder_pid=42)
+    if state is not session.SessionState.RECORDING:
+        session.transition(session_dir, session.SessionState.INTERRUPTED,
+                           recorder_pid=None)
+    if state is session.SessionState.CAPTURED:
+        session.transition(session_dir, session.SessionState.CAPTURED)
+    return cfg, session_dir
+
+
+def test_recover_requires_interrupted_state(tmp_path):
+    cfg, session_dir = session_in_state(tmp_path, session.SessionState.CAPTURED)
+    with pytest.raises(SystemExit, match="not interrupted"):
+        cli.cmd_recover(cfg, session_dir.name)
+
+
+def test_recover_valid_partial_audio_stops_at_captured(tmp_path):
+    cfg, session_dir = session_in_state(tmp_path, session.SessionState.INTERRUPTED)
+    write_valid_wav(session_dir / "mic.wav", 16_000, 1)
+    write_valid_wav(session_dir / "system.wav", 48_000, 2)
+    cli.cmd_recover(cfg, session_dir.name)
+    manifest = session.load(session_dir)
+    assert manifest.state is session.SessionState.CAPTURED
+    assert not (session_dir / "transcript.md").exists()
+
+
+def test_process_requires_captured_and_calls_pipeline(tmp_path, monkeypatch):
+    cfg, session_dir = session_in_state(tmp_path, session.SessionState.CAPTURED)
+    called = []
+    monkeypatch.setattr(cli.pipeline, "process_session",
+                        lambda cfg, path: called.append(path) or path / "note.md")
+    cli.cmd_process(cfg, session_dir.name)
+    assert called == [session_dir]
