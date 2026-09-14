@@ -1,6 +1,10 @@
+import io
 import os
+import struct
 import subprocess
 import wave
+
+import numpy as np
 import pytest
 from pathlib import Path
 
@@ -130,6 +134,30 @@ def test_recover_valid_partial_audio_stops_at_captured(tmp_path):
     manifest = session.load(session_dir)
     assert manifest.state is session.SessionState.CAPTURED
     assert not (session_dir / "transcript.md").exists()
+
+
+def test_recover_repairs_truncated_system_wav(tmp_path):
+    cfg, session_dir = session_in_state(tmp_path, session.SessionState.INTERRUPTED)
+    write_valid_wav(session_dir / "mic.wav", 16_000, 1)
+    buf = io.BytesIO()
+    frames = int(0.5 * 48_000)
+    audio = np.zeros(frames * 2, dtype=np.int16)
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(48_000)
+        wav.writeframes(audio.tobytes())
+    valid = buf.getvalue()
+    broken = bytearray(valid[:44])
+    struct.pack_into("<I", broken, 4, 40)  # stale RIFF size
+    struct.pack_into("<I", broken, 40, 0)  # data size never updated
+    (session_dir / "system.wav").write_bytes(bytes(broken) + valid[44:])
+
+    cli.cmd_recover(cfg, session_dir.name)
+
+    manifest = session.load(session_dir)
+    assert manifest.state is session.SessionState.CAPTURED
+    assert manifest.channels["system"].frames == frames
 
 
 def test_process_requires_captured_and_calls_pipeline(tmp_path, monkeypatch):

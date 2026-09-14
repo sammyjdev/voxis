@@ -1,5 +1,7 @@
 import datetime as dt
+import io
 import json
+import struct
 import wave
 
 import numpy as np
@@ -203,6 +205,51 @@ def test_validate_capture_enforces_normal_duration_delta(tmp_path):
     channels = session.validate_capture(session_dir, max_duration_delta_s=None)
     assert channels["mic"].frames > 0
     assert channels["system"].frames > 0
+
+
+def damaged_riff_bytes(seconds, sample_rate, channels):
+    buf = io.BytesIO()
+    frames = int(seconds * sample_rate)
+    audio = np.zeros(frames * channels, dtype=np.int16)
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(audio.tobytes())
+    valid = buf.getvalue()
+    assert valid[36:40] == b"data"  # stdlib wave layout: fmt then data at 36
+    payload = valid[44:]
+    broken = bytearray(valid[:44])
+    struct.pack_into("<I", broken, 4, 40)  # stale RIFF size, header only
+    struct.pack_into("<I", broken, 40, 0)  # data size never updated
+    return bytes(broken) + payload
+
+
+def test_repair_pcm_riff_lengths_recover_truncated_capture(tmp_path):
+    path = tmp_path / "system.wav"
+    path.write_bytes(damaged_riff_bytes(0.5, 48_000, 2))
+    with pytest.raises(session.CaptureInvalid):
+        session.inspect_wav(path)
+    info = session.repair_wav(path)
+    assert info.frames == int(0.5 * 48_000)
+    assert info.sample_rate == 48_000
+    assert info.channels == 2
+    assert session.inspect_wav(path).frames == info.frames
+
+
+def test_repair_pcm_riff_rejects_non_pcm_and_headerless(tmp_path):
+    path = tmp_path / "system.wav"
+    raw = damaged_riff_bytes(0.1, 48_000, 2)
+    broken = bytearray(raw)
+    struct.pack_into("<H", broken, 20, 3)  # fmt tag: IEEE float, not PCM
+    path.write_bytes(bytes(broken))
+    with pytest.raises(session.CaptureInvalid):
+        session.repair_wav(path)
+
+    empty = tmp_path / "empty.wav"
+    empty.write_bytes(b"RIFF" + b"\0" * 60)
+    with pytest.raises(session.CaptureInvalid):
+        session.repair_wav(empty)
 
 
 def test_legacy_note_session_becomes_completed(tmp_path):

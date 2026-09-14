@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import struct
 import subprocess
 import wave
 from dataclasses import dataclass, replace
@@ -308,6 +309,68 @@ def inspect_wav(path: Path) -> ChannelInfo:
         raise CaptureInvalid(f"invalid WAV metadata: {path}")
     return ChannelInfo(
         path=path.name, frames=frames, sample_rate=sample_rate, channels=channels
+    )
+
+
+def repair_wav(path: Path) -> ChannelInfo:
+    """Deterministic PCM RIFF repair: rebuild container lengths, keep payload.
+
+    Supports only files whose `fmt ` chunk is readable 16-bit PCM and whose
+    `data` payload is present on disk - the exact damage a killed writer
+    leaves behind (stale RIFF size, zeroed data length). Anything ambiguous
+    stays CaptureInvalid rather than being guessed at.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise CaptureInvalid(f"unreadable WAV: {path}") from exc
+    if len(raw) < 44 or raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+        raise CaptureInvalid(f"not a RIFF/WAVE file: {path}")
+    fmt: bytes | None = None
+    data_offset: int | None = None
+    off = 12
+    while off + 8 <= len(raw):
+        chunk_id = raw[off:off + 4]
+        chunk_size = int.from_bytes(raw[off + 4:off + 8], "little")
+        if chunk_id == b"fmt " and chunk_size >= 16 and fmt is None:
+            fmt = raw[off + 8:off + 8 + 16]
+        elif chunk_id == b"data":
+            data_offset = off + 8
+            break
+        off += 8 + chunk_size + (chunk_size & 1)
+    if fmt is None or data_offset is None:
+        raise CaptureInvalid(f"repair needs readable fmt and data chunks: {path}")
+    tag, channels, rate, _byterate, block_align, bits = struct.unpack(
+        "<HHIIHH", fmt
+    )
+    if tag != 1 or bits != 16 or channels not in (1, 2):
+        raise CaptureInvalid(f"repair supports 16-bit PCM only: {path}")
+    if block_align != channels * 2:
+        raise CaptureInvalid(f"inconsistent fmt block align: {path}")
+    payload = raw[data_offset:]
+    if len(payload) % block_align:
+        payload = payload[:len(payload) - len(payload) % block_align]
+    frames = len(payload) // block_align
+    if frames <= 0:
+        raise CaptureInvalid(f"repair found no payload frames: {path}")
+    data_size = len(payload)
+    repaired = (
+        b"RIFF" + struct.pack("<I", 4 + (8 + 16) + (8 + data_size))
+        + b"WAVE"
+        + b"fmt " + struct.pack("<I", 16) + fmt
+        + b"data" + struct.pack("<I", data_size) + payload
+    )
+    tmp = path.with_name(f".{path.name}.repair.{os.getpid()}.tmp")
+    tmp.write_bytes(repaired)
+    try:
+        info = inspect_wav(tmp)
+    except CaptureInvalid:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, path)
+    return ChannelInfo(
+        path=path.name, frames=info.frames, sample_rate=info.sample_rate,
+        channels=info.channels,
     )
 
 

@@ -210,9 +210,23 @@ def cmd_recover(cfg: config.Config, session_id: str) -> None:
         sys.exit(f"recorder is still running: {session_id}")
     try:
         channels = session.validate_capture(session_dir, None)
-    except session.CaptureInvalid as exc:
-        _mark_error(session_dir, manifest, "capture_invalid", str(exc))
-        sys.exit(f"recovery failed: {exc}")
+    except session.CaptureInvalid:
+        for name in ("mic.wav", "system.wav"):
+            path = session_dir / name
+            if not path.exists():
+                continue
+            try:
+                session.inspect_wav(path)
+            except session.CaptureInvalid:
+                try:
+                    session.repair_wav(path)
+                except session.CaptureInvalid:
+                    pass  # ambiguous damage stays interrupted via re-validation
+        try:
+            channels = session.validate_capture(session_dir, None)
+        except session.CaptureInvalid as exc:
+            _mark_error(session_dir, manifest, "capture_invalid", str(exc))
+            sys.exit(f"recovery failed: {exc}")
     result = session.transition(session_dir, session.SessionState.CAPTURED,
                                 channels=channels, error=None)
     print(f"recovered: {result.session_id}")
