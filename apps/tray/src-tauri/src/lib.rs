@@ -31,8 +31,10 @@ pub struct AppState {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 struct Snapshot {
-    recording: Option<(String, i64)>, // (session id, minutes)
-    processing: bool,
+    /// Active session: (id, minutes, state). None when nothing is running.
+    meeting: Option<(String, i64, miris::SessionState)>,
+    /// Newest pending session: (id, displayed state, error message).
+    pending: Option<(String, miris::SessionState, Option<String>)>,
     laris_alive: bool,
     ptt_trusted: bool, // false = daemon up but macOS denies keyboard monitoring
     laris_ready: bool, // false = daemon up, model still loading
@@ -41,10 +43,57 @@ struct Snapshot {
     theme: Option<(String, String, String)>, // (archetype, palette, position)
 }
 
+/// One primary action represents only the active session; a second item
+/// represents the newest pending one. Disabled rows explain why.
+fn primary_action(active: Option<miris::SessionState>) -> (&'static str, &'static str, bool) {
+    match active {
+        None => ("miris_start", "Gravar reunião", true),
+        Some(miris::SessionState::Starting) => ("noop", "Iniciando gravação...", false),
+        Some(miris::SessionState::Recording) => ("miris_stop", "Parar gravação", true),
+        Some(miris::SessionState::Stopping) => ("noop", "Parando gravação...", false),
+        Some(miris::SessionState::Processing) => ("noop", "Processando reunião...", false),
+        // captured/interrupted/completed/failed are not active work
+        Some(_) => ("miris_start", "Gravar reunião", true),
+    }
+}
+
+fn pending_action(state: miris::SessionState) -> Option<(&'static str, &'static str)> {
+    match state {
+        miris::SessionState::Captured => Some(("miris_process", "Processar gravação")),
+        miris::SessionState::Interrupted => Some(("miris_recover", "Recuperar gravação")),
+        _ => None,
+    }
+}
+
+/// A detached recording must never be orphaned by a quit: Sair is only
+/// offered when the latest session reached a stable state (captured,
+/// completed, interrupted, failed - or none at all).
+fn quit_enabled(active: Option<miris::SessionState>) -> bool {
+    !active.is_some_and(miris::SessionState::is_active)
+}
+
+/// Session ids are %Y%m%d-%H%M%S. Menu ids embed them; never let anything
+/// that is not exactly that reach the CLI as a path component.
+fn safe_session_id(raw: &str) -> Option<String> {
+    let id = raw.trim();
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_digit() || c == '-'))
+        .then(|| id.to_owned())
+}
+
 // Warn once when the daemon comes up without keyboard permission: the edge
 // INTO the bad state, so the tray nags on transition, not every poll tick.
 fn should_warn_untrusted(last: &Snapshot, current: &Snapshot) -> bool {
     current.laris_alive && !current.ptt_trusted && (!last.laris_alive || last.ptt_trusted)
+}
+
+/// Only an active recording session paints the red icon - a pending
+/// interruption or a captured session does not.
+fn is_recording(snap: &Snapshot) -> bool {
+    meeting_state(snap) == Some(miris::SessionState::Recording)
+}
+
+fn meeting_state(snap: &Snapshot) -> Option<miris::SessionState> {
+    snap.meeting.as_ref().map(|(_, _, s)| *s)
 }
 
 /// Liveness is not readiness: uvicorn answers on :8421 seconds before the
@@ -87,13 +136,19 @@ fn sessions_dir(state: &AppState) -> PathBuf {
 
 fn take_snapshot(state: &AppState) -> Snapshot {
     let sessions = sessions_dir(state);
-    let recording = match miris::status(&sessions) {
-        miris::MirisStatus::Recording { session, .. } => {
-            let mins = miris::recording_minutes(&session, chrono::Local::now()).unwrap_or(0);
-            Some((session, mins))
-        }
-        miris::MirisStatus::Idle => None,
-    };
+    let snap = miris::snapshot(&sessions);
+    let meeting = snap.active.as_ref().map(|v| {
+        let mins = miris::recording_minutes(&v.manifest.session_id, chrono::Local::now())
+            .unwrap_or(0);
+        (v.manifest.session_id.clone(), mins, v.manifest.state)
+    });
+    let pending = snap.pending.as_ref().map(|v| {
+        (
+            v.manifest.session_id.clone(),
+            v.derived_state,
+            v.manifest.error.as_ref().map(|e| e.message.clone()),
+        )
+    });
     let peer = laris::read_peer(&peers_path());
     let laris_alive = peer.as_ref().map(|p| laris::alive(&p.url)).unwrap_or(false);
     // ponytail: theme fetched every tick while laris is up - localhost HTTP,
@@ -120,27 +175,46 @@ fn take_snapshot(state: &AppState) -> Snapshot {
     let hands_free =
         laris_settings.get("ASSISTANT_MODE").and_then(|v| v.as_str()) == Some("always_on");
     Snapshot {
-        recording,
-        processing: state.processing.load(Ordering::SeqCst),
+        meeting,
+        pending,
         laris_alive,
         ptt_trusted,
         laris_ready,
         hands_free,
-        has_last_note: miris::last_note(&sessions).is_some(),
+        has_last_note: snap.last_note.is_some(),
         theme,
     }
 }
 
 fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
-    let meeting = if snap.processing {
-        MenuItem::with_id(app, "noop", "Processando reunião...", false, None::<&str>)?
-    } else if let Some((_, mins)) = &snap.recording {
-        MenuItem::with_id(app, "miris_stop", format!("Parar gravação ({mins} min)"), true, None::<&str>)?
+    let active_state = meeting_state(snap);
+    let (id, base_label, enabled) = primary_action(active_state);
+    let label = if active_state == Some(miris::SessionState::Recording) {
+        let mins = snap.meeting.as_ref().map(|(_, m, _)| *m).unwrap_or(0);
+        format!("{base_label} ({mins} min)")
     } else {
-        MenuItem::with_id(app, "miris_start", "Gravar reunião", true, None::<&str>)?
+        base_label.to_owned()
     };
+    let meeting = MenuItem::with_id(app, id, label, enabled, None::<&str>)?;
+
+    let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(meeting)];
+    if let Some((session_id, state, _)) = &snap.pending {
+        if let Some((base, text)) = pending_action(*state) {
+            items.push(Box::new(MenuItem::with_id(
+                app,
+                format!("{base}:{session_id}"),
+                text,
+                true,
+                None::<&str>,
+            )?));
+        }
+    }
+
     let last_note =
         MenuItem::with_id(app, "last_note", "Última nota", snap.has_last_note, None::<&str>)?;
+    items.push(Box::new(last_note));
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    items.push(Box::new(sep1));
     // status, not a switch: dictation is always on and cmd_r is the control.
     // Own id, not "noop" - the meeting item already uses that one while
     // processing, and two items sharing an id in one menu is asking for a
@@ -152,11 +226,13 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
         false, // disabled: nothing to click
         None::<&str>,
     )?;
+    items.push(Box::new(dictation));
     let hands_free = CheckMenuItem::with_id(
         app, "hands_free", "Hands-free",
         hands_free_enabled(snap.laris_alive, snap.laris_ready),
         snap.hands_free, None::<&str>,
     )?;
+    items.push(Box::new(hands_free));
 
     let (cur_arch, cur_pal, cur_pos) = snap.theme.clone().unwrap_or_default();
     let mut theme_children: Vec<Box<dyn IsMenuItem<Wry>>> = Vec::new();
@@ -183,16 +259,22 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
         hands_free_enabled(snap.laris_alive, snap.laris_ready),
         &refs,
     )?;
+    items.push(Box::new(theme_menu));
 
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    items.push(Box::new(sep2));
     let settings_item =
         MenuItem::with_id(app, "settings", "Configurações...", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
-    let sep1 = PredefinedMenuItem::separator(app)?;
-    let sep2 = PredefinedMenuItem::separator(app)?;
-    Menu::with_items(app, &[
-        &meeting, &last_note, &sep1, &dictation, &hands_free, &theme_menu, &sep2,
-        &settings_item, &quit,
-    ])
+    items.push(Box::new(settings_item));
+    let quit = MenuItem::with_id(
+        app, "quit", "Sair",
+        quit_enabled(active_state),
+        None::<&str>,
+    )?;
+    items.push(Box::new(quit));
+
+    let refs: Vec<&dyn IsMenuItem<Wry>> = items.iter().map(|b| b.as_ref()).collect();
+    Menu::with_items(app, &refs)
 }
 
 fn set_tray_icon(tray: &TrayIcon, recording: bool) {
@@ -269,6 +351,11 @@ fn handle_menu(app: &AppHandle, id: &str) {
     state.menu_dirty.store(true, Ordering::SeqCst);
     match id {
         "quit" => {
+            // the menu item is disabled during active work, but a click can
+            // race a session that started since the last 2s poll - re-check
+            if miris::snapshot(&sessions_dir(&state)).active.is_some() {
+                return;
+            }
             state.daemon.lock().unwrap().stop();
             app.exit(0);
         }
@@ -297,11 +384,53 @@ fn handle_menu(app: &AppHandle, id: &str) {
             let bin = state.config.miris_bin.clone();
             std::thread::spawn(move || {
                 let msg = match miris::stop(&bin) {
-                    Ok(note) => format!(
+                    Ok(miris::StopOutcome::Note(note)) => format!(
                         "Nota salva: {}",
                         note.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                     ),
+                    Ok(miris::StopOutcome::Interrupted) => {
+                        "Gravação interrompida: recupere pelo menu".to_owned()
+                    }
                     Err(e) => format!("Falha ao processar reunião: {e}"),
+                };
+                app2.state::<AppState>().processing.store(false, Ordering::SeqCst);
+                notify(&app2, &msg);
+            });
+        }
+        id if id.starts_with("miris_recover:") || id.starts_with("miris_process:") => {
+            let (base, raw) = id.split_once(':').unwrap_or(("", ""));
+            let Some(session_id) = safe_session_id(raw) else { return };
+            // same suppression as stop: one CLI action at a time
+            if state
+                .processing
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return;
+            }
+            let app2 = app.clone();
+            let bin = state.config.miris_bin.clone();
+            let recovering = base == "miris_recover";
+            std::thread::spawn(move || {
+                let result = if recovering {
+                    miris::recover(&bin, &session_id).map(|_| None)
+                } else {
+                    miris::process(&bin, &session_id).map(Some)
+                };
+                let msg = if recovering {
+                    match result {
+                        Ok(_) => return, // the poll flips the row to Processar
+                        Err(e) => format!("Falha ao recuperar gravação: {e}"),
+                    }
+                } else {
+                    match result {
+                        Ok(Some(note)) => format!(
+                            "Nota salva: {}",
+                            note.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                        ),
+                        Ok(None) => unreachable!("process maps to Some"),
+                        Err(e) => format!("Falha ao processar reunião: {e}"),
+                    }
                 };
                 app2.state::<AppState>().processing.store(false, Ordering::SeqCst);
                 notify(&app2, &msg);
@@ -411,7 +540,7 @@ pub fn run() {
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
                 .build(app)?;
-            set_tray_icon(&tray, snap.recording.is_some());
+            set_tray_icon(&tray, is_recording(&snap));
 
             // poll loop: snapshot off the main thread, menu mutations on it
             // (macOS requires menu construction on the main thread)
@@ -444,8 +573,20 @@ pub fn run() {
                     if current == last && !dirty {
                         continue;
                     }
-                    let recording_changed =
-                        current.recording.is_some() != last.recording.is_some();
+                    let recording_changed = is_recording(&current) != is_recording(&last);
+                    // an active capture that turned into a pending interrupted
+                    // session is the user's four-second notification target
+                    if last.meeting.is_some() && !current.meeting.is_some() {
+                        if let Some((session, state, error)) = &current.pending {
+                            if *state == miris::SessionState::Interrupted {
+                                let reason = error.clone().unwrap_or_else(|| {
+                                    "falha de captura".to_owned()
+                                });
+                                notify(&handle, &format!("Gravação interrompida: {reason}"));
+                                let _ = session; // the pending row offers the recovery
+                            }
+                        }
+                    }
                     if should_warn_untrusted(&last, &current) {
                         notify(&handle, "Ditado sem permissão: ative VOXIS em Ajustes › \
                             Privacidade e Segurança › Acessibilidade E Monitoramento de \
@@ -459,7 +600,7 @@ pub fn run() {
                                 let _ = tray.set_menu(Some(menu));
                             }
                             if recording_changed {
-                                set_tray_icon(&tray, current.recording.is_some());
+                                set_tray_icon(&tray, is_recording(&current));
                             }
                         }
                     });
@@ -569,5 +710,57 @@ mod tests {
         assert!(!should_respawn(true, true, 0, 3));
         // owned but not yet answering the TCP probe - still starting, not dead
         assert!(!should_respawn(true, false, 0, 3));
+    }
+
+    #[test]
+    fn menu_labels_follow_lifecycle() {
+        assert_eq!(primary_action(None), ("miris_start", "Gravar reunião", true));
+        assert_eq!(
+            primary_action(Some(miris::SessionState::Starting)).1,
+            "Iniciando gravação..."
+        );
+        assert_eq!(
+            primary_action(Some(miris::SessionState::Recording)).0,
+            "miris_stop"
+        );
+        assert_eq!(
+            primary_action(Some(miris::SessionState::Stopping)).1,
+            "Parando gravação..."
+        );
+        assert_eq!(
+            primary_action(Some(miris::SessionState::Processing)).1,
+            "Processando reunião..."
+        );
+        assert_eq!(
+            pending_action(miris::SessionState::Interrupted).map(|(id, _)| id),
+            Some("miris_recover")
+        );
+        assert_eq!(
+            pending_action(miris::SessionState::Captured).map(|(id, _)| id),
+            Some("miris_process")
+        );
+        assert!(pending_action(miris::SessionState::Completed).is_none());
+    }
+
+    #[test]
+    fn quit_is_disabled_only_during_active_work() {
+        assert!(!quit_enabled(Some(miris::SessionState::Recording)));
+        assert!(!quit_enabled(Some(miris::SessionState::Processing)));
+        assert!(!quit_enabled(Some(miris::SessionState::Starting)));
+        assert!(!quit_enabled(Some(miris::SessionState::Stopping)));
+        assert!(quit_enabled(None));
+        assert!(quit_enabled(Some(miris::SessionState::Interrupted)));
+        assert!(quit_enabled(Some(miris::SessionState::Captured)));
+    }
+
+    #[test]
+    fn safe_session_id_only_accepts_timestamp_names() {
+        assert_eq!(
+            safe_session_id("20260914-143000").as_deref(),
+            Some("20260914-143000")
+        );
+        assert_eq!(safe_session_id("../etc"), None);
+        assert_eq!(safe_session_id("x; rm -rf /"), None);
+        assert_eq!(safe_session_id(""), None);
     }
 }
