@@ -87,3 +87,18 @@ def process_session(cfg: Config, session_dir: Path, transcriber_factory=None) ->
             ),
         )
         raise
+
+
+def main() -> None:
+    # private meeting audio: the detached pipeline child inherits the CLI's
+    # restrictive umask only if it sets it itself
+    os.umask(0o077)
+    import sys
+
+    from miris import config
+
+    process_session(config.load(), Path(sys.argv[1]))
+
+
+if __name__ == "__main__":
+    main()

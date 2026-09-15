@@ -2,6 +2,7 @@ import io
 import os
 import struct
 import subprocess
+import sys
 import wave
 
 import numpy as np
@@ -160,13 +161,28 @@ def test_recover_repairs_truncated_system_wav(tmp_path):
     assert manifest.channels["system"].frames == frames
 
 
-def test_process_requires_captured_and_calls_pipeline(tmp_path, monkeypatch):
+def test_process_requires_captured(tmp_path):
+    cfg, session_dir = session_in_state(tmp_path, session.SessionState.INTERRUPTED)
+    with pytest.raises(SystemExit, match="not captured"):
+        cli.cmd_process(cfg, session_dir.name)
+
+
+def test_process_runs_pipeline_as_verifiable_subprocess(tmp_path, monkeypatch):
+    """A pipeline running inside the CLI process is indistinguishable from a
+    dead processor: `ps` shows no miris.pipeline token next to the session
+    path, so reconcile_stale and the tray derive captured (and Python's own
+    correction mid-run breaks the final transition). It must be a process of
+    its own whose command carries the marker."""
     cfg, session_dir = session_in_state(tmp_path, session.SessionState.CAPTURED)
-    called = []
-    monkeypatch.setattr(cli.pipeline, "process_session",
-                        lambda cfg, path: called.append(path) or path / "note.md")
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        return subprocess.CompletedProcess(args, 0, stdout="note: /v/n.md\n")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
     cli.cmd_process(cfg, session_dir.name)
-    assert called == [session_dir]
+    assert seen["args"] == [sys.executable, "-m", "miris.pipeline", str(session_dir)]
 
 
 def test_doctor_checks_both_capture_channels(tmp_path, monkeypatch, capsys):

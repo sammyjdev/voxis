@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from collections.abc import Callable
 
-from miris import config, pipeline, session
+from miris import config, session
 
 
 def _live_session(cfg: config.Config):
@@ -161,6 +161,17 @@ def cmd_start(cfg: config.Config) -> None:
     sys.exit(f"recorder did not start (check mic / system-audio permissions): {log_path}")
 
 
+def _run_pipeline(session_dir: Path) -> None:
+    """The pipeline must be a process of its own: reconcile_stale and the tray
+    verify a live processor via `ps` looking for the miris.pipeline marker
+    next to the session path, which only a dedicated process can show."""
+    out = subprocess.run(
+        [sys.executable, "-m", "miris.pipeline", str(session_dir)], check=False
+    )
+    if out.returncode != 0:
+        sys.exit(f"processing failed for {session_dir.name}")
+
+
 def cmd_stop(cfg: config.Config) -> None:
     """Stop the live recorder and run the post-meeting pipeline."""
     cfg.sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -175,8 +186,7 @@ def cmd_stop(cfg: config.Config) -> None:
         print(f"recording interrupted: {session_dir}")
         return
     print("recording finished, processing...")
-    note = pipeline.process_session(cfg, session_dir)
-    print(f"note: {note}")
+    _run_pipeline(session_dir)
 
 
 def cmd_status(cfg: config.Config) -> None:
@@ -236,8 +246,7 @@ def cmd_process(cfg: config.Config, session_id: str) -> None:
     session_dir, manifest = _session_for(cfg, session_id)
     if manifest.state is not session.SessionState.CAPTURED:
         sys.exit(f"session is not captured: {manifest.state.value}")
-    note = pipeline.process_session(cfg, session_dir)
-    print(f"note: {note}")
+    _run_pipeline(session_dir)
 
 
 def run_doctor_capture(cfg: config.Config, duration_s: float = 3.0) -> dict:
