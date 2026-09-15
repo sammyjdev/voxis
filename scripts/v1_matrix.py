@@ -92,6 +92,33 @@ def pid_of_pattern(pattern: str) -> int | None:
     return int(out[0]) if out else None
 
 
+def find_tray() -> tuple[int, str] | None:
+    """Return (pid, binary path) of the running VOXIS tray, or None."""
+    out = subprocess.run(
+        ["pgrep", "-fl", "VOXIS.app/Contents/MacOS"], capture_output=True, text=True
+    ).stdout.strip().splitlines()
+    if not out:
+        return None
+    pid, _, path = out[0].partition(" ")
+    return int(pid), path
+
+
+def tray_bundle(tray_path: str) -> str:
+    """The .app directory a running tray binary belongs to."""
+    return tray_path.split("/Contents/MacOS")[0]
+
+
+def relaunch_tray(bundle: str) -> None:
+    """Revoking a TCC permission kills the running app; bring it back."""
+    subprocess.run(["open", bundle], check=False)
+    for _ in range(40):
+        if find_tray() is not None:
+            time.sleep(1.0)  # let setup settle (daemon spawn, menu build)
+            return
+        time.sleep(0.5)
+    raise RuntimeError(f"tray did not relaunch from {bundle}")
+
+
 def confirm(prompt: str) -> bool:
     return ask(f"  {prompt} [y/N] ").strip().lower() == "y"
 
@@ -131,12 +158,23 @@ class Result:
         )
 
 
-def case_1_mic_denied(cfg: config.Config) -> Result:
-    r = Result(1, "Microphone denied")
-    print("""  steps:
-  1. System Settings > Privacy & Security > Microphone > toggle VOXIS OFF
-  2. come back here and press Enter, THEN click "Gravar reunião" in the tray""")
-    ask("  press Enter when the permission is revoked: ")
+def _permission_denied_case(
+    cfg: config.Config, case_no: int, title: str, revoke_hint: str
+) -> Result:
+    r = Result(case_no, title)
+    tray = find_tray()
+    if tray is None:
+        r.notes = "no running tray at case start"
+        return r
+    bundle = tray_bundle(tray[1])
+    print(f"""  steps:
+  1. {revoke_hint}
+     NOTE: macOS kills VOXIS the moment you flip the toggle - that is normal.
+  2. come back here and press Enter: the script relaunches VOXIS
+  3. when it is back, click "Gravar reunião" in the tray""")
+    ask("  press Enter after revoking the permission: ")
+    relaunch_tray(bundle)
+    record_line(f"tray relaunched from {bundle}")
     session_dir = wait_for_new_session(cfg)
     manifest, elapsed = wait_state(
         session_dir,
@@ -153,31 +191,24 @@ def case_1_mic_denied(cfg: config.Config) -> Result:
         r.notes += " - FALSE recording state, do not edit the expected result"
     r.elapsed = f"{elapsed:.1f}s"
     return r
+
+
+def case_1_mic_denied(cfg: config.Config) -> Result:
+    return _permission_denied_case(
+        cfg,
+        1,
+        "Microphone denied",
+        "System Settings > Privacy & Security > Microphone > toggle VOXIS OFF",
+    )
 
 
 def case_2_system_audio_denied(cfg: config.Config) -> Result:
-    r = Result(2, "System audio denied")
-    print("""  steps:
-  1. System Settings > Privacy & Security: revoke the screen/system-audio
-     recording grant VOXIS holds (wherever it appears for this machine)
-  2. press Enter, THEN click "Gravar reunião" in the tray""")
-    ask("  press Enter when the permission is revoked: ")
-    session_dir = wait_for_new_session(cfg)
-    manifest, elapsed = wait_state(
-        session_dir,
-        {session.SessionState.FAILED, session.SessionState.RECORDING},
-        30.0,
+    return _permission_denied_case(
+        cfg,
+        2,
+        "System audio denied",
+        "System Settings > Privacy & Security: revoke VOXIS's screen/system-audio recording grant",
     )
-    r.session = session_dir.name
-    r.code = manifest.error.code if manifest and manifest.error else "-"
-    r.notes = f"final state {manifest.state.value if manifest else 'none'}"
-    if manifest is not None and manifest.state is session.SessionState.FAILED:
-        r.verdict = "PASS"
-        record_line('tray should have shown "Falha ao iniciar gravação: ..." - paste its exact text in the ledger')
-    else:
-        r.notes += " - FALSE recording state, do not edit the expected result"
-    r.elapsed = f"{elapsed:.1f}s"
-    return r
 
 
 def start_and_wait_recording(cfg: config.Config) -> Path:
@@ -264,6 +295,7 @@ def case_4_recorder_terminated(cfg: config.Config) -> Result:
         and r.code == "recorder_gone"
     ):
         record_line("manifest was left stale (recording) and the CLI reconciled it to interrupted [recorder_gone]")
+        record_line("close and REOPEN the tray menu first - an already-open menu does not refresh")
         if confirm("does the tray menu offer 'Recuperar gravação' (and 'Gravar reunião' is available again)?"):
             r.verdict = "PASS"
             record_line('tray should have shown "Gravação interrompida: ..." - paste its exact text')
@@ -355,12 +387,16 @@ def case_6_llm_failure(cfg: config.Config) -> Result:
 
 def case_7_quit_active(cfg: config.Config) -> Result:
     r = Result(7, "Quit during active work")
+    tray = find_tray()
+    if tray is None:
+        r.notes = "no running tray at case start - open the release candidate first"
+        return r
     session_dir = start_and_wait_recording(cfg)
     print("""  steps:
   1. open the tray menu: "Sair" must appear greyed out
   2. try clicking it anyway""")
     ask("  press Enter after you tried: ")
-    alive = pid_of_pattern("VOXIS.app/Contents/MacOS") is not None
+    alive = find_tray() is not None
     still = session.load(session_dir).state is session.SessionState.RECORDING
     r.session = session_dir.name
     r.notes = f"tray process {'alive' if alive else 'DIED'}, recording {'ongoing' if still else 'STOPPED'}"
@@ -395,7 +431,19 @@ def main() -> None:
     cfg = load_cfg()
     cfg.sessions_dir.mkdir(parents=True, exist_ok=True)
     print(f"VOXIS failure matrix harness - sessions dir: {cfg.sessions_dir}")
-    print("Run the built VOXIS.app (release candidate), not a dev build.")
+    tray = find_tray()
+    if tray is None:
+        rc = REPO / "apps/tray/src-tauri/target/release/bundle/macos/VOXIS.app"
+        print("no running VOXIS tray found. Open the release candidate first:")
+        print(f"  open '{rc}'")
+        raise SystemExit(1)
+    tray_pid, tray_path = tray
+    print(f"tray under test: pid {tray_pid}: {tray_path}")
+    if "target/release/bundle" not in tray_path:
+        print("WARNING: this is not the release-candidate bundle - results are")
+        print("not valid ledger evidence unless you copied that bundle here.")
+        if not confirm("continue anyway?"):
+            raise SystemExit(1)
     results: list[Result] = []
     for no, (title, fn) in chosen.items():
         try:
