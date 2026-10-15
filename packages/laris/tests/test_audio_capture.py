@@ -273,3 +273,59 @@ def test_a_blip_shorter_than_the_minimum_speech_at_stop_is_dropped(monkeypatch):
     utterances, _ = _speak_then_stop(monkeypatch, voiced_chunks=2)
 
     assert utterances == []
+
+
+def _capture(monkeypatch, levels, events):
+    """The mic delivers one chunk per entry of `levels`, filled with that
+    value; the fake VAD answers events[i] for chunk i. All of it is read
+    before the stop."""
+    from contextlib import contextmanager
+
+    from laris import audio_capture, config
+
+    state = {"read": 0}
+    answers = iter(range(len(levels)))
+
+    @contextmanager
+    def fake_stream(callback):
+        for level in levels:
+            chunk = np.full((config.CHUNK_SAMPLES, 1), level, dtype=np.float32)
+            callback(chunk, config.CHUNK_SAMPLES, None, None)
+        yield
+
+    def count_read(_chunk):
+        state["read"] += 1
+
+    monkeypatch.setattr(audio_capture, "_open_stream", fake_stream)
+    monkeypatch.setattr(config, "NOISE_REDUCTION", "off")
+    vad = object.__new__(audio_capture.VadCapture)
+    vad._model = object()
+    vad._VADIterator = lambda model, **kwargs: type(
+        "FakeVad", (), {"__call__": lambda self, t, return_seconds: events.get(next(answers)),
+                        "reset_states": lambda self: None})()
+    return list(vad.stream_utterances(should_stop=lambda: state["read"] >= len(levels),
+                                      on_chunk=count_read))
+
+
+def test_the_audio_just_before_the_vad_hears_speech_starts_the_utterance(monkeypatch):
+    """The VAD fires a few chunks into a word, so "Qual a latência" was
+    pasted as "a latência". Replaying a recording with 200 ms of the audio
+    before the VAD fired cut WER from 20.6% to 17.7% (2026-10-15)."""
+    from laris import config
+
+    # 10 chunks of soft onset, the VAD fires on chunk 10, speech ends on chunk 25
+    levels = [0.05] * 10 + [0.2] * 16
+    utterances = _capture(monkeypatch, levels, {10: {"start": 0}, 25: {"end": 0}})
+
+    (audio, _rate), = utterances
+    lead = 200 * config.SAMPLE_RATE // 1000 // config.CHUNK_SAMPLES * config.CHUNK_SAMPLES
+    assert len(audio) == lead + 16 * config.CHUNK_SAMPLES
+    assert np.allclose(audio[:lead], 0.05) and np.allclose(audio[lead:], 0.2)
+
+
+def test_a_blip_is_dropped_even_when_the_audio_before_it_would_make_it_long_enough(monkeypatch):
+    """320 ms of speech is a blip (under 400 ms); the 192 ms in front of it
+    must not carry it over the minimum."""
+    utterances = _capture(monkeypatch, [0.05] * 10 + [0.2] * 10, {10: {"start": 0}, 19: {"end": 0}})
+
+    assert utterances == []

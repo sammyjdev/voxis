@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 import types
-from collections import namedtuple
+from collections import deque, namedtuple
 from typing import Callable, Generator, Tuple
 
 import numpy as np
@@ -182,6 +182,9 @@ class VadCapture:
 
         voiced: list[np.ndarray] = []
         in_speech = False
+        recent: deque[np.ndarray] = deque(
+            maxlen=config.PREROLL_MS * config.SAMPLE_RATE // 1000 // config.CHUNK_SAMPLES)
+        lead = 0  # samples of pre-roll at the front of `voiced`
         max_chunks = int(
             config.MAX_SPEECH_DURATION_S * config.SAMPLE_RATE / config.CHUNK_SAMPLES
         )
@@ -190,7 +193,7 @@ class VadCapture:
         def _close(voiced: list[np.ndarray]) -> np.ndarray | None:
             """The finished utterance, or None for a blip too short to be speech."""
             audio = np.concatenate(voiced)
-            if len(audio) < min_samples:
+            if len(audio) - lead < min_samples:  # the pre-roll is not speech
                 return None
             if config.NOISE_REDUCTION == "on":
                 audio = _denoise_chunk(audio, enabled=True)
@@ -198,18 +201,25 @@ class VadCapture:
 
         def _feed(chunk: np.ndarray) -> Generator[_Utterance, None, None]:
             """One mic chunk through the VAD; yields the utterance it closes."""
-            nonlocal in_speech, voiced
+            nonlocal in_speech, voiced, lead
             if on_chunk is not None:
                 on_chunk(chunk)
             event = vad(torch.from_numpy(chunk), return_seconds=False)
 
             if event and "start" in event:
                 in_speech = True
-                voiced = [chunk]
+                voiced = [*recent, chunk]
+                lead = sum(len(c) for c in recent)
+                recent.clear()
                 return
+
+            if not in_speech:
+                recent.append(chunk)
 
             if in_speech:
                 voiced.append(chunk)
+                # the cap counts the pre-roll: it guards Whisper's 30 s window,
+                # which sees every sample delivered
                 ended = (event and "end" in event) or len(voiced) >= max_chunks
                 if ended:
                     in_speech = False

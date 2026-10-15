@@ -19,6 +19,10 @@ MIN_SPEECH_DURATION_MS = 400
 MAX_SPEECH_DURATION_S = 30
 VAD_THRESHOLD = 0.5
 VAD_MIN_SILENCE_MS = 400
+# audio kept from before the VAD fires: it fires a few chunks into a word, and
+# without this "Qual a latência" became "a latência". 100-300 ms all cut WER
+# from 20.6% to 17.7% replaying a recorded conversation (2026-10-15)
+PREROLL_MS = 200
 
 NOISE_REDUCTION: str = _setting("NOISE_REDUCTION", "on")  # "on" | "off"
 
