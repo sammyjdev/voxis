@@ -1,0 +1,77 @@
+name: linux
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The Linux port (GNOME on Wayland): laris and miris on Python 3.12 with
+# requirements-linux.txt, and the tray's Rust tests against WebKit2 4.1.
+# The macOS build stays in tray-build.yml.
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    env:
+      # uv's own CPython ships its headers; evdev builds from source
+      UV_MANAGED_PYTHON: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # libportaudio2 for sounddevice; pipewire-bin puts pw-record on PATH,
+      # which `miris doctor` checks for
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 pipewire-bin
+
+      - name: Install uv
+        run: pipx install uv==0.12.18
+
+      - name: laris venv
+        working-directory: packages/laris
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python .venv -r requirements-linux.txt -e .
+
+      # DeepFilterNet is not part of the Linux runtime, and this test needs it
+      - name: laris tests
+        working-directory: packages/laris
+        run: .venv/bin/python -m pytest -q --deselect tests/test_audio_capture.py::test_denoise_on_changes_audio
+
+      - name: miris venv
+        working-directory: packages/miris
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python .venv -r requirements-linux.txt
+
+      - name: miris tests
+        working-directory: packages/miris
+        run: .venv/bin/python -m pytest -q
+
+  tray:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      # SHA pin loses the channel that the @stable tag name normally carries,
+      # so the toolchain must be named explicitly
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master @ 2026-07-17
+        with:
+          toolchain: stable
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: apps/tray/src-tauri
+
+      - name: Rust tests
+        working-directory: apps/tray/src-tauri
+        run: cargo test
