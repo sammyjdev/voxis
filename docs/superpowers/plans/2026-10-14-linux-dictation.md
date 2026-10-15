@@ -285,6 +285,7 @@ Python tests are in `packages/laris/tests/` (criteria 20-34 and 38-41:
 | 42 | live: a fresh `MIRIS_HOME`'s default `llm_command` exited 1 with "model Gemini 3.5 Flash (Medium) is not recognized" before, printed `OK` after |
 | 43 | `test_daemon.py::test_utterances_of_one_hands_free_session_are_pasted_a_space_apart`, `::test_a_new_hands_free_session_starts_without_a_space`, `test_app_context.py::test_prose_formatting_keeps_the_space_before_a_follow_up_utterance` |
 | 44 | `test_audio_capture.py::test_the_audio_just_before_the_vad_hears_speech_starts_the_utterance`, `::test_a_blip_is_dropped_even_when_the_audio_before_it_would_make_it_long_enough`; replay numbers in the benchmark spec |
+| 45 | miris `test_pipeline.py::test_the_dictation_vocabulary_prompt_never_reaches_meeting_transcription`; live: with a settings file holding the prompt, `laris.config.INITIAL_PROMPT` was the list in a dictation process and `""` after MIRIS built its transcriber |
 
 ## Slice 3 - MIRIS on Linux
 
@@ -494,6 +495,9 @@ in `agy`, and the tray started at login cannot find a bare `agy`.
     200 ms (6 chunks) before chunk N; an utterance whose speech after the
     VAD fired is under 400 ms is still dropped. (Both platforms; it had
     pasted "Qual a latência" as "a latência".)
+45. Given LARIS's settings file sets `INITIAL_PROMPT` (dictation
+    vocabulary), when MIRIS transcribes a meeting, then no prompt is sent:
+    on a recorded conversation the prompt raised WER from 17.7% to 19.3%.
 
 ### Live results (2026-10-15)
 

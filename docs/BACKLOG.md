@@ -76,7 +76,10 @@ the v1.0.0 ledger stay untouched.
 - [x] **Dictation test with the owner's voice** (2026-10-15): turbo stays
       the best model (11.3% WER, 31/42 terms); with a vocabulary
       `INITIAL_PROMPT`, 4.4% and 40/42, at the cost of prompt words leaking
-      on fillers. Numbers in the benchmark spec.
+      on fillers. Numbers in the benchmark spec. The prompt is on for
+      dictation on Linux since 2026-10-15; meetings never use it. If pasted
+      fillers like "MIRIS, MIRIS" show up, a guard that drops output made
+      only of prompt words caught 4 of the 9 leaks on CORAA.
 - [ ] **Parakeet v3 for English meetings?** It cut English meeting errors by
       24% against Whisper turbo (18.4 vs 24.1 WER) and tied it in pt-BR. Costs
       a second STT backend on both platforms; worth it only if English
