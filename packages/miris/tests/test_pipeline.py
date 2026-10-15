@@ -228,6 +228,34 @@ def test_a_language_pinned_in_stt_language_is_used_without_detecting(tmp_path, m
     assert transcript == "[00:00] Eu: lang=en"
 
 
+def test_the_dictation_vocabulary_prompt_never_reaches_meeting_transcription(tmp_path, monkeypatch):
+    """INITIAL_PROMPT lists dictation jargon. On conversation it costs
+    accuracy (a recorded pt-BR conversation: 17.7% -> 19.3% WER) and leaks
+    its words into fillers ("aham" -> "MIRIS, MIRIS, MIRIS"), so meetings
+    are transcribed without it even when LARIS's settings file sets it."""
+    seen = []
+
+    class FakeFasterWhisper:
+        def warm(self):
+            pass
+
+        def detect_language(self, audio):
+            return "pt"
+
+        def transcribe(self, audio, sample_rate, language=None):
+            from laris import config  # read at transcribe time, like stt_faster
+            seen.append(config.INITIAL_PROMPT)
+            return "fala"
+
+    _linux_backend(monkeypatch, FakeFasterWhisper)
+    monkeypatch.setattr("laris.config.STT_LANGUAGE", "")
+    monkeypatch.setattr("laris.config.INITIAL_PROMPT", "LARIS, VOXIS, MIRIS")
+
+    _transcribe_one_second_of_mic(tmp_path, monkeypatch)
+
+    assert seen == [""]
+
+
 LANGUAGE_PROBE = """
 import os, sys, types
 sys.platform = "linux"

@@ -50,7 +50,11 @@ def _default_transcriber_factory():
     # per utterance unless the user pinned STT_LANGUAGE themselves. Set before
     # the backend import, which reads laris.config once.
     os.environ.setdefault("STT_LANGUAGE", "")
+    from laris import config
     from laris.platform import get_backend
+    # INITIAL_PROMPT is dictation jargon from LARIS's settings file; on
+    # conversation it costs accuracy and leaks its words into fillers
+    config.INITIAL_PROMPT = ""
     return _BackendTranscriber(get_backend())
 
 
