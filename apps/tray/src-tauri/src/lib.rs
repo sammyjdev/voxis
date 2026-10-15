@@ -39,6 +39,7 @@ struct Snapshot {
     ptt_trusted: bool, // false = daemon up but macOS denies keyboard monitoring
     laris_ready: bool, // false = daemon up, model still loading
     hands_free: bool,
+    dictating: bool, // the daemon's toggle left the mic listening (Linux)
     has_last_note: bool,
     theme: Option<(String, String, String)>, // (archetype, palette, position)
 }
@@ -90,6 +91,12 @@ fn should_warn_untrusted(last: &Snapshot, current: &Snapshot) -> bool {
 /// interruption or a captured session does not.
 fn is_recording(snap: &Snapshot) -> bool {
     meeting_state(snap) == Some(miris::SessionState::Recording)
+}
+
+/// The red icon means the mic is open: a meeting recording, or dictation
+/// listening after a toggle (Linux, where there is no orb to show it).
+fn shows_live_icon(snap: &Snapshot) -> bool {
+    is_recording(snap) || snap.dictating
 }
 
 fn meeting_state(snap: &Snapshot) -> Option<miris::SessionState> {
@@ -163,6 +170,11 @@ fn take_snapshot(state: &AppState) -> Snapshot {
         .as_ref()
         .and_then(|b| b.get("ready")?.as_bool())
         .unwrap_or(true);
+    // absent field = macOS or an old daemon: never claim the mic is open
+    let dictating = theme_body
+        .as_ref()
+        .and_then(|b| b.get("dictating")?.as_bool())
+        .unwrap_or(false);
     let theme = theme_body.and_then(|body| {
         let t = body.get("theme")?;
         Some((
@@ -181,6 +193,7 @@ fn take_snapshot(state: &AppState) -> Snapshot {
         ptt_trusted,
         laris_ready,
         hands_free,
+        dictating,
         has_last_note: snap.last_note.is_some(),
         theme,
     }
@@ -540,7 +553,7 @@ pub fn run() {
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
                 .build(app)?;
-            set_tray_icon(&tray, is_recording(&snap));
+            set_tray_icon(&tray, shows_live_icon(&snap));
 
             // poll loop: snapshot off the main thread, menu mutations on it
             // (macOS requires menu construction on the main thread)
@@ -573,7 +586,7 @@ pub fn run() {
                     if current == last && !dirty {
                         continue;
                     }
-                    let recording_changed = is_recording(&current) != is_recording(&last);
+                    let recording_changed = shows_live_icon(&current) != shows_live_icon(&last);
                     // an active capture that turned into a pending interrupted
                     // session is the user's four-second notification target
                     if last.meeting.is_some() && !current.meeting.is_some() {
@@ -600,7 +613,7 @@ pub fn run() {
                                 let _ = tray.set_menu(Some(menu));
                             }
                             if recording_changed {
-                                set_tray_icon(&tray, is_recording(&current));
+                                set_tray_icon(&tray, shows_live_icon(&current));
                             }
                         }
                     });
@@ -672,6 +685,19 @@ mod tests {
         assert_eq!(dictation_status_label(false, false), "Ditado indisponível");
         // a dead daemon is never ready, whatever a stale payload claims
         assert_eq!(dictation_status_label(false, true), "Ditado indisponível");
+    }
+
+    #[test]
+    fn the_icon_turns_red_while_dictation_is_listening() {
+        // Linux has no orb: with no meeting running, the tray icon is the
+        // only sign that a toggle left the mic open
+        let listening = Snapshot { dictating: true, ..Default::default() };
+        assert!(shows_live_icon(&listening));
+    }
+
+    #[test]
+    fn the_icon_stays_idle_with_no_meeting_and_no_dictation() {
+        assert!(!shows_live_icon(&Snapshot::default()));
     }
 
     #[test]
