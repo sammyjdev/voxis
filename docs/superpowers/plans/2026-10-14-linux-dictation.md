@@ -6,9 +6,9 @@
 |---|---|
 | 1 - dictation | Done and used live. Open: criterion 11's browser + Ptyxis run and its latency record. |
 | Orb on Linux | Done, checked live 2026-10-15 (was cut, now back: decision 5). |
-| 2 - tray | Working: runs, owns the daemon, icon red while dictating, starts at login, defaults `laris_dir` to its build checkout. Open: the fresh-login check (criterion 19); menu actions not checked on Linux. |
-| 3 - MIRIS | Code done 2026-10-15; `miris doctor` and a CLI start/stop/process run pass live. Open: the tray run (criterion 29). |
-| 4 - polish | Done 2026-10-15: ducking through `wpctl`, speech kept on a quick stop, a Linux CI job (not yet run on GitHub). |
+| 2 - tray | Working: runs, owns the daemon, icon red while dictating, starts at login, defaults `laris_dir` to its build checkout. Menu checked live 2026-10-15: theme switching, meeting start/stop, "Sair". Open: the fresh-login check (criterion 19); the hands-free checkbox. |
+| 3 - MIRIS | Done 2026-10-15: `miris doctor`, the CLI and the tray run (criterion 29) pass live. |
+| 4 - polish | Done 2026-10-15: ducking through `wpctl`, speech kept on a quick stop, a Linux CI job. |
 
 Install steps: `docs/INSTALL.md`, section "Linux (GNOME on Wayland)".
 
@@ -212,8 +212,11 @@ Numbered after slice 3's 20-29 so earlier numbers stay stable.
 
 Open:
 
-- Not checked on Linux: the menu actions (hands-free checkbox, theme
-  switching, "Sair" reaping the daemon).
+- Menu actions checked live 2026-10-15, driven over dbusmenu: a palette
+  click rewrote `orb-theme.json` (blade -> noir -> blade) and the checkmarks
+  settled on the next poll; "Gravar reunião" and its stop (criterion 29);
+  "Sair" took the tray, the daemon and the orb down within 0.5 s and freed
+  :8421. Not checked: the hands-free checkbox (it opens the mic).
 
 ### Acceptance criteria
 
@@ -266,7 +269,7 @@ Python tests are in `packages/laris/tests/` (criteria 20-34:
 | 26 | `test_pipeline.py::test_on_macos_meetings_are_still_transcribed_by_mlx_whisper` |
 | 27 | `test_cli.py::test_on_linux_the_doctor_checks_pw_record_and_runs_the_capture`, `::test_on_linux_without_pw_record_the_doctor_fails_and_skips_the_capture`, `::test_on_macos_the_doctor_still_checks_the_audiotap_binary`; live `miris doctor` above |
 | 28 | the suites: `cd packages/miris && .venv/bin/python -m pytest -q` (90 passed), laris and `cargo test --release --lib` as in 10 |
-| 29 | manual, open |
+| 29 | manual, passed 2026-10-15 through the tray (isolated `MIRIS_HOME`, stub LLM); the note line it depends on: `test_pipeline.py::test_the_pipeline_process_prints_the_note_path_for_the_tray` |
 | 30 | `test_daemon.py::test_each_hands_free_line_shows_the_audio_length_and_the_stt_time` |
 | 31 | `test_linux_boot.py::test_on_linux_without_deepfilternet_the_boot_log_says_denoise_is_off`, `::test_on_linux_with_deepfilternet_the_boot_log_says_denoise_is_on`, `::test_on_macos_the_boot_log_still_reports_the_configured_denoise_setting` |
 | 32 | `test_linux_boot.py::test_a_toggle_driven_daemon_does_not_claim_push_to_talk_mode`, `::test_a_toggle_driven_daemon_that_boots_listening_says_always_on`, `test_daemon.py::test_a_push_to_talk_daemon_names_its_key_and_mode_when_ready` |
@@ -277,7 +280,7 @@ Python tests are in `packages/laris/tests/` (criteria 20-34:
 
 ## Slice 3 - MIRIS on Linux
 
-**Status: code done (2026-10-15); the tray run (criterion 29) is open.** Meeting recording from the tray on Linux:
+**Status: done (2026-10-15).** Meeting recording from the tray on Linux:
 microphone on one channel, everything the speakers play on the other, then
 the existing transcript -> notes -> vault pipeline.
 
@@ -398,6 +401,14 @@ run of criterion 29.
 - `pw-record` prints the output path on stderr, so it shows up as the first
   line of `miris doctor` and in `recorder.log`. Kept: silencing stderr would
   also hide pw-record's real errors.
+- Tray, criterion 29: with `tray.json` pointing `miris_bin` at a wrapper
+  that sets an isolated `MIRIS_HOME`, "Gravar reunião" reached `recording`
+  with the icon red (`#e5484d`); the stop reached `completed` in 5 s and the
+  icon went back to teal. The first run exposed a bug on both platforms:
+  since `1020c41` (2026-09-14) the pipeline child never printed the
+  `note: <path>` line the tray parses, so every finished meeting notified
+  "Falha ao processar reunião" although the note was saved. Fixed; the
+  second run notified `Nota salva: 2026-10-15-teste-miris-linux.md`.
 
 ## Slice 4 - polish
 
@@ -412,7 +423,11 @@ run of criterion 29.
   `cargo test` on ubuntu-24.04). Replayed locally from a clean copy of the
   tree: laris 236 passed (the DeepFilterNet test deselected; 239 after the
   stop-boundary fixes), miris 90,
-  `cargo test` 43; not yet run on GitHub.
+  `cargo test` 43. First GitHub run (2026-10-15): the python job passed; the
+  tray job failed on `daemon_venv_branch_runs_python_unbuffered` with
+  ETXTBSY, a race in the tests' fake `python` (26 of 150 local runs). The
+  fake is now a symlink to a launcher in `tests/fixtures` that is never
+  written while tests run (0 of 300).
 
 ### Acceptance criteria
 

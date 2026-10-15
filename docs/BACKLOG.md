@@ -41,13 +41,21 @@ the v1.0.0 ledger stay untouched.
 - [x] **Boot log says `denoise=on` on Linux,** where DeepFilterNet is not
       installed and nothing is denoised. Now it says `off (DeepFilterNet not
       installed)`, and a toggle-driven daemon no longer claims `modo: ptt`.
-- [ ] **Tray menu actions on Linux** (hands-free checkbox, themes, "Sair"
-      reaping the daemon): not checked.
-- [ ] **MIRIS on Linux (slice 3):** `pw-record` on the default sink monitor,
-      `pipeline.py` through the platform backend. Code done; `miris doctor`
-      and a CLI start/stop/process run pass live. Open: the tray's "Gravar
-      reunião" run (plan criterion 29), which needs `~/.local/bin/miris` and
-      a real `vault_root`.
+- [ ] **Tray menu actions on Linux.** Checked 2026-10-15: theme switching,
+      meeting start/stop, "Sair" reaping the daemon. Left: the hands-free
+      checkbox, which opens the mic.
+- [x] **MIRIS on Linux (slice 3):** `pw-record` on the default sink monitor,
+      `pipeline.py` through the platform backend; `miris doctor`, the CLI and
+      the tray's "Gravar reunião" pass live. For daily use it still needs
+      `~/.local/bin/miris` and a real `vault_root` (INSTALL.md, section 6).
+- [x] **The tray said "Falha ao processar reunião" after every meeting**
+      (both platforms, since `1020c41`, 2026-09-14): the pipeline child
+      stopped printing the `note: <path>` line the tray reads. Fixed
+      2026-10-15.
+- [ ] **Tray icon updates can be dropped.** The AppIndicator extension
+      logged `Failed to recognize image format` reading the tray's icon PNG
+      right as it changed (2026-10-15 00:26), likely reading a file still
+      being written. Seen twice; the next poll repaints.
 - [x] **Ducking on Linux (slice 4):** hands-free drops the default output
       to 20% through `wpctl` and gives the same sink its volume back after.
 - [ ] **Per-app formatting on Linux.** GNOME gives clients no focused-window
@@ -58,8 +66,9 @@ the v1.0.0 ledger stay untouched.
       grab, and a Linux reader in laris.
 - [ ] **Linux job in CI.** `.github/workflows/linux.yml` runs the laris and
       miris suites on Python 3.12 with `requirements-linux.txt` and the
-      tray's `cargo test` on ubuntu-24.04. Replayed locally from a clean copy;
-      not yet run on GitHub.
+      tray's `cargo test` on ubuntu-24.04. First run: python green, tray red
+      on an ETXTBSY race in the tests' fake python, now fixed; waiting on a
+      green run.
 
 ## P1 - macOS UX gaps
 
@@ -77,7 +86,8 @@ the v1.0.0 ledger stay untouched.
       holding `:8421`) was seen after the tray exited. This matters more now
       that the daemon is spawned at startup and lives for the whole session:
       `LarisDaemon::stop` must actually reap the child, and a stale daemon must
-      not block a fresh tray from spawning.
+      not block a fresh tray from spawning. (On Linux "Sair" reaps it: the
+      tray, the daemon and the orb were gone within 0.5 s, 2026-10-15.)
 
 ## P2 - Deferred by design
 
