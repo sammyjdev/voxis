@@ -179,6 +179,55 @@ def test_on_linux_meetings_are_transcribed_by_faster_whisper_at_16khz(tmp_path, 
     assert calls == ["warm", (16000, 16000)]
 
 
+def _linux_backend(monkeypatch, backend):
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "mlx_whisper", None)
+    monkeypatch.setitem(sys.modules, "laris.transcriber", None)
+    monkeypatch.setattr("laris.stt_faster.FasterWhisperTranscriber", backend)
+
+
+def test_on_linux_each_meeting_channel_is_transcribed_in_the_language_detected_for_it(tmp_path, monkeypatch):
+    class FakeFasterWhisper:
+        def warm(self):
+            pass
+
+        def detect_language(self, audio):
+            return "pt"
+
+        def transcribe(self, audio, sample_rate, language=None):
+            return f"lang={language}"
+
+    _linux_backend(monkeypatch, FakeFasterWhisper)
+    # what a fresh pipeline process sees (see the LANGUAGE_PROBE test)
+    monkeypatch.setattr("laris.config.STT_LANGUAGE", "")
+
+    transcript = _transcribe_one_second_of_mic(tmp_path, monkeypatch)
+
+    assert transcript == "[00:00] Eu: lang=pt"
+
+
+def test_a_language_pinned_in_stt_language_is_used_without_detecting(tmp_path, monkeypatch):
+    class FakeFasterWhisper:
+        def warm(self):
+            pass
+
+        def detect_language(self, audio):
+            raise AssertionError("detected although the user pinned a language")
+
+        def transcribe(self, audio, sample_rate, language=None):
+            from laris import config
+            return f"lang={language or config.STT_LANGUAGE}"
+
+    _linux_backend(monkeypatch, FakeFasterWhisper)
+    monkeypatch.setattr("laris.config.STT_LANGUAGE", "en")
+
+    transcript = _transcribe_one_second_of_mic(tmp_path, monkeypatch)
+
+    assert transcript == "[00:00] Eu: lang=en"
+
+
 LANGUAGE_PROBE = """
 import os, sys, types
 sys.platform = "linux"

@@ -37,3 +37,22 @@ def test_no_initial_prompt_is_sent_when_unset(monkeypatch):
     t.transcribe(np.zeros(16000, dtype=np.float32))
 
     assert "initial_prompt" not in fake_mlx.transcribe.call_args.kwargs
+
+
+def test_detect_language_names_the_language_mlx_whisper_hears(monkeypatch):
+    t, fake_mlx = _transcriber(monkeypatch, "")
+    fake_mlx.transcribe.return_value = {"text": " hello ", "language": "en"}
+
+    assert t.detect_language(np.zeros(16000, dtype=np.float32)) == "en"
+    assert fake_mlx.transcribe.call_args.kwargs["language"] is None
+
+
+def test_a_language_given_per_call_wins_over_the_configured_one(monkeypatch):
+    from laris import config
+
+    monkeypatch.setattr(config, "STT_LANGUAGE", "")
+    t, fake_mlx = _transcriber(monkeypatch, "")
+
+    t.transcribe(np.zeros(16000, dtype=np.float32), language="pt")
+
+    assert fake_mlx.transcribe.call_args.kwargs["language"] == "pt"

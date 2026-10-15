@@ -106,3 +106,23 @@ def test_empty_audio_transcribes_to_nothing_without_calling_the_model(monkeypatc
 
     assert t.transcribe(np.zeros(0, dtype=np.float32), 16000) == ""
     model.transcribe.assert_not_called()
+
+
+def test_detect_language_names_the_language_whisper_hears(monkeypatch):
+    t, _c, model = _build(monkeypatch, cuda=False)
+    model.detect_language.return_value = ("en", 0.93, [("en", 0.93), ("pt", 0.05)])
+
+    assert t.detect_language(np.zeros(16000, dtype=np.float32)) == "en"
+
+
+def test_a_language_given_per_call_wins_over_the_configured_one(monkeypatch):
+    """MIRIS detects the language once per meeting channel and hands it to
+    every utterance of that channel; STT_LANGUAGE stays "" (auto) for it."""
+    from laris import config
+
+    monkeypatch.setattr(config, "STT_LANGUAGE", "")
+    t, _c, model = _build(monkeypatch, cuda=False)
+
+    t.transcribe(np.zeros(16000, dtype=np.float32), 16000, language="pt")
+
+    assert model.transcribe.call_args.kwargs["language"] == "pt"

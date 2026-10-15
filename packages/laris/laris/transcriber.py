@@ -48,7 +48,23 @@ class Transcriber:
         utterance doesn't pay it - measured 2.9s cold vs 0.8s warm."""
         self.transcribe(np.zeros(config.SAMPLE_RATE // 2, dtype=np.float32))
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int = config.SAMPLE_RATE) -> str:
+    def detect_language(self, audio: np.ndarray) -> str:
+        """Whisper's language guess over the first 30 s of audio. mlx-whisper
+        exposes it only through transcribe(), which detects with language=None."""
+        result = self._mlx_whisper.transcribe(
+            audio[: 30 * config.SAMPLE_RATE].astype(np.float32),
+            path_or_hf_repo=self.model,
+            language=None,
+            task="transcribe",
+            word_timestamps=False,   # do NOT change: known memory leak with True
+            fp16=True,
+            condition_on_previous_text=False,
+        )
+        return result["language"]
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int = config.SAMPLE_RATE,
+                   language: str | None = None) -> str:
+        """A non-empty `language` overrides STT_LANGUAGE for this call."""
         if len(audio) == 0:
             return ""
         # omitted entirely when unset: an empty initial_prompt still primes the
@@ -61,7 +77,7 @@ class Transcriber:
         result = self._mlx_whisper.transcribe(
             audio.astype(np.float32),
             path_or_hf_repo=self.model,
-            language=config.STT_LANGUAGE or None,  # "" -> auto-detect
+            language=language or config.STT_LANGUAGE or None,  # "" -> auto-detect
             task="transcribe",
             word_timestamps=False,   # do NOT change: known memory leak with True
             fp16=True,

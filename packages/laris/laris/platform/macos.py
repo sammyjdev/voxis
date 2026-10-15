@@ -14,8 +14,13 @@ class MacOSBackend:
     def warm(self) -> None:
         self._stt.warm()
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int) -> str:
-        return self._stt.transcribe(audio, sample_rate)
+    def detect_language(self, audio: np.ndarray) -> str:
+        return self._stt.detect_language(audio)
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int,
+                   language: str | None = None) -> str:
+        kwargs = {"language": language} if language else {}
+        return self._stt.transcribe(audio, sample_rate, **kwargs)
 
     def type_text(self, text: str) -> None:
         from laris.dictation import type_text

@@ -30,8 +30,19 @@ class _BackendTranscriber:
     def warm(self) -> None:
         self._backend.warm()
 
-    def transcribe(self, audio) -> str:
-        return self._backend.transcribe(audio, transcribe.TARGET_SR)
+    def detect_language(self, audio) -> str | None:
+        """None when the user pinned STT_LANGUAGE (the backend applies it) or
+        the backend cannot guess."""
+        from laris import config
+
+        detect = getattr(self._backend, "detect_language", None)
+        if config.STT_LANGUAGE or detect is None:
+            return None
+        return detect(audio)
+
+    def transcribe(self, audio, language: str | None = None) -> str:
+        kwargs = {"language": language} if language else {}
+        return self._backend.transcribe(audio, transcribe.TARGET_SR, **kwargs)
 
 
 def _default_transcriber_factory():

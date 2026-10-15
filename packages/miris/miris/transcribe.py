@@ -1,4 +1,5 @@
 """Per-channel STT (mlx-whisper via laris) + timeline merge."""
+import sys
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,12 +64,39 @@ def collapse_repetitions(text: str, max_run: int = 3) -> str:
     return " ".join(out)
 
 
+LANGUAGE_PROBE_S = 30  # one Whisper window
+
+
+def channel_language(audio: np.ndarray, spans: list[tuple[int, int]], transcriber) -> str | None:
+    """One language guess for a whole channel, over its first 30 s of speech.
+    Whisper guessing per utterance mislabels short ones (a 1 s "bom dia" came
+    out as German); None when the transcriber cannot or should not guess."""
+    detect = getattr(transcriber, "detect_language", None)
+    if detect is None or not spans:
+        return None
+    pieces, left = [], LANGUAGE_PROBE_S * TARGET_SR
+    for start, end in spans:  # stop at 30 s: a long meeting is never copied whole
+        pieces.append(audio[start:min(end, start + left)])
+        left -= len(pieces[-1])
+        if left <= 0:
+            break
+    try:
+        return detect(np.concatenate(pieces))
+    except Exception as exc:  # noqa: BLE001 - an aid, never worth losing the channel
+        print(f"[transcribe] language detection failed ({exc}) - guessing per utterance",
+              file=sys.stderr)
+        return None
+
+
 def transcribe_channel(path: Path, speaker: str, transcriber,
                        spans_fn=speech_spans) -> list[Segment]:
     audio = load_wav_mono16k(path)
+    spans = spans_fn(audio)
+    language = channel_language(audio, spans, transcriber)
+    kwargs = {"language": language} if language else {}
     segments = []
-    for start, end in spans_fn(audio):
-        text = collapse_repetitions(transcriber.transcribe(audio[start:end]))
+    for start, end in spans:
+        text = collapse_repetitions(transcriber.transcribe(audio[start:end], **kwargs))
         if text:
             segments.append(Segment(start / TARGET_SR, end / TARGET_SR, speaker, text))
     return segments

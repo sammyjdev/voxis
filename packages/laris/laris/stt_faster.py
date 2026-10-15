@@ -73,7 +73,13 @@ class FasterWhisperTranscriber:
         self.transcribe(np.zeros(config.SAMPLE_RATE // 2, dtype=np.float32),
                         config.SAMPLE_RATE)
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int = config.SAMPLE_RATE) -> str:
+    def detect_language(self, audio: np.ndarray) -> str:
+        """Whisper's language guess over the first 30 s of audio."""
+        return self._model.detect_language(audio.astype(np.float32))[0]
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int = config.SAMPLE_RATE,
+                   language: str | None = None) -> str:
+        """A non-empty `language` overrides STT_LANGUAGE for this call."""
         if len(audio) == 0:
             return ""
         # omitted entirely when unset, same rule as transcriber.py: an empty
@@ -85,7 +91,7 @@ class FasterWhisperTranscriber:
         )
         segments, _info = self._model.transcribe(
             audio.astype(np.float32),
-            language=config.STT_LANGUAGE or None,  # "" -> auto-detect
+            language=language or config.STT_LANGUAGE or None,  # "" -> auto-detect
             task="transcribe",
             condition_on_previous_text=False,  # same anti-repetition fix as mlx path
             **extra,

@@ -134,3 +134,28 @@ def test_macos_backend_overlay_and_ducker_are_real_types():
     backend = MacOSBackend.__new__(MacOSBackend)  # no Transcriber construction
     assert isinstance(backend.make_overlay("http://x"), Overlay)
     assert isinstance(backend.make_ducker(), AudioDucker)
+
+
+class LanguageAwareStt:
+    """A transcriber that hears pt-BR and reports the language it was handed."""
+
+    def detect_language(self, audio):
+        return "pt"
+
+    def transcribe(self, audio, sample_rate, language=None):
+        return f"lang={language}"
+
+
+@pytest.mark.parametrize("platform_name", ["linux", "darwin"])
+def test_the_platform_backend_passes_the_detected_language_through(monkeypatch, platform_name):
+    """MIRIS asks the backend for a channel's language and hands it back with
+    each utterance; the backend wrapper must not drop either side."""
+    monkeypatch.setattr("laris.stt_faster.FasterWhisperTranscriber", LanguageAwareStt)
+    monkeypatch.setattr("laris.transcriber.Transcriber", LanguageAwareStt)
+    monkeypatch.setattr(sys, "platform", platform_name)
+    backend = laris_platform.get_backend()
+    audio = np.zeros(8, dtype=np.float32)
+
+    language = backend.detect_language(audio)
+
+    assert backend.transcribe(audio, 16000, language=language) == "lang=pt"
