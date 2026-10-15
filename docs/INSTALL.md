@@ -86,7 +86,11 @@ miris stop      # stop, transcribe, summarize, save the note to your vault
 ```
 
 Config is created on first run at `~/.miris/config.toml` - vault root,
-category-to-folder map, and `llm_command`. Raw recordings stay under
+category-to-folder map, and `llm_command`. Give `llm_command` the CLI's full
+path (`which agy`): the tray, started from the Dock or at login, does not have
+your shell's PATH, and `miris doctor` warns when the command is a bare name.
+Meeting language is detected once per channel, over its first 30 s of
+speech, so pt-BR and English meetings both work. Raw recordings stay under
 `~/.miris/sessions/<timestamp>/` until you delete them; they are created
 `0600` (owner-only).
 
@@ -316,15 +320,19 @@ ln -sf "$PWD/.venv/bin/miris" ~/.local/bin/miris
 ```
 
 `~/.local/bin/miris` is where the tray looks for it. The first run creates
-`~/.miris/config.toml`: set `vault_root` to your notes vault and check
-`llm_command` (the same file as on macOS, see section 2). Then:
+`~/.miris/config.toml`: set `vault_root` to your notes vault and give
+`llm_command` the CLI's full path, for example
+`["/home/you/.local/bin/agy", "--model", "Gemini 3.8 Flash (Medium)", "-p"]`
+(the same file as on macOS, see section 2). The tray started at login has no
+`~/.local/bin` on its PATH, so a bare `agy` fails every meeting with "No such
+file or directory". Then:
 
 ```bash
 miris doctor
 ```
 
 expects `[ok]` for `pw-record`, the vault, the LLM command and both capture
-channels. Start and stop from the tray's "Gravar reunião", or with `miris
+channels, and no `[WARN] llm_command`. Start and stop from the tray's "Gravar reunião", or with `miris
 start` / `miris stop`.
 
 ---

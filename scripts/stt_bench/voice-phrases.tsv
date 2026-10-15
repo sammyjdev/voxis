@@ -1,0 +1,20 @@
+Roda o pytest no laris e me mostra só as falhas.	pytest|laris
+Faz o commit e não dá push ainda.	commit|push
+Abre um pull request contra a master.	pull request|master
+O tray do VOXIS não mudou o ícone para vermelho.	tray|voxis
+Testa o hands-free com o Super C.	hands free|super c
+Qual a latência do faster-whisper na GPU?	faster whisper|gpu
+Troca o modelo para o large-v3-turbo.	large v3 turbo
+O PipeWire não achou o sink padrão.	pipewire|sink
+Baixa o volume para quarenta por cento com o wpctl.	quarenta por cento|wpctl
+Revisa o diff com o Codex em high effort.	diff|codex|high effort
+Cria um endpoint REST em Spring Boot que retorna JSON.	endpoint|rest|spring boot|json
+O consumer do Kafka está com lag de dois mil e quinhentos eventos.	consumer|kafka|lag|dois mil e quinhentos
+Atualiza o README e o BACKLOG.	readme|backlog
+Isso não funcionou.	funcionou
+Pode seguir.	seguir
+Reverte o último commit.	reverte|commit
+Quantos testes passaram no cargo test?	cargo test
+Instala o DeepFilterNet no venv do laris.	deepfilternet|venv|laris
+A reunião com o cliente ficou para quinta às três da tarde.	quinta|três da tarde
+Manda o resumo da reunião para o vault no Obsidian.	vault|obsidian

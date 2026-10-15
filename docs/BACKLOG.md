@@ -46,8 +46,34 @@ the v1.0.0 ledger stay untouched.
       checkbox, which opens the mic.
 - [x] **MIRIS on Linux (slice 3):** `pw-record` on the default sink monitor,
       `pipeline.py` through the platform backend; `miris doctor`, the CLI and
-      the tray's "Gravar reunião" pass live. For daily use it still needs
-      `~/.local/bin/miris` and a real `vault_root` (INSTALL.md, section 6).
+      the tray's "Gravar reunião" pass live. Set up for daily use
+      2026-10-15: `~/.local/bin/miris`, `vault_root = "~/vault"` (the
+      Obsidian vault; work meetings to `work/meetings`, interviews to
+      `career/interviews`, own companies to `projects/meetings`, the rest to
+      `inbox`), `agy` by full path. A real tray run saved its note in 26 s.
+- [x] **Meetings were transcribed in the wrong language** (both platforms):
+      Whisper's per-utterance guess put 12% of pt-BR lines in English,
+      Russian, Japanese and others. The language is now guessed once per
+      channel over its first 30 s of speech. Benchmark:
+      `docs/superpowers/specs/2026-10-15-stt-model-benchmark.md`.
+- [x] **Every tray meeting failed at the summary on Linux:** the tray started
+      at login has no `~/.local/bin` on PATH, so a bare `agy` in
+      `llm_command` was "No such file or directory", while `miris doctor` in
+      a terminal said `[ok]`. The doctor now warns about a bare command and
+      names the full path to use.
+- [x] **The default `llm_command` named a model `agy` no longer offers**
+      (`Gemini 3.5 Flash (Medium)`): every note failed at the summary. Now
+      `Gemini 3.8 Flash (Medium)`.
+- [ ] **Check the Mac's `~/.miris/config.toml`:** it was created with the old
+      model name and a bare `agy`, which both break the summary from the
+      tray. Run `miris doctor` there.
+- [ ] **Dictation test with the owner's voice:** 20 phrases with technical
+      terms (`scripts/stt_bench/voice-phrases.tsv`) to measure dictation on
+      real use instead of CORAA fragments.
+- [ ] **Parakeet v3 for English meetings?** It cut English meeting errors by
+      24% against Whisper turbo (18.4 vs 24.1 WER) and tied it in pt-BR. Costs
+      a second STT backend on both platforms; worth it only if English
+      meetings are common.
 - [x] **The tray said "Falha ao processar reunião" after every meeting**
       (both platforms, since `1020c41`, 2026-09-14): the pipeline child
       stopped printing the `note: <path>` line the tray reads. Fixed
@@ -96,12 +122,13 @@ the v1.0.0 ledger stay untouched.
 - [ ] **Tray autostart on login.** macOS users can already do this via Login
       Items (documented in INSTALL.md); this item is only about shipping it as
       an in-app toggle, which costs a `tauri-plugin-autostart` dependency.
-- [ ] **A WER harness, if transcription quality ever becomes a complaint.**
-      Nothing measures it today. CORAA ASR v1.1 (290 h of pt-BR, dev split on
-      HuggingFace) needs no recording effort and would settle questions like
-      "is `initial_prompt` helping?" or "is DeepFilterNet worth its 17% of
-      per-utterance latency?" with data instead of impressions. See
-      `docs/superpowers/specs/2026-07-27-laris-estado-inicial-design.md`.
+- [x] **A WER harness.** `scripts/stt_bench/` (2026-10-15) runs CORAA v1.1
+      and AMI through any faster-whisper or onnx-asr config on an NVIDIA GPU.
+      First use: model choice for both apps (keep large-v3-turbo) and the
+      meeting language fix. Open questions it can now settle: "is
+      `initial_prompt` helping?" and "is DeepFilterNet worth its 17% of
+      per-utterance latency?". Only on Linux; the Mac's mlx path is not
+      wired in.
 
 ---
 

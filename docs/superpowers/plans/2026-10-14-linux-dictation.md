@@ -236,7 +236,7 @@ Open:
 
 ## Criterion -> test
 
-Python tests are in `packages/laris/tests/` (criteria 20-34:
+Python tests are in `packages/laris/tests/` (criteria 20-34 and 38-41:
 `packages/miris/tests/`); Rust tests in `apps/tray/src-tauri/src/`.
 
 | # | Tests |
@@ -259,7 +259,7 @@ Python tests are in `packages/laris/tests/` (criteria 20-34:
 | 16 | manual, passed 2026-10-15 |
 | 17 | `test_toggle.py::test_the_theme_poll_reports_dictating_while_toggled_hands_free_is_on`, `::test_a_daemon_without_a_toggle_trigger_never_reports_dictating` |
 | 18 | `lib.rs::tests::the_icon_turns_red_while_dictation_is_listening`, `::the_icon_stays_idle_with_no_meeting_and_no_dictation` |
-| 19 | manual |
+| 19 | manual, passed 2026-10-15 (the owner logged out and back in) |
 | 20 | `test_systemtap_linux.py::test_on_linux_the_system_tap_records_the_default_sink_monitor_as_16khz_mono` |
 | 21 | `test_systemtap_linux.py::test_without_pw_record_a_linux_recording_fails_at_start_naming_it` |
 | 22 | `test_systemtap_linux.py::test_stopping_the_linux_tap_lets_pw_record_finalize_the_wav`, `::test_a_pw_record_that_ignores_sigterm_is_killed_after_the_grace_period` |
@@ -277,6 +277,12 @@ Python tests are in `packages/laris/tests/` (criteria 20-34:
 | 34 | `test_systemtap_linux.py::test_a_killed_pw_record_wav_is_repaired_with_every_frame_it_wrote` |
 | 35 | `test_ducking_linux.py::test_duck_lowers_the_default_output_to_20_percent_and_restore_brings_it_back`, `::test_restore_returns_the_volume_to_the_sink_that_was_ducked`, `::test_an_output_already_at_or_below_20_percent_is_left_alone`, `::test_ducking_twice_keeps_the_original_volume_for_the_restore`, `::test_restore_without_a_duck_changes_nothing`, `::test_every_wpctl_call_is_bounded_so_a_hung_one_cannot_freeze_dictation`, `::test_a_missing_or_hung_wpctl_never_breaks_dictation`, `test_platform.py::test_on_linux_the_backend_ducks_the_default_output_through_wpctl` |
 | 36 | `test_audio_capture.py::test_stopping_mid_sentence_still_delivers_what_was_said`, `::test_audio_still_queued_when_the_stop_arrives_is_part_of_the_last_utterance`, `::test_speech_reaching_the_mic_after_the_stop_is_not_delivered`, `::test_a_blip_shorter_than_the_minimum_speech_at_stop_is_dropped` |
+| 37 | miris `test_transcribe.py::test_a_channel_is_transcribed_in_the_language_heard_over_its_first_30_seconds_of_speech`, `test_pipeline.py::test_on_linux_each_meeting_channel_is_transcribed_in_the_language_detected_for_it`; laris `test_platform.py::test_the_platform_backend_passes_the_detected_language_through`, `test_stt_faster.py::test_detect_language_names_the_language_whisper_hears`, `::test_a_language_given_per_call_wins_over_the_configured_one`, `test_transcriber.py::test_detect_language_names_the_language_mlx_whisper_hears`, `::test_a_language_given_per_call_wins_over_the_configured_one`; live re-transcription below |
+| 38 | miris `test_pipeline.py::test_a_language_pinned_in_stt_language_is_used_without_detecting` |
+| 39 | miris `test_transcribe.py::test_a_silent_channel_never_asks_for_a_language` |
+| 40 | miris `test_transcribe.py::test_a_channel_whose_language_cannot_be_detected_is_still_transcribed`; unchanged `test_pipeline.py::test_on_linux_meetings_reach_faster_whisper_with_language_auto_detect` runs this path |
+| 41 | miris `test_cli.py::test_the_doctor_warns_that_a_bare_llm_command_is_not_found_from_the_tray`, `::test_the_doctor_does_not_warn_about_an_llm_command_given_by_full_path`, `::test_the_doctor_reports_an_empty_llm_command_instead_of_crashing` |
+| 42 | live: a fresh `MIRIS_HOME`'s default `llm_command` exited 1 with "model Gemini 3.5 Flash (Medium) is not recognized" before, printed `OK` after |
 
 ## Slice 3 - MIRIS on Linux
 
@@ -441,3 +447,54 @@ run of criterion 29.
     is at least 400 ms long, and dropped if shorter. Audio the mic picks up
     after the stop (while an earlier utterance is still being transcribed) is
     never delivered.
+
+## Slice 5 - transcription quality and daily MIRIS (2026-10-15)
+
+**Status: done (2026-10-15)**, except the dictation test with the owner's
+voice. Benchmark, numbers and model decision:
+`docs/superpowers/specs/2026-10-15-stt-model-benchmark.md`. Short version:
+LARIS keeps large-v3-turbo (pt, beam 5). MIRIS's per-utterance language
+guess was wrong on 12% of pt-BR utterances, so it now guesses once per
+channel.
+
+The first real tray meeting with the owner's config surfaced two more
+failures, both in the summary step: the default model name no longer exists
+in `agy`, and the tray started at login cannot find a bare `agy`.
+
+### Acceptance criteria
+
+37. Given a meeting channel with speech and no `STT_LANGUAGE` pinned, when it
+    is transcribed, then its language is detected once, over the first 30 s
+    of that channel's speech (VAD spans, silence left out), and every
+    utterance of the channel is transcribed in that language. Both platform
+    backends expose `detect_language(audio)` and accept a per-call
+    `language`; dictation never passes one and is unchanged.
+38. Given `STT_LANGUAGE` is pinned (for example `en`), when a meeting is
+    transcribed, then no detection runs and every utterance uses the pinned
+    language.
+39. Given a channel with no speech, when it is transcribed, then no
+    detection runs.
+40. Given detection raises, when the channel is transcribed, then it is still
+    transcribed with Whisper's per-utterance guess and a warning goes to
+    stderr; the channel never drops out of the meeting.
+41. Given `llm_command[0]` is a bare name, when `miris doctor` runs, then it
+    prints `[WARN] llm_command: ...` naming the absolute path from PATH; a
+    full path prints no warning; an empty `llm_command` is `[FAIL]` and
+    nothing is run.
+42. Given a fresh `~/.miris`, when the default config is created, then its
+    `llm_command` model is one `agy` offers (`Gemini 3.8 Flash (Medium)`).
+
+### Live results (2026-10-15)
+
+- Owner's config: `vault_root = "~/vault"`; `llm_command` names `agy` by full
+  path; `~/.local/bin/miris` links the venv. `miris doctor` was all `[ok]`.
+- Tray run with the old code: a 150 s pt-BR conversation (CORAA C-ORAL
+  `bfammn10`) played through the speakers. Capture fine. Processing failed
+  with `No such file or directory: 'agy'`, and the cached transcript had 11
+  lines in English, Russian or Romanian.
+- The same recording, re-transcribed with criterion 37: none of those lines
+  left. The mic channel (~3 s of room noise) stayed in English.
+- Tray run with the new code and config: `completed` 26 s after stop; note
+  `~/vault/inbox/2026-10-15-relato-de-intercambio-e-primeira-festa-na-alemanha.md`,
+  category `outros`, an accurate summary, every line Portuguese. Both test
+  sessions were deleted afterwards (they held room audio from the mic).
