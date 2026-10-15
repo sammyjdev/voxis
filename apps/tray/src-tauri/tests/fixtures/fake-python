@@ -1,0 +1,5 @@
+#!/bin/sh
+# Test stand-in for <laris_dir>/.venv/bin/python (see the tests in src/laris.rs):
+# runs the script the test wrote next to the symlink it was called through.
+# This file is never written while tests run, so exec cannot hit ETXTBSY.
+exec /bin/sh "$(dirname "$0")/fake-python.sh" "$@"

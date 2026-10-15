@@ -158,6 +158,22 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Installs a fake `.venv/bin/python` that runs `script`. It is a symlink
+    /// to a launcher checked into tests/fixtures, which hands the script to
+    /// sh. Writing an executable and then running it raced on Linux: any test
+    /// that forked while the file was still open for writing gave the child a
+    /// copy of the write fd until it exec'd, and running the file then failed
+    /// with ETXTBSY (26 failures in 150 runs). Nothing here execs a file a
+    /// test writes; sh only reads the script.
+    #[cfg(unix)]
+    fn write_fake_python(py: &std::path::Path, script: &str) {
+        fs::write(py.with_file_name("fake-python.sh"), script).unwrap();
+        if py.symlink_metadata().is_err() {
+            let launcher = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake-python");
+            std::os::unix::fs::symlink(launcher, py).unwrap();
+        }
+    }
+
     #[test]
     fn read_peer_happy_path() {
         let tmp = tempfile::tempdir().unwrap();
@@ -175,14 +191,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_spawn_owns_stop_lifecycle() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join(".venv/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let py = bin_dir.join("python");
-        fs::write(&py, "#!/bin/sh\nsleep 60\n").unwrap();
-        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        write_fake_python(&py, "#!/bin/sh\nsleep 60\n");
 
         let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), None);
         assert!(!daemon.owns_running());
@@ -199,14 +212,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_venv_branch_captures_stdout_to_log() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join(".venv/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let py = bin_dir.join("python");
-        fs::write(&py, "#!/bin/sh\necho hello-from-laris\nsleep 60\n").unwrap();
-        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        write_fake_python(&py, "#!/bin/sh\necho hello-from-laris\nsleep 60\n");
         let log = tmp.path().join("laris.log");
 
         let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), Some(log.clone()));
@@ -229,14 +239,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_venv_branch_runs_python_unbuffered() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join(".venv/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let py = bin_dir.join("python");
-        fs::write(&py, "#!/bin/sh\necho \"argv: $@\"\nsleep 60\n").unwrap();
-        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        write_fake_python(&py, "#!/bin/sh\necho \"argv: $@\"\nsleep 60\n");
         let log = tmp.path().join("laris.log");
 
         let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), Some(log.clone()));
@@ -264,14 +271,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_is_spawned_with_the_tray_pid_to_watch() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join(".venv/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let py = bin_dir.join("python");
-        fs::write(&py, "#!/bin/sh\necho \"parent: $VOXIS_PARENT_PID\"\nsleep 60\n").unwrap();
-        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        write_fake_python(&py, "#!/bin/sh\necho \"parent: $VOXIS_PARENT_PID\"\nsleep 60\n");
         let log = tmp.path().join("laris.log");
 
         let mut daemon = LarisDaemon::new(tmp.path().to_path_buf(), Some(log.clone()));
@@ -298,8 +302,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawning_keeps_the_previous_run_as_one_generation() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join(".venv/bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -307,8 +309,7 @@ mod tests {
         let log = tmp.path().join("laris.log");
 
         let write_script = |marker: &str| {
-            fs::write(&py, format!("#!/bin/sh\necho {marker}\nsleep 60\n")).unwrap();
-            fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+            write_fake_python(&py, &format!("#!/bin/sh\necho {marker}\nsleep 60\n"));
         };
         let wait_for = |needle: &str| {
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
