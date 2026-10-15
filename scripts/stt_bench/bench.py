@@ -27,6 +27,12 @@ SEED = 7
 VOCABULARY_PROMPT = ("LARIS, VOXIS, MIRIS, tray, hands-free, Super C, orb, sink, PipeWire, wpctl, "
                      "diff, commit, push, pull request, master, README, BACKLOG, REST, JSON, venv, "
                      "pytest, cargo test, Codex, Claude, faster-whisper, Obsidian, vault.")
+# the same words as running text: a list primes Whisper to continue the list
+VOCABULARY_SENTENCE = ("Ditado técnico sobre o LARIS, o VOXIS e o MIRIS: o tray, o orb, o hands-free "
+                       "com o Super C, o sink do PipeWire e o wpctl; rodar o pytest e o cargo test no "
+                       "venv, fazer commit e push, abrir um pull request contra a master, revisar o "
+                       "diff com o Codex ou o Claude, atualizar o README e o BACKLOG, um endpoint REST "
+                       "que retorna JSON, o faster-whisper, e o vault no Obsidian.")
 
 CONFIGS = {
     # name: (engine, model, options)
@@ -37,6 +43,7 @@ CONFIGS = {
     # detection limited to the two meeting languages: the larger of p(pt), p(en)
     "turbo-pten-b5": ("fw", "large-v3-turbo", {"language": "pt|en", "beam_size": 5}),
     "turbo-pt-b5-prompt": ("fw", "large-v3-turbo", {"language": "pt", "beam_size": 5, "prompt": True}),
+    "turbo-pt-b5-sentence": ("fw", "large-v3-turbo", {"language": "pt", "beam_size": 5, "prompt": "sentence"}),
     "large-v3-pt-b5": ("fw", "large-v3", {"language": "pt", "beam_size": 5}),
     "medium-pt-b5": ("fw", "medium", {"language": "pt", "beam_size": 5}),
     "small-pt-b5": ("fw", "small", {"language": "pt", "beam_size": 5}),
@@ -102,7 +109,8 @@ def load(engine: str, model: str, opts: dict):
             if language == "pt|en":
                 probs = dict(m.detect_language(audio)[2])
                 language = "pt" if probs.get("pt", 0) >= probs.get("en", 0) else "en"
-            extra = {"initial_prompt": VOCABULARY_PROMPT} if opts.get("prompt") else {}
+            prompt = {True: VOCABULARY_PROMPT, "sentence": VOCABULARY_SENTENCE}.get(opts.get("prompt"))
+            extra = {"initial_prompt": prompt} if prompt else {}
             segs, info = m.transcribe(audio, language=language, beam_size=opts["beam_size"],
                                       task="transcribe", condition_on_previous_text=False, **extra)
             return "".join(s.text for s in segs).strip(), info.language
