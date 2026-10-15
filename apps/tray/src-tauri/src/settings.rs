@@ -50,13 +50,28 @@ pub struct TrayConfig {
     pub miris_home: String,
 }
 
+/// packages/laris of the checkout this binary was built from.
+const BUILD_LARIS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../packages/laris");
+
+/// A source build runs its own checkout's laris venv, wherever it was cloned.
+/// A CI release bakes a runner path that exists on no user's machine, so the
+/// checkout counts only when its venv is there.
+fn laris_dir_default(build_checkout: &Path, home: &Path) -> String {
+    if build_checkout.join(".venv/bin/python").is_file() {
+        if let Ok(dir) = std::fs::canonicalize(build_checkout) {
+            return dir.to_string_lossy().into_owned();
+        }
+    }
+    format!("{}/code/voxis/packages/laris", home.to_string_lossy())
+}
+
 impl Default for TrayConfig {
     fn default() -> Self {
         // GUI apps don't inherit shell PATH - absolute paths only
         let h = home().to_string_lossy().into_owned();
         Self {
             miris_bin: format!("{h}/.local/bin/miris"),
-            laris_dir: format!("{h}/code/voxis/packages/laris"),
+            laris_dir: laris_dir_default(Path::new(BUILD_LARIS_DIR), &home()),
             miris_home: format!("{h}/.miris"),
         }
     }
@@ -169,8 +184,37 @@ mod tests {
     fn tray_config_defaults() {
         let cfg = TrayConfig::default();
         assert!(cfg.miris_bin.ends_with("/.local/bin/miris"));
-        assert!(cfg.laris_dir.ends_with("/code/voxis/packages/laris"));
+        assert_eq!(cfg.laris_dir, laris_dir_default(Path::new(BUILD_LARIS_DIR), &home()));
         assert!(cfg.miris_home.ends_with("/.miris"));
+    }
+
+    #[test]
+    fn the_baked_in_build_checkout_is_this_repos_laris_package() {
+        let checkout = Path::new(BUILD_LARIS_DIR);
+        assert!(checkout.join("laris/__init__.py").is_file());
+        assert!(checkout.join("pyproject.toml").is_file());
+    }
+
+    #[test]
+    fn a_source_build_defaults_to_the_laris_venv_of_its_own_checkout() {
+        let checkout = tempfile::tempdir().unwrap();
+        fs::create_dir_all(checkout.path().join(".venv/bin")).unwrap();
+        fs::write(checkout.path().join(".venv/bin/python"), "").unwrap();
+
+        let dir = laris_dir_default(checkout.path(), Path::new("/home/u"));
+
+        let expected = fs::canonicalize(checkout.path()).unwrap();
+        assert_eq!(dir, expected.to_string_lossy());
+    }
+
+    #[test]
+    fn a_build_whose_checkout_has_no_venv_falls_back_to_code_voxis() {
+        // a release built on CI bakes a runner path that exists nowhere else
+        let checkout = tempfile::tempdir().unwrap();
+
+        let dir = laris_dir_default(checkout.path(), Path::new("/home/u"));
+
+        assert_eq!(dir, "/home/u/code/voxis/packages/laris");
     }
 
     const SAMPLE_TOML: &str = "\
