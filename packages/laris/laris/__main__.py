@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import queue
 import socket
+import sys
 import threading
 import time
 import urllib.request
@@ -72,7 +73,30 @@ def _make_voice_session() -> VoiceSession:
     )
 
 
-def main() -> None:
+def _toggle() -> int:
+    """`laris toggle`: flip the running daemon's hands-free mode. A GNOME
+    custom shortcut runs this, so the reason for a failure goes to stderr
+    (the shortcut's journal) and the exit code says it failed."""
+    url = peer_discovery.peer_url("laris")
+    token = peer_discovery.peer_token("laris")
+    if not url or not token:
+        print("[Laris] no laris daemon recorded in peers.json - start it first",
+              file=sys.stderr)
+        return 1
+    request = urllib.request.Request(f"{url}/toggle?token={token}", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=2.0):
+            return 0
+    except Exception as exc:  # noqa: BLE001 - any failure means the toggle did not land
+        print(f"[Laris] daemon at {url} did not answer the toggle: {exc}", file=sys.stderr)
+        return 1
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ["toggle"]:
+        raise SystemExit(_toggle())
+
     running = _daemon_already_running()
     if running is not None:
         raise SystemExit(
@@ -88,8 +112,18 @@ def main() -> None:
     # probe once at boot: macOS applies permission changes only on restart, so
     # a cached value is exact for this process's lifetime and the tray reads it
     # over /theme to warn when push-to-talk lacks Accessibility/Input Monitoring
-    from laris.hotkey import PushToTalk
-    app.state.ptt_trusted = PushToTalk.check_trusted()
+    trigger = None
+    if sys.platform.startswith("linux"):
+        # no global key events on Wayland: a desktop shortcut runs `laris
+        # toggle`, whose /toggle call flips this same event the loop waits on
+        from laris.platform.linux import ToggleTrigger
+        trigger = ToggleTrigger()
+        app.state.toggle_trigger = trigger
+        trigger_label, stt_model = trigger.label, config.STT_MODEL_FASTER
+    else:
+        from laris.hotkey import PushToTalk
+        app.state.ptt_trusted = PushToTalk.check_trusted()
+        trigger_label, stt_model = f"PTT: {config.DICTATE_KEY}", config.STT_MODEL
     # uvicorn binds the port before the model loads, so /theme answers long
     # before dictation works. Start explicitly not-ready.
     app.state.ready = False
@@ -125,11 +159,11 @@ def main() -> None:
         f"[Laris] daemon ouvindo em http://127.0.0.1:{LARIS_PORT} - "
         f"panel={'on' if panel_url else 'off'}, "
         f"kiris={'on' if kiris_online else 'off'}, "
-        f"PTT: {config.DICTATE_KEY}"
+        f"{trigger_label}"
     )
     # answering "which model is running?" should not require reading config.py
     print(
-        f"[Laris] STT: {config.STT_MODEL} "
+        f"[Laris] STT: {stt_model} "
         f"(lang={config.STT_LANGUAGE or 'auto'}, "
         f"denoise={config.NOISE_REDUCTION})"
     )
@@ -144,6 +178,7 @@ def main() -> None:
         voice_queue=voice_queue,
         overlay_url=f"http://127.0.0.1:{LARIS_PORT}/overlay?token={laris_token}",
         on_ready=lambda: setattr(app.state, "ready", True),
+        trigger=trigger,
     )
 
 

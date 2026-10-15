@@ -1,0 +1,19 @@
+# Linux (GNOME Wayland) runtime for laris. Python 3.12 venv, not the system
+# 3.14. torch comes from the CPU index first - silero-vad is all that needs it,
+# and faster-whisper runs on CUDA through CTranslate2, not torch:
+#   uv venv --python 3.12 .venv
+#   uv pip install --python .venv torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   uv pip install --python .venv -r requirements-linux.txt -e .
+faster-whisper>=1.1.0
+# CUDA 12 runtime pieces CTranslate2 loads on first inference; the system
+# needs only the NVIDIA driver. stt_faster preloads them from these wheels.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
+sounddevice>=0.4.6
+silero-vad>=5.1
+evdev>=1.7
+numpy>=1.24.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pytest>=8.0.0
+httpx>=0.27.0

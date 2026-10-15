@@ -1,5 +1,5 @@
 """The interface the daemon consumes, so it never imports OS-specific
-modules directly. macOS is the only implementation."""
+modules directly. Implemented for macOS and Linux."""
 from __future__ import annotations
 
 from typing import Protocol

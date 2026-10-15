@@ -58,6 +58,10 @@ def build_app(token: str, voice_queue: "thread_queue.Queue[VoiceEvent] | None" =
             # False while the model loads. Same default-permissive rule as
             # ptt_trusted: an old daemon that never sets it reads as ready.
             "ready": getattr(app.state, "ready", True),
+            # Linux has no orb, so the tray icon is the only sign the toggle
+            # left dictation listening. macOS has no toggle trigger: False.
+            "dictating": bool(getattr(app.state, "toggle_trigger", None)
+                              and app.state.toggle_trigger.hands_free.is_set()),
         }
 
     @app.post("/theme")
@@ -69,6 +73,18 @@ def build_app(token: str, voice_queue: "thread_queue.Queue[VoiceEvent] | None" =
         except orb_theme.ThemeValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"theme": theme, "palettes": orb_theme.PALETTES}
+
+    @app.post("/toggle")
+    def toggle(token: str | None = None):
+        """Flips hands-free. The Linux trigger: GNOME Wayland gives no global
+        key events, so a desktop shortcut runs `laris toggle`, which calls this.
+        The daemon wires app.state.toggle_trigger only where that trigger exists."""
+        if not laris_auth.token_valid(token, app.state.token):
+            raise HTTPException(status_code=403, detail="invalid token")
+        trigger = getattr(app.state, "toggle_trigger", None)
+        if trigger is None:
+            raise HTTPException(status_code=409, detail="this daemon has no toggle trigger")
+        return {"hands_free": trigger.toggle()}
 
     @app.websocket("/ws/voice")
     async def ws_voice(websocket: WebSocket, token: str | None = None):

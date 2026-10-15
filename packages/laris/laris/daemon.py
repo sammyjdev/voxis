@@ -107,12 +107,13 @@ def _wait_for_ptt(pressed, hands_free=None, on_tick=lambda: None):
         time.sleep(0.05)
 
 
-def _run_hands_free_session(vad, stt, typer, overlay, voice_queue, active, ducker=None):
+def _run_hands_free_session(vad, stt, typer, overlay, voice_queue, active, ducker=None,
+                            stop_hint="tap the dictate key to stop"):
     overlay.show("dictate")
     voice_queue.put(VoiceEvent(phase="recording", amplitude=0.15))
     if ducker is not None:
         ducker.duck()
-    print("[Voice] hands-free ON (tap the dictate key to stop)")
+    print(f"[Voice] hands-free ON ({stop_hint})")
     try:
         for audio, sample_rate in vad.stream_utterances(
             should_stop=lambda: not active.is_set(),
@@ -146,10 +147,15 @@ def run(
     voice_queue=None,
     overlay_url: str = "",
     on_ready: Callable[[], None] | None = None,
+    trigger=None,
 ) -> None:
     """Runs the PTT voice loop on the calling thread - callers run this on a
-    background daemon thread (see claude-code-ops's backend/main.py)."""
-    from laris.hotkey import PushToTalk
+    background daemon thread (see claude-code-ops's backend/main.py).
+
+    trigger: anything with `pressed`/`hands_free` events, `start()`, and
+    `label`/`stop_hint` strings for the log. Defaults to the PushToTalk key
+    listener; Linux passes a ToggleTrigger, since Wayland gives the process
+    no global key events."""
     from laris.platform import get_backend
 
     if voice_queue is None:
@@ -164,7 +170,14 @@ def run(
     assistant = make_assistant()
     overlay = backend.make_overlay(overlay_url)
     ducker = backend.make_ducker()
-    ptt = PushToTalk(config.DICTATE_KEY)
+    if trigger is None:
+        from laris.hotkey import PushToTalk
+        trigger = PushToTalk(config.DICTATE_KEY)
+        trigger_label = f"PTT: {config.DICTATE_KEY}"
+        stop_hint = "tap the dictate key to stop"
+    else:
+        trigger_label, stop_hint = trigger.label, trigger.stop_hint
+    ptt = trigger
     ptt.start()
     # only now is dictation real: the model is loaded and the key listener is
     # attached. The tray polls this to stop claiming "Ditado" during the ~3.6s
@@ -182,7 +195,7 @@ def run(
     kiris = "com Kiris (assistente)" if assistant else "pura (VOICE_ASSISTANT=0, muda)"
     print(
         f"[Voice] Laris (transcritora) pronta, {kiris} - "
-        f"PTT: {config.DICTATE_KEY}, modo: {config.MODE}"
+        f"{trigger_label}, modo: {config.MODE}"
     )
 
     def _reset_orb_if_stale():
@@ -205,7 +218,8 @@ def run(
                     print(f"[Voice] {exc} - hands-free off, PTT still works")
                     pressed.clear()
                     continue
-            _run_hands_free_session(vad, stt, type_text, overlay, voice_queue, pressed, ducker=ducker)
+            _run_hands_free_session(vad, stt, type_text, overlay, voice_queue, pressed, ducker=ducker,
+                                    stop_hint=stop_hint)
             continue
 
         from laris.audio_capture import record_while

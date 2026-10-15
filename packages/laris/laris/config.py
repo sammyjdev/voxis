@@ -26,6 +26,9 @@ NOISE_REDUCTION: str = _setting("NOISE_REDUCTION", "on")  # "on" | "off"
 # and ~1.2GB less resident RAM, transcription quality tied on pt-BR samples.
 # Revert with STT_MODEL=mlx-community/whisper-large-v3-turbo if quality dips.
 STT_MODEL: str = _setting("STT_MODEL", "mlx-community/whisper-large-v3-turbo-q4")
+# Linux backend (faster-whisper / CTranslate2). Same turbo model family as the
+# mlx default; runs float16 on CUDA, int8 on CPU.
+STT_MODEL_FASTER: str = _setting("STT_MODEL_FASTER", "large-v3-turbo")
 # empty string = Whisper auto-detect per utterance (used by miris for
 # bilingual meetings); laris dictation keeps the pt-BR lock by default
 STT_LANGUAGE: str = os.environ.get("STT_LANGUAGE", "pt")

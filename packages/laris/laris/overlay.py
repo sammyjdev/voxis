@@ -19,19 +19,24 @@ import sys
 
 
 class Overlay:
-    def __init__(self, url: str = "") -> None:
+    def __init__(self, url: str = "", argv: list[str] | None = None,
+                 env: dict[str, str] | None = None) -> None:
+        """argv/env: the child to run; macOS's AppKit panel by default, Linux
+        passes its GTK popup (overlay_linux.py)."""
         self._url = url
+        self._argv = argv or [sys.executable, "-m", "laris.overlay_app"]
+        self._env = env or {}
         self._proc: subprocess.Popen | None = None
 
     def _send(self, line: str) -> None:
         try:
             if self._proc is None or self._proc.poll() is not None:
                 self._proc = subprocess.Popen(
-                    [sys.executable, "-m", "laris.overlay_app"],
+                    self._argv,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    env={**os.environ, "OVERLAY_URL": self._url},
+                    env={**os.environ, **self._env, "OVERLAY_URL": self._url},
                 )
             self._proc.stdin.write(f"{line}\n".encode())
             self._proc.stdin.flush()
