@@ -50,15 +50,27 @@ def test_linux_backend_transcribes_with_faster_whisper_and_pastes_with_the_linux
     assert calls == {"warm": True, "transcribe": (8, 16000), "typed": "oi"}
 
 
-def test_linux_ducker_does_nothing_and_never_raises():
-    """Ducking waits for slice 4. The daemon still calls it every utterance."""
+def test_on_linux_the_backend_ducks_the_default_output_through_wpctl(monkeypatch):
+    """The daemon ducks once per hands-free session, through the backend."""
+    import subprocess
+
+    from laris import ducking_linux
     from laris.platform.linux import LinuxBackend
 
-    backend = LinuxBackend.__new__(LinuxBackend)  # no transcriber construction
-    ducker = backend.make_ducker()
+    calls = []
 
-    ducker.duck()
-    ducker.restore()
+    def fake_wpctl(argv, **kwargs):
+        calls.append(argv)
+        out = {"inspect": "id 60, type PipeWire:Interface:Node\n",
+               "get-volume": "Volume: 0.40\n"}.get(argv[1], "")
+        return subprocess.CompletedProcess(argv, 0, stdout=out.encode())
+
+    monkeypatch.setattr(ducking_linux.subprocess, "run", fake_wpctl)
+    backend = LinuxBackend.__new__(LinuxBackend)  # no transcriber construction
+
+    backend.make_ducker().duck()
+
+    assert ["wpctl", "set-volume", "60", "0.20"] in calls
 
 
 def test_on_linux_the_orb_runs_in_the_system_python_on_xwayland(monkeypatch):

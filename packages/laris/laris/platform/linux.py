@@ -1,7 +1,6 @@
 """Linux backend (GNOME Wayland): faster-whisper for STT, clipboard plus a
-uinput Shift+Insert for output, and the orb as an X11 popup under XWayland
-(overlay_linux.py). No ducking yet: a no-op the daemon can call every
-utterance."""
+uinput Shift+Insert for output, the orb as an X11 popup under XWayland
+(overlay_linux.py), and ducking through wpctl (ducking_linux.py)."""
 from __future__ import annotations
 
 import threading
@@ -13,14 +12,6 @@ import numpy as np
 
 
 _SYSTEM_PYTHON = "/usr/bin/python3"
-
-
-class _NoDucker:
-    def duck(self) -> None:
-        pass
-
-    def restore(self) -> None:
-        pass
 
 
 class ToggleTrigger:
@@ -90,4 +81,5 @@ class LinuxBackend:
         )
 
     def make_ducker(self):
-        return _NoDucker()
+        from laris.ducking_linux import WpctlDucker
+        return WpctlDucker()
