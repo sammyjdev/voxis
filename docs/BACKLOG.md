@@ -9,6 +9,34 @@ They remain in git history and in that fork.
 
 ---
 
+## P1 - Linux as a second platform
+
+Plan, decisions, criteria and spike evidence in
+`docs/superpowers/plans/2026-10-14-linux-dictation.md`; install steps in
+`docs/INSTALL.md` ("Linux (GNOME on Wayland)"). Additive: the macOS path and
+the v1.0.0 ledger stay untouched.
+
+- [x] **Dictation (slice 1).** Super+C toggles hands-free through `laris
+      toggle`; faster-whisper on CUDA; paste via wl-copy + uinput
+      Shift+Insert. In daily use since 2026-10-14.
+- [ ] **Orb on Linux.** X11 override-redirect popup under XWayland, on the
+      system Python (it was cut at first). Shows live; the click-through and
+      focus check (plan criterion 16) is not recorded yet.
+- [x] **Tray (slice 2).** Builds with `npx tauri build --no-bundle`, owns the
+      daemon, icon red while dictating, starts at login via an XDG autostart
+      entry.
+- [ ] **Criterion 11:** dictate into a browser field and a Ptyxis prompt;
+      record real per-utterance latency in the plan.
+- [ ] **Tray default `laris_dir`** (`settings.rs:59`) still points at
+      `~/code/voxis`, wrong on both owner machines.
+- [ ] **Boot log says `denoise=on` on Linux,** where DeepFilterNet is not
+      installed and nothing is denoised.
+- [ ] **Tray menu actions on Linux** (hands-free checkbox, themes, "Sair"
+      reaping the daemon): not checked.
+- [ ] **MIRIS on Linux (slice 3):** `pw-record` on the default sink monitor,
+      `pipeline.py` through the platform backend, the tray's "Gravar reunião".
+- [ ] **Ducking on Linux (slice 4):** `wpctl set-volume`.
+
 ## P1 - macOS UX gaps
 
 - [ ] **Settle versioning.** Every manifest declares `0.1.0` and there are no
