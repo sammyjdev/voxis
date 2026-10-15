@@ -182,6 +182,46 @@ it raised WER from 17.7% to 19.3%, and meetings are where fillers live.
 Parakeet and Canary. Parakeet and Canary mangle English jargon ("Pai
 Teste", "Fester Whisper", "Jason").
 
+## Other models on Hugging Face (2026-10-15)
+
+Checked against the Open ASR Leaderboard's Portuguese track
+(`hf-audio/multilingual_evals`, `multilingual_pt.csv`: FLEURS and MLS, both
+read speech) and the most-liked and trending ASR models tagged Portuguese.
+Open models only; average of the two WERs:
+
+| model | FLEURS | MLS | avg | fits a 12 GB GPU beside LARIS? |
+|---|---|---|---|---|
+| HojoAI/Hojo-ASR-Multi-V1 (Qwen3-4B decoder, 2026-08) | 3.58 | 4.08 | 3.83 | no: 12 GB of weights, RTFx 37 |
+| TheStageAI/thewhisper-large-v3-turbo (turbo fine-tune) | 3.22 | 4.48 | 3.85 | yes; measured below |
+| mistralai/Voxtral-Small-24B-2507 | 3.64 | 5.07 | 4.36 | no: 24B |
+| **openai/whisper-large-v3-turbo (LARIS, MIRIS)** | 3.77 | 5.48 | 4.62 | yes |
+| openai/whisper-large-v3 | 3.50 | 6.37 | 4.94 | yes; measured above |
+| mistralai/Voxtral-Mini-3B-2507 | 3.52 | 6.63 | 5.08 | barely |
+| microsoft/Phi-4-multimodal-instruct | 3.44 | 6.89 | 5.17 | no beside LARIS |
+| CohereLabs/cohere-transcribe-03-2026 | 4.24 | 7.74 | 5.99 | yes |
+| nvidia/parakeet-tdt-0.6b-v3 | 4.46 | 7.70 | 6.08 | yes; measured above |
+| nvidia/canary-1b-v2 | 4.16 | 8.35 | 6.25 | yes; measured above |
+| Qwen/Qwen3-ASR-1.7B | 3.97 | 8.64 | 6.31 | yes |
+| nvidia/nemotron-3.5-asr-streaming-0.6b | 5.80 | 10.70 | 8.25 | yes |
+
+Only two open models beat turbo on that track. Hojo does not fit this GPU
+next to the dictation daemon. TheStage's fine-tune ships plain Whisper
+weights next to its proprietary engines; converted to CTranslate2 it runs in
+faster-whisper unchanged (`thestage-*` configs):
+
+| set | turbo | TheStage turbo |
+|---|---|---|
+| CORAA, pt-BR conversation | **20.3%** | 21.0% |
+| AMI, English meetings | 24.1% | 22.9% (Parakeet: 18.4%) |
+| owner's dictation | **11.3%**, 31/42 terms | 18.2%, 24/42 terms |
+| owner's dictation + vocabulary prompt | **4.4%**, 40/42 terms | garbage ("Paius, pia, Rolparis, rara...") |
+
+Its read-speech gain does not survive conversation or jargon ("pai teste",
+"Lares", "Fester Whisper"), and the fine-tune broke prompt conditioning.
+**Nothing on Hugging Face that runs here beats turbo with the vocabulary
+prompt for dictation, or turbo for pt-BR meetings.** For English meetings
+Parakeet v3 stays the better option, as above.
+
 ## The VAD clipped the first word (2026-10-15)
 
 LARIS started each utterance at the 32 ms chunk where Silero's VADIterator

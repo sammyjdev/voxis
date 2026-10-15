@@ -45,6 +45,11 @@ CONFIGS = {
     "turbo-pt-b5-prompt": ("fw", "large-v3-turbo", {"language": "pt", "beam_size": 5, "prompt": True}),
     "turbo-pt-b5-sentence": ("fw", "large-v3-turbo", {"language": "pt", "beam_size": 5, "prompt": "sentence"}),
     "large-v3-pt-b5": ("fw", "large-v3", {"language": "pt", "beam_size": 5}),
+    # TheStage AI's turbo fine-tune (cc-by-4.0), converted with
+    # ct2-transformers-converter --quantization float16 (see README)
+    "thestage-pt-b5": ("fw", "models/thestage-ct2", {"language": "pt", "beam_size": 5}),
+    "thestage-pt-b5-prompt": ("fw", "models/thestage-ct2", {"language": "pt", "beam_size": 5, "prompt": True}),
+    "thestage-en-b5": ("fw", "models/thestage-ct2", {"language": "en", "beam_size": 5}),
     "medium-pt-b5": ("fw", "medium", {"language": "pt", "beam_size": 5}),
     "small-pt-b5": ("fw", "small", {"language": "pt", "beam_size": 5}),
     # ORT 1.31 refuses external weights behind HF cache symlinks: local copies
@@ -102,7 +107,8 @@ def load(engine: str, model: str, opts: dict):
                            (nvidia.cudnn, ("libcudnn.so.9",))):
             for name in names:
                 ctypes.CDLL(os.path.join(list(pkg.__path__)[0], "lib", name), mode=ctypes.RTLD_GLOBAL)
-        m = WhisperModel(model, device="cuda", compute_type="float16")
+        local = os.path.join(BENCH_HOME, model)
+        m = WhisperModel(local if os.path.isdir(local) else model, device="cuda", compute_type="float16")
 
         def run(audio):
             language = opts["language"]

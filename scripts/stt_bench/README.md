@@ -27,6 +27,23 @@ d("istupakov/parakeet-tdt-0.6b-v3-onnx", local_dir="'$B'/models/parakeet-v3")
 d("istupakov/canary-1b-v2-onnx", local_dir="'$B'/models/canary-v2")'
 ```
 
+TheStage AI's turbo fine-tune (`thestage-*` configs) ships plain Whisper
+weights next to its proprietary engines; convert them for faster-whisper:
+
+```bash
+uv venv --python 3.12 $B/convert-venv
+uv pip install --python $B/convert-venv 'ctranslate2==4.8.3' transformers safetensors torch \
+  --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+$B/convert-venv/bin/python -c 'from huggingface_hub import snapshot_download as d
+d("TheStageAI/thewhisper-large-v3-turbo", local_dir="'$B'/models/thestage-hf",
+  allow_patterns=["*.json", "*.txt", "model.safetensors"])'
+$B/convert-venv/bin/ct2-transformers-converter --model $B/models/thestage-hf \
+  --output_dir $B/models/thestage-ct2 --quantization float16 --copy_files preprocessor_config.json
+# the repo has no tokenizer.json; turbo's is the same vocabulary
+cp -L ~/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/snapshots/*/tokenizer.json \
+  $B/models/thestage-ct2/
+```
+
 If `onnxruntime` (CPU) ends up installed next to `onnxruntime-gpu`, remove it
 and reinstall the GPU package with `--reinstall-package onnxruntime-gpu`: the
 two share one module directory.
