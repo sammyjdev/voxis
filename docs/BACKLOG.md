@@ -27,10 +27,12 @@ the v1.0.0 ledger stay untouched.
       entry.
 - [ ] **Criterion 11:** dictate into a browser field and a Ptyxis prompt;
       record real per-utterance latency in the plan.
-- [ ] **Tray default `laris_dir`** (`settings.rs:59`) still points at
-      `~/code/voxis`, wrong on both owner machines.
-- [ ] **Boot log says `denoise=on` on Linux,** where DeepFilterNet is not
-      installed and nothing is denoised.
+- [x] **Tray default `laris_dir`** pointed at `~/code/voxis`, wrong on both
+      owner machines. Now it is the checkout the tray was built from, when
+      that checkout has a laris venv.
+- [x] **Boot log says `denoise=on` on Linux,** where DeepFilterNet is not
+      installed and nothing is denoised. Now it says `off (DeepFilterNet not
+      installed)`, and a toggle-driven daemon no longer claims `modo: ptt`.
 - [ ] **Tray menu actions on Linux** (hands-free checkbox, themes, "Sair"
       reaping the daemon): not checked.
 - [ ] **MIRIS on Linux (slice 3):** `pw-record` on the default sink monitor,

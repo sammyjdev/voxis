@@ -112,9 +112,10 @@ npm run tauri build        # bundle lands in src-tauri/target/release/bundle/
 
 The tray drives the engines through their existing interfaces (the `miris`
 CLI, the LARIS overlay server, config files). It reads the absolute paths of
-the engines from `~/.config/voice-at/tray.json`; the defaults assume
-`~/code/voxis` and `~/.local/bin/miris`, so adjust that file if you cloned
-elsewhere.
+the engines from `~/.config/voice-at/tray.json`. Without it, a tray built
+from source runs LARIS from the checkout it was built in (once that checkout
+has its `.venv`); a release download assumes `~/code/voxis`. MIRIS defaults
+to `~/.local/bin/miris`. Adjust that file if yours differ.
 
 ### Start VOXIS at login (macOS)
 
@@ -252,8 +253,8 @@ npx tauri build --no-bundle   # binary: src-tauri/target/release/tray
 ```
 
 `--no-bundle`: there is no Linux package yet, the binary runs where it was
-built. Then point the tray at your checkout in `~/.config/voice-at/tray.json`
-(the default assumes `~/code/voxis`; keys you leave out keep their default):
+built. It runs LARIS from that same checkout's venv (step 1), so no config is
+needed. To run another checkout, set it in `~/.config/voice-at/tray.json`:
 
 ```json
 { "laris_dir": "/home/you/code/voxis/packages/laris" }

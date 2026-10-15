@@ -6,8 +6,8 @@
 |---|---|
 | 1 - dictation | Done and used live. Open: criterion 11's browser + Ptyxis run and its latency record. |
 | Orb on Linux | Implemented and showing live (was cut, now back: decision 5). Open: criterion 16's click-through and focus check. |
-| 2 - tray | Working: runs, owns the daemon, icon red while dictating, starts at login. Open: default `laris_dir`; menu actions not checked on Linux. |
-| 3 - MIRIS | Outline only. |
+| 2 - tray | Working: runs, owns the daemon, icon red while dictating, starts at login, defaults `laris_dir` to its build checkout. Open: the fresh-login check (criterion 19); menu actions not checked on Linux. |
+| 3 - MIRIS | Planned (criteria 20-29), not started. |
 | 4 - polish | Autostart moved to slice 2 and done. Ducking open. |
 
 Install steps: `docs/INSTALL.md`, section "Linux (GNOME on Wayland)".
@@ -161,6 +161,22 @@ the focused app.
     override-redirect window; clicks pass through it and focus stays in the
     user's app.
 
+### Log criteria (2026-10-15)
+
+Numbered after slice 3's 20-29 so earlier numbers stay stable.
+
+30. Given hands-free is on, when a 1.5 s utterance is transcribed in 0.42 s
+    and pasted, then its line reads
+    `[Voice] hands-free: '<text>' (audio=1.5s, stt=0.42s, amp=<amp>)`.
+31. Given Linux with `NOISE_REDUCTION=on` and no DeepFilterNet, when the daemon
+    boots, then the STT line says `denoise=off (DeepFilterNet not installed)`;
+    with DeepFilterNet it says `denoise=on`; macOS still prints the configured
+    value.
+32. Given a toggle trigger drives the loop and `MODE=ptt`, when the daemon is
+    ready, then the ready line ends at `toggle: laris toggle`, with no
+    `modo: ptt`; with `MODE=always_on` it ends `, modo: always_on`; a
+    push-to-talk daemon still ends `PTT: <key>, modo: <mode>`.
+
 ### To verify in the tracer, not assumed
 
 - `wl-copy` on mutter does not steal focus from the target window: verified
@@ -170,7 +186,7 @@ the focused app.
   fallback is a configurable combo (`PASTE_KEYS`).
 - `sounddevice` at 16 kHz through PipeWire: verified live.
 - `NOISE_REDUCTION`: DeepFilterNet is not in the Linux requirements, so audio
-  is not denoised; the boot log still says `denoise=on` (to fix).
+  is not denoised; the boot log says so (criterion 31).
 
 ## Slice 2 - tray on Linux
 
@@ -184,11 +200,13 @@ the focused app.
 - The icon turns red while dictation listens: `/theme` gains `dictating`.
 - Starts at login from an XDG autostart entry (moved here from slice 4),
   which GNOME runs as the user unit `app-voxis\x2dtray@autostart.service`.
+- Default `laris_dir` (2026-10-15): the checkout the tray was built from,
+  baked at compile time, used only when its `.venv/bin/python` exists;
+  otherwise `~/code/voxis/packages/laris` as before. `tray.json` still wins.
+  A CI release bakes a runner path that exists nowhere else and falls back.
 
 Open:
 
-- The default `laris_dir` (`settings.rs:59`) is still `~/code/voxis`, wrong on
-  both owner machines. Options pending a decision.
 - Not checked on Linux: the menu actions (hands-free checkbox, theme
   switching, "Sair" reaping the daemon).
 
@@ -202,6 +220,11 @@ Open:
 19. Manual: given a fresh GNOME login with the autostart entry, when the
     session starts, then the tray runs and owns a daemon whose `/theme`
     answers `ready: true`.
+33. Given the tray was built from a checkout whose `packages/laris/.venv`
+    exists and `tray.json` sets no `laris_dir`, when the tray starts, then it
+    runs the daemon from that checkout; given the checkout has no venv (a CI
+    release), the default stays `~/code/voxis/packages/laris`. (Numbered
+    after the log criteria.)
 
 ## Criterion -> test
 
@@ -229,13 +252,98 @@ Python tests are in `packages/laris/tests/`; Rust tests in
 | 17 | `test_toggle.py::test_the_theme_poll_reports_dictating_while_toggled_hands_free_is_on`, `::test_a_daemon_without_a_toggle_trigger_never_reports_dictating` |
 | 18 | `lib.rs::tests::the_icon_turns_red_while_dictation_is_listening`, `::the_icon_stays_idle_with_no_meeting_and_no_dictation` |
 | 19 | manual |
+| 20-29 | slice 3, not written yet |
+| 30 | `test_daemon.py::test_each_hands_free_line_shows_the_audio_length_and_the_stt_time` |
+| 31 | `test_linux_boot.py::test_on_linux_without_deepfilternet_the_boot_log_says_denoise_is_off`, `::test_on_linux_with_deepfilternet_the_boot_log_says_denoise_is_on`, `::test_on_macos_the_boot_log_still_reports_the_configured_denoise_setting` |
+| 32 | `test_linux_boot.py::test_a_toggle_driven_daemon_does_not_claim_push_to_talk_mode`, `::test_a_toggle_driven_daemon_that_boots_listening_says_always_on`, `test_daemon.py::test_a_push_to_talk_daemon_names_its_key_and_mode_when_ready` |
+| 33 | `settings.rs::tests::a_source_build_defaults_to_the_laris_venv_of_its_own_checkout`, `::a_build_whose_checkout_has_no_venv_falls_back_to_code_voxis`, `::the_baked_in_build_checkout_is_this_repos_laris_package`, `::tray_config_defaults`; live 2026-10-15: with `tray.json` moved aside, the tray ran `<checkout>/packages/laris/.venv/bin/python -u -m laris` |
 
-## Slice 3 - MIRIS on Linux (outline)
+## Slice 3 - MIRIS on Linux
 
-System audio via `pw-record` on the default sink's monitor, behind the same
-small interface as `systemtap.py` (`start`, `alive`, `bytes_written`, `stop`).
-Route `pipeline.py:27` through the platform backend instead of importing
-`laris.transcriber` directly. Reuse the manifest lifecycle as is.
+**Status: planned, not started.** Meeting recording from the tray on Linux:
+microphone on one channel, everything the speakers play on the other, then
+the existing transcript -> notes -> vault pipeline.
+
+Approach: a second system-audio tap with the same four methods as
+`SystemTap` (`start`, `alive`, `bytes_written`, `stop`), so `recorder.record`
+and the whole manifest lifecycle run unchanged; only the tap and the
+transcriber are picked per platform. The mic channel already works on Linux
+(`sounddevice` through PipeWire, same as dictation).
+
+### Files
+
+- Create `packages/miris/miris/systemtap_linux.py`: `PwRecordTap`, which runs
+  `pw-record` on the default sink's monitor (`-P '{ stream.capture.sink=true }'`,
+  no `--target`), `--rate 16000 --channels 1 --format s16`, into
+  `system.wav`. Mono 16 kHz s16 is what `transcribe.load_wav_mono16k` reads
+  without resampling.
+- Modify `packages/miris/miris/systemtap.py`: a `default_tap_factory()` that
+  returns `PwRecordTap` on Linux and `SystemTap` (audiotap) on macOS.
+- Modify `packages/miris/miris/recorder.py`: `record()` defaults its
+  `tap_factory` to that selector instead of `SystemTap`.
+- Modify `packages/miris/miris/cli.py`: `miris doctor` checks `pw-record` on
+  Linux instead of the audiotap binary; the bounded capture is unchanged.
+- Modify `packages/miris/miris/pipeline.py:27`: the default transcriber comes
+  from `laris.platform.get_backend()` (keeping the `STT_LANGUAGE=""`
+  default), wrapped so MIRIS's one-argument `transcribe(audio)` passes
+  `sample_rate=16000`.
+- Create `packages/miris/requirements-linux.txt`: `-r ../laris/requirements-linux.txt`, `-e ../laris`, `-e .`.
+- Docs: a MIRIS step in the INSTALL.md Linux section (venv, `pipewire-bin`
+  for `pw-record`, `~/.local/bin/miris`, `miris doctor`).
+
+### Acceptance criteria
+
+20. Given Linux, when the recorder starts the system tap for
+    `<session>/system.wav`, then it runs exactly
+    `pw-record -P '{ stream.capture.sink=true }' --rate 16000 --channels 1 --format s16 <session>/system.wav`.
+21. Given `pw-record` is not on PATH, when the recorder starts, then the
+    session ends `FAILED` with error code `system_tap_start_failed` and a
+    detail that names `pw-record`.
+22. Given a running `PwRecordTap`, when `stop()` is called, then `pw-record`
+    receives SIGTERM, and is killed if it has not exited within the grace
+    period; a second `stop()` does nothing.
+23. Given a running `PwRecordTap`, when `pw-record` exits on its own, then
+    `alive()` is `False` (the recorder turns that into `system_tap_died`).
+24. Given `sys.platform` is `linux`, when `default_tap_factory()` runs, then
+    it returns a `PwRecordTap`; given `darwin`, the audiotap `SystemTap`,
+    with the same binary resolution as today.
+25. Given Linux, when `build_transcript` builds its default transcriber, then
+    it uses the Linux backend (faster-whisper), never imports
+    `laris.transcriber` or `mlx_whisper`, keeps `STT_LANGUAGE` at `""` unless
+    the user set it, and every span reaches the backend with
+    `sample_rate=16000`.
+26. Given macOS, when `build_transcript` builds its default transcriber, then
+    the text still comes from `laris.transcriber.Transcriber` (mlx), with the
+    same calls as before.
+27. Given Linux, when `miris doctor` runs, then it reports `pw-record` instead
+    of the audiotap binary, and its 3 s capture reports frames on both
+    channels.
+28. Given the existing MIRIS and tray suites, when they run after the change,
+    then every test that passed before still passes (macOS untouched).
+29. Manual, end to end on Linux: with `tray.json`'s `miris_bin` pointing at
+    the Linux install, click "Gravar reunião", play a video with speech while
+    talking into the mic for ~1 min, click stop; the tray icon is red while
+    recording, the notification names the note, and the note's transcript has
+    lines from both "Eu" and "Eles".
+
+### To verify in a spike before the code, not assumed
+
+- `pw-record` on the sink monitor keeps writing while nothing plays. The
+  recorder fails a session whose `system.wav` stops growing for 2 s
+  (`system_tap_stalled`) and one that writes nothing in the first 5 s; a
+  suspended sink would trip both.
+- `bytes_written()` (file size) grows as audio arrives, not in large
+  buffered bursts.
+- On SIGTERM `pw-record` finalizes the WAV header, so `session.inspect_wav`
+  and `validate_capture` accept the file; the header is 44 bytes.
+- `stream.capture.sink=true` with no `--target` links to the default sink's
+  monitor, not to a microphone.
+- What happens when the default sink changes mid-meeting (headset plugged
+  in): the stream follows it, or keeps recording the old sink.
+- VRAM: the daemon's resident model and MIRIS's second faster-whisper
+  instance fit together on the 12 GB card.
+- The tray's alive check (`ps -p PID -o command=`) and its notifications work
+  on Linux.
 
 ## Slice 4 - polish (outline)
 
