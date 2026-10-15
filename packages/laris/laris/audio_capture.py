@@ -173,6 +173,11 @@ class VadCapture:
         q: queue.Queue[np.ndarray] = queue.Queue()
 
         def _cb(indata, frames, time_info, status):
+            # the stop is the boundary: while the loop is busy transcribing,
+            # it only sees the stop later, and what the mic hears after the
+            # tap must not end up pasted
+            if should_stop is not None and should_stop():
+                return
             q.put(indata[:, 0].copy())
 
         voiced: list[np.ndarray] = []
@@ -182,34 +187,57 @@ class VadCapture:
         )
         min_samples = int(config.MIN_SPEECH_DURATION_MS * config.SAMPLE_RATE / 1000)
 
+        def _close(voiced: list[np.ndarray]) -> np.ndarray | None:
+            """The finished utterance, or None for a blip too short to be speech."""
+            audio = np.concatenate(voiced)
+            if len(audio) < min_samples:
+                return None
+            if config.NOISE_REDUCTION == "on":
+                audio = _denoise_chunk(audio, enabled=True)
+            return audio
+
+        def _feed(chunk: np.ndarray) -> Generator[_Utterance, None, None]:
+            """One mic chunk through the VAD; yields the utterance it closes."""
+            nonlocal in_speech, voiced
+            if on_chunk is not None:
+                on_chunk(chunk)
+            event = vad(torch.from_numpy(chunk), return_seconds=False)
+
+            if event and "start" in event:
+                in_speech = True
+                voiced = [chunk]
+                return
+
+            if in_speech:
+                voiced.append(chunk)
+                ended = (event and "end" in event) or len(voiced) >= max_chunks
+                if ended:
+                    in_speech = False
+                    audio = _close(voiced)
+                    voiced = []
+                    vad.reset_states()
+                    if audio is not None:
+                        yield audio, config.SAMPLE_RATE
+
         with _open_stream(_cb):
             while True:
                 # polled even while silent: a blocking get() would make
                 # hands-free impossible to stop until the next utterance
                 if should_stop is not None and should_stop():
+                    # what the mic heard before the stop still counts: the
+                    # chunks queued by then (_cb queues nothing after it), then
+                    # the speech left open, whose 400 ms of closing silence
+                    # never came
+                    queued = [q.get_nowait() for _ in range(q.qsize())]  # sole consumer
+                    for chunk in queued:
+                        yield from _feed(chunk)
+                    if in_speech:
+                        audio = _close(voiced)
+                        if audio is not None:
+                            yield audio, config.SAMPLE_RATE
                     return
                 try:
                     chunk = q.get(timeout=0.1)
                 except queue.Empty:
                     continue
-                if on_chunk is not None:
-                    on_chunk(chunk)
-                event = vad(torch.from_numpy(chunk), return_seconds=False)
-
-                if event and "start" in event:
-                    in_speech = True
-                    voiced = [chunk]
-                    continue
-
-                if in_speech:
-                    voiced.append(chunk)
-                    ended = (event and "end" in event) or len(voiced) >= max_chunks
-                    if ended:
-                        in_speech = False
-                        audio = np.concatenate(voiced)
-                        voiced = []
-                        vad.reset_states()
-                        if len(audio) >= min_samples:
-                            if config.NOISE_REDUCTION == "on":
-                                audio = _denoise_chunk(audio, enabled=True)
-                            yield audio, config.SAMPLE_RATE
+                yield from _feed(chunk)

@@ -200,3 +200,76 @@ def test_open_stream_does_not_reinitialize_when_the_device_is_healthy(monkeypatc
     assert audio_capture._open_stream(lambda *_a: None) == "stream"
     assert fake.calls == []
     assert fake.opens == 1
+
+
+def _speak_then_stop(monkeypatch, voiced_chunks, read_before_stop=None, captured_after_stop=0):
+    """The mic captures `voiced_chunks` chunks of speech; VAD hears it start on
+    the first and never hears it end. The stop comes once the loop has read
+    `read_before_stop` of them (all, by default), the rest still queued; or,
+    with `captured_after_stop`, while the loop is busy elsewhere, and that
+    many more chunks reach the mic after it."""
+    from contextlib import contextmanager
+
+    from laris import audio_capture, config
+
+    chunk = np.full((config.CHUNK_SAMPLES,), 0.2, dtype=np.float32)
+    state = {"stopped": False, "read": 0}
+    read = voiced_chunks if read_before_stop is None else read_before_stop
+
+    @contextmanager
+    def fake_stream(callback):
+        for _ in range(voiced_chunks):
+            callback(chunk.reshape(-1, 1), len(chunk), None, None)
+        if captured_after_stop:
+            state["stopped"] = True
+            for _ in range(captured_after_stop):
+                callback(chunk.reshape(-1, 1), len(chunk), None, None)
+        yield
+
+    def count_read(_chunk):
+        state["read"] += 1
+        if state["read"] >= read:
+            state["stopped"] = True
+
+    events = iter([{"start": 0}])
+    monkeypatch.setattr(audio_capture, "_open_stream", fake_stream)
+    monkeypatch.setattr(config, "NOISE_REDUCTION", "off")
+    vad = object.__new__(audio_capture.VadCapture)
+    vad._model = object()
+    vad._VADIterator = lambda model, **kwargs: type(
+        "FakeVad", (), {"__call__": lambda self, t, return_seconds: next(events, None),
+                        "reset_states": lambda self: None})()
+
+    utterances = list(vad.stream_utterances(should_stop=lambda: state["stopped"],
+                                            on_chunk=count_read))
+    return utterances, len(chunk)
+
+
+def test_stopping_mid_sentence_still_delivers_what_was_said(monkeypatch):
+    """A tap right after speaking used to drop the words: the utterance only
+    closes after 400 ms of silence, and the stop came first."""
+    utterances, chunk_len = _speak_then_stop(monkeypatch, voiced_chunks=16)
+
+    assert [(len(audio), rate) for audio, rate in utterances] == [(16 * chunk_len, 16000)]
+
+
+def test_audio_still_queued_when_the_stop_arrives_is_part_of_the_last_utterance(monkeypatch):
+    """The mic callback runs ahead of the loop; the chunks it queued before the
+    stop hold the last syllables."""
+    utterances, chunk_len = _speak_then_stop(monkeypatch, voiced_chunks=16, read_before_stop=4)
+
+    assert [(len(audio), rate) for audio, rate in utterances] == [(16 * chunk_len, 16000)]
+
+
+def test_speech_reaching_the_mic_after_the_stop_is_not_delivered(monkeypatch):
+    """A stop tapped while an utterance is being transcribed is seen only once
+    the loop resumes; what the mic picked up after the tap must not be pasted."""
+    utterances, chunk_len = _speak_then_stop(monkeypatch, voiced_chunks=16, captured_after_stop=16)
+
+    assert [(len(audio), rate) for audio, rate in utterances] == [(16 * chunk_len, 16000)]
+
+
+def test_a_blip_shorter_than_the_minimum_speech_at_stop_is_dropped(monkeypatch):
+    utterances, _ = _speak_then_stop(monkeypatch, voiced_chunks=2)
+
+    assert utterances == []
