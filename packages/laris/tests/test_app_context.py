@@ -112,3 +112,12 @@ def test_format_for_focus_prose_no_period_after_newline():
         result = app_context.format_for_focus("primeira linha\nsegunda")
 
     assert result == "Primeira linha\nsegunda"
+
+
+def test_prose_formatting_keeps_the_space_before_a_follow_up_utterance():
+    """Hands-free pastes " pode seguir" after an earlier sentence; the space
+    stays in front and the first letter still becomes a capital."""
+    from laris import app_context
+
+    with patch.object(app_context, "current_format_mode", return_value="prose"):
+        assert app_context.format_for_focus(" pode seguir") == " Pode seguir."

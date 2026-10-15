@@ -65,10 +65,12 @@ def format_for_focus(text: str) -> str:
     if mode == "code":
         return text
 
-    if not text:
+    words = text.lstrip(" ")
+    if not words:
         return text
-    text = text[0].upper() + text[1:]
+    space = text[: len(text) - len(words)]  # hands-free's separator stays in front
+    text = words[0].upper() + words[1:]
     terminal = (".", "!", "?", ":")
     if not text.endswith(terminal) and "\n" not in text:
         text += "."
-    return text
+    return space + text

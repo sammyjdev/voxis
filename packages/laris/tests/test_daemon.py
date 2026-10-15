@@ -631,3 +631,85 @@ def test_boot_proceeds_when_the_recorded_daemon_is_gone(monkeypatch):
         raise OSError("connection refused")
 
     assert main_mod._daemon_already_running(http_get=refused) is None
+
+
+def _typed_in_hands_free_sessions(monkeypatch, sessions):
+    """What the backend pastes when the daemon runs one hands-free session per
+    entry of `sessions`, each a list of transcriptions in utterance order."""
+    import threading
+
+    import numpy as np
+
+    import laris.audio_capture as audio_mod
+    import laris.daemon as daemon_mod
+    import laris.platform as platform_mod
+
+    texts = iter(t for session in sessions for t in session)
+    typed = []
+
+    class Backend:
+        def warm(self):
+            pass
+
+        def transcribe(self, audio, sample_rate):
+            return next(texts)
+
+        def type_text(self, text):
+            typed.append(text)
+
+        def make_overlay(self, url):
+            return MagicMock()
+
+        def make_ducker(self):
+            return MagicMock()
+
+    lengths = iter(len(session) for session in sessions)
+
+    class Utterances:
+        def stream_utterances(self, should_stop, on_chunk=None):
+            for _ in range(next(lengths)):
+                yield np.zeros(16000, dtype=np.float32), 16000
+
+    class ToggledOn:
+        label, stop_hint = "toggle", "toggle again to stop"
+
+        def __init__(self):
+            self.pressed = threading.Event()
+            self.hands_free = threading.Event()
+            self.hands_free.set()
+
+        def start(self):
+            pass
+
+    trigger = ToggledOn()
+    waits = iter([("hands_free", trigger.hands_free)] * len(sessions))
+
+    def fake_wait(pressed, hands_free=None, on_tick=lambda: None):
+        try:
+            return next(waits)
+        except StopIteration:
+            raise _StopLoop
+
+    monkeypatch.setattr(platform_mod, "get_backend", lambda: Backend())
+    monkeypatch.setattr(audio_mod, "VadCapture", Utterances)
+    monkeypatch.setattr(daemon_mod, "_wait_for_ptt", fake_wait)
+    try:
+        daemon_mod.run(make_voice_session=lambda: MagicMock(), trigger=trigger)
+    except _StopLoop:
+        pass
+    return typed
+
+
+def test_utterances_of_one_hands_free_session_are_pasted_a_space_apart(monkeypatch):
+    """Without it, two sentences dictated in a row landed glued:
+    "falhas.Faz o commit" (owner's dictation test, 2026-10-15)."""
+    typed = _typed_in_hands_free_sessions(
+        monkeypatch, [["Roda o pytest.", "Faz o commit.", "Pode seguir."]])
+
+    assert "".join(typed) == "Roda o pytest. Faz o commit. Pode seguir."
+
+
+def test_a_new_hands_free_session_starts_without_a_space(monkeypatch):
+    typed = _typed_in_hands_free_sessions(monkeypatch, [["Roda o pytest."], ["Pode seguir."]])
+
+    assert typed == ["Roda o pytest.", "Pode seguir."]

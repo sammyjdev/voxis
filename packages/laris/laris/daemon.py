@@ -114,6 +114,7 @@ def _run_hands_free_session(vad, stt, typer, overlay, voice_queue, active, ducke
     if ducker is not None:
         ducker.duck()
     print(f"[Voice] hands-free ON ({stop_hint})")
+    separator = ""  # a space between the session's utterances, none before the first
     try:
         for audio, sample_rate in vad.stream_utterances(
             should_stop=lambda: not active.is_set(),
@@ -125,7 +126,8 @@ def _run_hands_free_session(vad, stt, typer, overlay, voice_queue, active, ducke
                 text = stt.transcribe(audio, sample_rate)
                 stt_seconds = time.monotonic() - started
                 if text:
-                    typer(text)
+                    typer(separator + text)
+                    separator = " "
                     print(f"[Voice] hands-free: {text!r} (audio={len(audio) / sample_rate:.1f}s, "
                           f"stt={stt_seconds:.2f}s, amp={amplitude:.4f})")
                 voice_queue.put(VoiceEvent(phase="recording", amplitude=amplitude))
