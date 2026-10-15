@@ -5,9 +5,9 @@
 | Slice | Status |
 |---|---|
 | 1 - dictation | Done and used live. Open: criterion 11's browser + Ptyxis run and its latency record. |
-| Orb on Linux | Implemented and showing live (was cut, now back: decision 5). Open: criterion 16's click-through and focus check. |
+| Orb on Linux | Done, checked live 2026-10-15 (was cut, now back: decision 5). |
 | 2 - tray | Working: runs, owns the daemon, icon red while dictating, starts at login, defaults `laris_dir` to its build checkout. Open: the fresh-login check (criterion 19); menu actions not checked on Linux. |
-| 3 - MIRIS | Planned (criteria 20-29), not started. |
+| 3 - MIRIS | Code done 2026-10-15; `miris doctor` and a CLI start/stop/process run pass live. Open: the tray run (criterion 29). |
 | 4 - polish | Autostart moved to slice 2 and done. Ducking open. |
 
 Install steps: `docs/INSTALL.md`, section "Linux (GNOME on Wayland)".
@@ -159,7 +159,10 @@ the focused app.
     bottom edge; top-right: 40 px below the top edge).
 16. Manual: while hands-free is on, `xwininfo` shows a 190x190
     override-redirect window; clicks pass through it and focus stays in the
-    user's app.
+    user's app. Checked 2026-10-15: while listening `xwininfo` showed
+    `Width: 190 Height: 190 Map State: IsViewable Override Redirect State: yes`
+    at (2785, 445), `IsUnMapped` after the stop; the owner confirmed a click on
+    the orb passed through.
 
 ### Log criteria (2026-10-15)
 
@@ -228,8 +231,8 @@ Open:
 
 ## Criterion -> test
 
-Python tests are in `packages/laris/tests/`; Rust tests in
-`apps/tray/src-tauri/src/lib.rs`.
+Python tests are in `packages/laris/tests/` (criteria 20-34:
+`packages/miris/tests/`); Rust tests in `apps/tray/src-tauri/src/`.
 
 | # | Tests |
 |---|---|
@@ -248,19 +251,29 @@ Python tests are in `packages/laris/tests/`; Rust tests in
 | 13 | `test_linux_boot.py::test_on_linux_the_boot_log_names_the_faster_whisper_model_and_the_toggle`, `::test_a_toggled_hands_free_session_tells_how_to_stop_it_with_laris_toggle` |
 | 14 | `test_platform.py::test_on_linux_the_orb_runs_in_the_system_python_on_xwayland` |
 | 15 | `test_overlay_linux.py::test_a_bottom_center_orb_sits_16_px_above_the_bottom_edge`, `::test_a_top_right_orb_sits_40_px_below_the_top_edge`, `::test_the_orb_lands_on_a_monitor_to_the_right_of_another` |
-| 16 | manual |
+| 16 | manual, passed 2026-10-15 |
 | 17 | `test_toggle.py::test_the_theme_poll_reports_dictating_while_toggled_hands_free_is_on`, `::test_a_daemon_without_a_toggle_trigger_never_reports_dictating` |
 | 18 | `lib.rs::tests::the_icon_turns_red_while_dictation_is_listening`, `::the_icon_stays_idle_with_no_meeting_and_no_dictation` |
 | 19 | manual |
-| 20-29 | slice 3, not written yet |
+| 20 | `test_systemtap_linux.py::test_on_linux_the_system_tap_records_the_default_sink_monitor_as_16khz_mono` |
+| 21 | `test_systemtap_linux.py::test_without_pw_record_a_linux_recording_fails_at_start_naming_it` |
+| 22 | `test_systemtap_linux.py::test_stopping_the_linux_tap_lets_pw_record_finalize_the_wav`, `::test_a_pw_record_that_ignores_sigterm_is_killed_after_the_grace_period` |
+| 23 | `test_systemtap_linux.py::test_a_pw_record_that_exits_on_its_own_reads_as_dead` |
+| 24 | `test_systemtap_linux.py::test_on_linux_the_system_tap_records_the_default_sink_monitor_as_16khz_mono`, `::test_on_macos_the_system_tap_is_still_the_audiotap_helper` |
+| 25 | `test_pipeline.py::test_on_linux_meetings_are_transcribed_by_faster_whisper_at_16khz`, `::test_on_linux_meetings_reach_faster_whisper_with_language_auto_detect` |
+| 26 | `test_pipeline.py::test_on_macos_meetings_are_still_transcribed_by_mlx_whisper` |
+| 27 | `test_cli.py::test_on_linux_the_doctor_checks_pw_record_and_runs_the_capture`, `::test_on_linux_without_pw_record_the_doctor_fails_and_skips_the_capture`, `::test_on_macos_the_doctor_still_checks_the_audiotap_binary`; live `miris doctor` above |
+| 28 | the suites: `cd packages/miris && .venv/bin/python -m pytest -q` (90 passed), laris and `cargo test --release --lib` as in 10 |
+| 29 | manual, open |
 | 30 | `test_daemon.py::test_each_hands_free_line_shows_the_audio_length_and_the_stt_time` |
 | 31 | `test_linux_boot.py::test_on_linux_without_deepfilternet_the_boot_log_says_denoise_is_off`, `::test_on_linux_with_deepfilternet_the_boot_log_says_denoise_is_on`, `::test_on_macos_the_boot_log_still_reports_the_configured_denoise_setting` |
 | 32 | `test_linux_boot.py::test_a_toggle_driven_daemon_does_not_claim_push_to_talk_mode`, `::test_a_toggle_driven_daemon_that_boots_listening_says_always_on`, `test_daemon.py::test_a_push_to_talk_daemon_names_its_key_and_mode_when_ready` |
 | 33 | `settings.rs::tests::a_source_build_defaults_to_the_laris_venv_of_its_own_checkout`, `::a_build_whose_checkout_has_no_venv_falls_back_to_code_voxis`, `::the_baked_in_build_checkout_is_this_repos_laris_package`, `::tray_config_defaults`; live 2026-10-15: with `tray.json` moved aside, the tray ran `<checkout>/packages/laris/.venv/bin/python -u -m laris` |
+| 34 | `test_systemtap_linux.py::test_a_killed_pw_record_wav_is_repaired_with_every_frame_it_wrote` |
 
 ## Slice 3 - MIRIS on Linux
 
-**Status: planned, not started.** Meeting recording from the tray on Linux:
+**Status: code done (2026-10-15); the tray run (criterion 29) is open.** Meeting recording from the tray on Linux:
 microphone on one channel, everything the speakers play on the other, then
 the existing transcript -> notes -> vault pipeline.
 
@@ -272,17 +285,21 @@ transcriber are picked per platform. The mic channel already works on Linux
 
 ### Files
 
-- Create `packages/miris/miris/systemtap_linux.py`: `PwRecordTap`, which runs
-  `pw-record` on the default sink's monitor (`-P '{ stream.capture.sink=true }'`,
-  no `--target`), `--rate 16000 --channels 1 --format s16`, into
-  `system.wav`. Mono 16 kHz s16 is what `transcribe.load_wav_mono16k` reads
-  without resampling.
-- Modify `packages/miris/miris/systemtap.py`: a `default_tap_factory()` that
-  returns `PwRecordTap` on Linux and `SystemTap` (audiotap) on macOS.
+- Create `packages/miris/miris/systemtap_linux.py`: `PwRecordTap`, a
+  `SystemTap` subclass (it inherits `alive`, `bytes_written` and `stop`) whose
+  `start` runs `pw-record` on the default sink's monitor
+  (`-P '{ stream.capture.sink=true }'`, no `--target`),
+  `--rate 16000 --channels 1 --format s16`, into `system.wav`. Mono 16 kHz
+  s16 is what `transcribe.load_wav_mono16k` reads without resampling.
+- Modify `packages/miris/miris/systemtap.py`: `default_tap_factory(out_wav)`
+  returns a `PwRecordTap` on Linux and a `SystemTap` (audiotap) on macOS.
+  Each tap gains `requirement()` -> (label, path or None), which `miris
+  doctor` prints.
 - Modify `packages/miris/miris/recorder.py`: `record()` defaults its
   `tap_factory` to that selector instead of `SystemTap`.
-- Modify `packages/miris/miris/cli.py`: `miris doctor` checks `pw-record` on
-  Linux instead of the audiotap binary; the bounded capture is unchanged.
+- Modify `packages/miris/miris/cli.py`: `miris doctor` asks the platform's
+  tap what it needs (`pw-record` on Linux, the audiotap binary on macOS); the
+  bounded capture is unchanged.
 - Modify `packages/miris/miris/pipeline.py:27`: the default transcriber comes
   from `laris.platform.get_backend()` (keeping the `STT_LANGUAGE=""`
   default), wrapped so MIRIS's one-argument `transcribe(audio)` passes
@@ -304,20 +321,23 @@ transcriber are picked per platform. The mic channel already works on Linux
     period; a second `stop()` does nothing.
 23. Given a running `PwRecordTap`, when `pw-record` exits on its own, then
     `alive()` is `False` (the recorder turns that into `system_tap_died`).
-24. Given `sys.platform` is `linux`, when `default_tap_factory()` runs, then
-    it returns a `PwRecordTap`; given `darwin`, the audiotap `SystemTap`,
-    with the same binary resolution as today.
+24. Given `sys.platform` is `linux`, when `default_tap_factory(out_wav)`
+    runs, then it returns a `PwRecordTap` writing to `out_wav`; given
+    `darwin`, the audiotap `SystemTap`, with the same binary resolution as
+    today.
 25. Given Linux, when `build_transcript` builds its default transcriber, then
     it uses the Linux backend (faster-whisper), never imports
     `laris.transcriber` or `mlx_whisper`, keeps `STT_LANGUAGE` at `""` unless
     the user set it, and every span reaches the backend with
     `sample_rate=16000`.
 26. Given macOS, when `build_transcript` builds its default transcriber, then
-    the text still comes from `laris.transcriber.Transcriber` (mlx), with the
-    same calls as before.
-27. Given Linux, when `miris doctor` runs, then it reports `pw-record` instead
-    of the audiotap binary, and its 3 s capture reports frames on both
-    channels.
+    the text still comes from `laris.transcriber.Transcriber` (mlx), called
+    with each span at 16 kHz (the rate it defaulted to before).
+27. Given Linux with `pw-record` on PATH, when `miris doctor` runs, then it
+    prints `[ok] pw-record: <path>` instead of the audiotap line and runs the
+    3 s capture; without `pw-record` it prints `[FAIL] pw-record: not found`
+    and skips the capture. macOS still prints `audiotap binary: <path>`.
+    Live: the 3 s capture reports frames on both channels.
 28. Given the existing MIRIS and tray suites, when they run after the change,
     then every test that passed before still passes (macOS untouched).
 29. Manual, end to end on Linux: with `tray.json`'s `miris_bin` pointing at
@@ -325,25 +345,55 @@ transcriber are picked per platform. The mic channel already works on Linux
     talking into the mic for ~1 min, click stop; the tray icon is red while
     recording, the notification names the note, and the note's transcript has
     lines from both "Eu" and "Eles".
+34. Given `pw-record` was killed with SIGKILL and left its placeholder header
+    (RIFF size 8, data size 0) in front of the audio, when the session is
+    recovered, then `session.repair_wav` rebuilds the header and the frames
+    match the payload. (Numbered after the tray criterion 33.)
 
-### To verify in a spike before the code, not assumed
+### Spike results (2026-10-15)
 
-- `pw-record` on the sink monitor keeps writing while nothing plays. The
-  recorder fails a session whose `system.wav` stops growing for 2 s
-  (`system_tap_stalled`) and one that writes nothing in the first 5 s; a
-  suspended sink would trip both.
-- `bytes_written()` (file size) grows as audio arrives, not in large
-  buffered bursts.
-- On SIGTERM `pw-record` finalizes the WAV header, so `session.inspect_wav`
-  and `validate_capture` accept the file; the header is 44 bytes.
-- `stream.capture.sink=true` with no `--target` links to the default sink's
-  monitor, not to a microphone.
-- What happens when the default sink changes mid-meeting (headset plugged
-  in): the stream follows it, or keeps recording the old sink.
-- VRAM: the daemon's resident model and MIRIS's second faster-whisper
-  instance fit together on the 12 GB card.
-- The tray's alive check (`ps -p PID -o command=`) and its notifications work
-  on Linux.
+Run on this machine with `pw-record` 1.6 (`pipewire-bin`). No audio was kept:
+a call was live in Firefox, so the idle-sink checks used the unused IEC958
+sink and the default-sink check wrote to `/dev/null`.
+
+- **A suspended sink does not stall the tap.** On the monitor of a sink in
+  `suspended` state, `pw-record` wrote its first bytes in 0.26 s and then
+  ~8 KB every 0.25 s (32 KB/s = 16 kHz mono s16) for 7 s with no gap. The
+  recorder's 5 s start and 2 s stall limits are not at risk.
+- **`bytes_written()` grows smoothly**, no buffered bursts.
+- **SIGTERM finalizes the header:** 44 bytes, PCM mono 16 kHz 16-bit, RIFF
+  and data sizes correct; `session.inspect_wav` accepted it. `pw-record`
+  exits 1 on SIGTERM; `SystemTap.stop` ignores the exit code.
+- **SIGKILL leaves a placeholder header** (RIFF size 8, data size 0):
+  `inspect_wav` raises `CaptureInvalid`, `session.repair_wav` rebuilds it
+  (23525 frames recovered from 1.5 s). Criterion 34.
+- **Mid-capture, the same placeholder header** makes Python's `wave` refuse
+  the file, so the recorder's heartbeat leaves `channels.system` at `null`
+  while recording. Nothing reads that field during a recording (only
+  deserialization and repair), so this is accepted as cosmetic.
+- **No `--target` + `stream.capture.sink=true` links to the default sink's
+  `monitor_FL`/`monitor_FR`** (checked with `pw-link -l`), not to a mic.
+- **VRAM:** the dictation daemon holds 2292 MiB; 3814 of 12282 MiB in use.
+  A second faster-whisper instance in MIRIS fits.
+- **`ps -p PID -o command=`** (procps-ng 4.0.4) prints the full command line
+  when piped, so the tray's recorder identity check works.
+
+Not checked: a default-sink change mid-meeting (it would have cut the live
+call's audio) and the tray's notifications on Linux. Both go into the manual
+run of criterion 29.
+
+### Live results (2026-10-15)
+
+- `miris doctor` (isolated `MIRIS_HOME`, stub LLM): `[ok] pw-record:
+  /usr/bin/pw-record`, `[ok] microphone capture: 43200 frames (2.7s @ 16000
+  Hz)`, `[ok] system-audio capture: 49637 frames (3.1s @ 16000 Hz)`.
+- CLI end to end, same isolation: `miris start` -> `recording`, a TTS phrase
+  through the default output (`spd-say`), `miris stop` -> `completed`; the
+  transcript had `[00:00] Eles: Teste de gravação de reunião do Linux 1.` and
+  the note landed in the vault's inbox. Test audio deleted afterwards.
+- `pw-record` prints the output path on stderr, so it shows up as the first
+  line of `miris doctor` and in `recorder.log`. Kept: silencing stderr would
+  also hide pw-record's real errors.
 
 ## Slice 4 - polish (outline)
 

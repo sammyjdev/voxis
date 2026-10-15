@@ -1,8 +1,10 @@
 # VOXIS - Backlog
 
-Running list of open work, most actionable first. Last updated 2026-07-28.
+Running list of open work, most actionable first. Last updated 2026-10-15.
 
-VOXIS is macOS on Apple Silicon only. The Windows port was split off to
+VOXIS runs on macOS with Apple Silicon. Dictation and the tray also run on
+Linux (GNOME on Wayland) since 2026-10-14; see the P1 Linux section. The
+Windows port was split off to
 [Allyhgf/voxis-windows](https://github.com/Allyhgf/voxis-windows) on
 2026-07-28; its code, packaging, CI matrix and design docs were removed here.
 They remain in git history and in that fork.
@@ -19,14 +21,20 @@ the v1.0.0 ledger stay untouched.
 - [x] **Dictation (slice 1).** Super+C toggles hands-free through `laris
       toggle`; faster-whisper on CUDA; paste via wl-copy + uinput
       Shift+Insert. In daily use since 2026-10-14.
-- [ ] **Orb on Linux.** X11 override-redirect popup under XWayland, on the
-      system Python (it was cut at first). Shows live; the click-through and
-      focus check (plan criterion 16) is not recorded yet.
+- [x] **Orb on Linux.** X11 override-redirect popup under XWayland, on the
+      system Python (it was cut at first). Checked live 2026-10-15: 190x190,
+      override-redirect, mapped while listening, unmapped after; the owner
+      confirmed a click on it passes through.
 - [x] **Tray (slice 2).** Builds with `npx tauri build --no-bundle`, owns the
       daemon, icon red while dictating, starts at login via an XDG autostart
       entry.
 - [ ] **Criterion 11:** dictate into a browser field and a Ptyxis prompt;
-      record real per-utterance latency in the plan.
+      record real per-utterance latency in the plan. The 2026-10-15 run logged
+      no transcribed utterance (one 4 s listening window).
+- [ ] **Stopping hands-free drops the speech in progress.**
+      `VadCapture.stream_utterances` returns as soon as the stop is seen, so
+      a tap right after speaking, before 400 ms of silence close the
+      utterance, loses it. Both platforms. Flush the voiced chunks on stop.
 - [x] **Tray default `laris_dir`** pointed at `~/code/voxis`, wrong on both
       owner machines. Now it is the checkout the tray was built from, when
       that checkout has a laris venv.
@@ -36,8 +44,22 @@ the v1.0.0 ledger stay untouched.
 - [ ] **Tray menu actions on Linux** (hands-free checkbox, themes, "Sair"
       reaping the daemon): not checked.
 - [ ] **MIRIS on Linux (slice 3):** `pw-record` on the default sink monitor,
-      `pipeline.py` through the platform backend, the tray's "Gravar reunião".
-- [ ] **Ducking on Linux (slice 4):** `wpctl set-volume`.
+      `pipeline.py` through the platform backend. Code done; `miris doctor`
+      and a CLI start/stop/process run pass live. Open: the tray's "Gravar
+      reunião" run (plan criterion 29), which needs `~/.local/bin/miris` and
+      a real `vault_root`.
+- [ ] **Ducking on Linux (slice 4):** `wpctl set-volume` on
+      `@DEFAULT_AUDIO_SINK@` (`wpctl` is installed with PipeWire); today a
+      no-op.
+- [ ] **Per-app formatting on Linux.** GNOME gives clients no focused-window
+      API. The disabled `voxis-context@sammyjdev` extension (not in this
+      repo) already exports `org.voxis.Context.GetFocusedAppContext` on the
+      session bus, but it also grabs `<Super>c` with an empty handler, which
+      ate the dictation shortcut. Needs the extension in the repo without the
+      grab, and a Linux reader in laris.
+- [ ] **Linux job in CI.** CI runs only on macOS. A job on `ubuntu-latest`
+      would run the laris suite (CPU torch, `requirements-linux.txt`) and the
+      tray's `cargo test` (WebKit2 4.1 and appindicator dev packages).
 
 ## P1 - macOS UX gaps
 

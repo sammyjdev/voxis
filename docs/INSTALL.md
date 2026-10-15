@@ -5,8 +5,8 @@ meeting recording (`miris`) install from source into Python venvs; they use
 `mlx-whisper` and Core Audio. The **tray** (`apps/tray`) is the shared control
 surface and starts the dictation daemon for you.
 
-Dictation and the tray also run on **Linux (GNOME on Wayland)**; meeting
-recording does not yet. See [Linux](#linux-gnome-on-wayland).
+Dictation, the tray and meeting recording also run on **Linux (GNOME on
+Wayland)**. See [Linux](#linux-gnome-on-wayland).
 
 A Windows port lives in its own fork:
 [Allyhgf/voxis-windows](https://github.com/Allyhgf/voxis-windows).
@@ -128,7 +128,7 @@ this enabled the model is ready before you ever press the dictation key.
 
 ## Linux (GNOME on Wayland)
 
-Dictation and the tray only; MIRIS is not ported yet. Tested on Ubuntu 26.04,
+Dictation, the tray and MIRIS (section 6). Tested on Ubuntu 26.04,
 GNOME 50 on Wayland, PipeWire, an NVIDIA RTX 4070 Ti.
 
 Wayland gives no app global key events, so there is no push-to-talk. A GNOME
@@ -297,6 +297,35 @@ journalctl --user -u 'app-voxis\x2dtray@autostart.service'
 
 The entry runs the binary inside `target/release`, so a rebuild changes what
 starts at the next login.
+
+### 6. MIRIS - meeting recorder
+
+The microphone is one channel; the other is everything the speakers play,
+recorded by `pw-record` (package `pipewire-bin`, installed with PipeWire on
+Ubuntu) from the default output's monitor. Transcription runs faster-whisper,
+like dictation, in a venv of its own:
+
+```bash
+cd "$VOXIS_DIR/packages/miris"
+uv venv --python 3.12 .venv
+uv pip install --python .venv torch torchaudio \
+  --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python .venv -r requirements-linux.txt
+mkdir -p ~/.local/bin
+ln -sf "$PWD/.venv/bin/miris" ~/.local/bin/miris
+```
+
+`~/.local/bin/miris` is where the tray looks for it. The first run creates
+`~/.miris/config.toml`: set `vault_root` to your notes vault and check
+`llm_command` (the same file as on macOS, see section 2). Then:
+
+```bash
+miris doctor
+```
+
+expects `[ok]` for `pw-record`, the vault, the LLM command and both capture
+channels. Start and stop from the tray's "Gravar reunião", or with `miris
+start` / `miris stop`.
 
 ---
 
