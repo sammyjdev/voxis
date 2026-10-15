@@ -8,14 +8,16 @@
 | Orb on Linux | Done, checked live 2026-10-15 (was cut, now back: decision 5). |
 | 2 - tray | Working: runs, owns the daemon, icon red while dictating, starts at login, defaults `laris_dir` to its build checkout. Open: the fresh-login check (criterion 19); menu actions not checked on Linux. |
 | 3 - MIRIS | Code done 2026-10-15; `miris doctor` and a CLI start/stop/process run pass live. Open: the tray run (criterion 29). |
-| 4 - polish | Autostart moved to slice 2 and done. Ducking open. |
+| 4 - polish | Done 2026-10-15: ducking through `wpctl`, speech kept on a quick stop, a Linux CI job (not yet run on GitHub). |
 
 Install steps: `docs/INSTALL.md`, section "Linux (GNOME on Wayland)".
 
 **Goal:** use VOXIS day to day on the owner's Linux desktop, as a second
 platform next to macOS. macOS behavior and the v1.0.0 validation in
 `docs/releases/2026-09-14-v1.0.0-validation.md` stay untouched: every Linux
-change is a new file or a new branch behind a platform check.
+change is a new file or a new branch behind a platform check. One accepted
+exception (2026-10-15): a hands-free stop keeps the speech in progress on
+both platforms (criterion 36).
 
 ## Target machine
 
@@ -54,7 +56,7 @@ install doc gives a standalone rule for machines without it.
 4. **Cut on Linux:** per-app formatting (GNOME Wayland gives clients no
    focused-window API; a Shell extension can expose it over D-Bus, and the
    disabled `voxis-context` extension does - deferred), the macOS
-   Accessibility probe. Ducking is a no-op until slice 4.
+   Accessibility probe. Ducking came later, in slice 4.
 5. **The orb is back, as an X11 popup under XWayland.** First cut because a
    native Wayland client gets no always-on-top window or position on GNOME.
    An X11 override-redirect popup (`Gtk.WindowType.POPUP`, `GDK_BACKEND=x11`)
@@ -89,7 +91,7 @@ the focused app.
   PRIMARY), one Shift+Insert through a python-evdev `UInput`, best-effort
   clipboard restore after the settle delay.
 - Create `packages/laris/laris/platform/linux.py`: `LinuxBackend` with
-  faster-whisper, the Linux paste, the XWayland orb and a no-op ducker;
+  faster-whisper, the Linux paste, the XWayland orb and a no-op ducker (wpctl since slice 4);
   `ToggleTrigger`.
 - Create `packages/laris/laris/overlay_linux.py`: the orb child (decision 5).
 - Modify `packages/laris/laris/overlay.py`: the child's argv and env are
@@ -270,6 +272,8 @@ Python tests are in `packages/laris/tests/` (criteria 20-34:
 | 32 | `test_linux_boot.py::test_a_toggle_driven_daemon_does_not_claim_push_to_talk_mode`, `::test_a_toggle_driven_daemon_that_boots_listening_says_always_on`, `test_daemon.py::test_a_push_to_talk_daemon_names_its_key_and_mode_when_ready` |
 | 33 | `settings.rs::tests::a_source_build_defaults_to_the_laris_venv_of_its_own_checkout`, `::a_build_whose_checkout_has_no_venv_falls_back_to_code_voxis`, `::the_baked_in_build_checkout_is_this_repos_laris_package`, `::tray_config_defaults`; live 2026-10-15: with `tray.json` moved aside, the tray ran `<checkout>/packages/laris/.venv/bin/python -u -m laris` |
 | 34 | `test_systemtap_linux.py::test_a_killed_pw_record_wav_is_repaired_with_every_frame_it_wrote` |
+| 35 | `test_ducking_linux.py::test_duck_lowers_the_default_output_to_20_percent_and_restore_brings_it_back`, `::test_restore_returns_the_volume_to_the_sink_that_was_ducked`, `::test_an_output_already_at_or_below_20_percent_is_left_alone`, `::test_ducking_twice_keeps_the_original_volume_for_the_restore`, `::test_restore_without_a_duck_changes_nothing`, `::test_every_wpctl_call_is_bounded_so_a_hung_one_cannot_freeze_dictation`, `::test_a_missing_or_hung_wpctl_never_breaks_dictation`, `test_platform.py::test_on_linux_the_backend_ducks_the_default_output_through_wpctl` |
+| 36 | `test_audio_capture.py::test_stopping_mid_sentence_still_delivers_what_was_said`, `::test_audio_still_queued_when_the_stop_arrives_is_part_of_the_last_utterance`, `::test_speech_reaching_the_mic_after_the_stop_is_not_delivered`, `::test_a_blip_shorter_than_the_minimum_speech_at_stop_is_dropped` |
 
 ## Slice 3 - MIRIS on Linux
 
@@ -395,7 +399,30 @@ run of criterion 29.
   line of `miris doctor` and in `recorder.log`. Kept: silencing stderr would
   also hide pw-record's real errors.
 
-## Slice 4 - polish (outline)
+## Slice 4 - polish
 
-Ducking with `wpctl set-volume @DEFAULT_AUDIO_SINK@`. (Autostart moved to
-slice 2 and is done.)
+**Status: done (2026-10-15).** Autostart moved to slice 2.
+
+- Ducking: `laris/ducking_linux.py`, same contract as macOS's `ducking.py`;
+  the sink is kept by id, so a headset plugged in mid-session does not get
+  the old speakers' volume. Live: 0.40 -> 0.20 -> 0.40 on the default sink.
+- A stop no longer drops the speech in progress: the live run of criterion
+  11 on 2026-10-15 lost its only utterance that way. Both platforms.
+- CI: `.github/workflows/linux.yml` (laris + miris on Python 3.12, tray
+  `cargo test` on ubuntu-24.04). Replayed locally from a clean copy of the
+  tree: laris 236 passed (the DeepFilterNet test deselected; 239 after the
+  stop-boundary fixes), miris 90,
+  `cargo test` 43; not yet run on GitHub.
+
+### Acceptance criteria
+
+35. Given hands-free starts with the default output above 20%, when the
+    session runs, then `wpctl` sets that sink to `0.20`, and when it ends the
+    same sink id gets its old volume back; at or below 20% nothing changes;
+    a missing or hung `wpctl` never breaks dictation.
+36. Given speech is still open (VAD start seen, no end yet) when hands-free
+    stops, when the stop arrives, then that speech, including the mic chunks
+    already queued at that moment, is delivered as one more utterance if it
+    is at least 400 ms long, and dropped if shorter. Audio the mic picks up
+    after the stop (while an earlier utterance is still being transcribed) is
+    never delivered.

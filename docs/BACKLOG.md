@@ -31,10 +31,10 @@ the v1.0.0 ledger stay untouched.
 - [ ] **Criterion 11:** dictate into a browser field and a Ptyxis prompt;
       record real per-utterance latency in the plan. The 2026-10-15 run logged
       no transcribed utterance (one 4 s listening window).
-- [ ] **Stopping hands-free drops the speech in progress.**
-      `VadCapture.stream_utterances` returns as soon as the stop is seen, so
-      a tap right after speaking, before 400 ms of silence close the
-      utterance, loses it. Both platforms. Flush the voiced chunks on stop.
+- [x] **Stopping hands-free dropped the speech in progress:** a tap right
+      after speaking, before 400 ms of silence closed the utterance, lost it
+      (both platforms). The open speech is now delivered on stop; a blip
+      under 400 ms is still dropped.
 - [x] **Tray default `laris_dir`** pointed at `~/code/voxis`, wrong on both
       owner machines. Now it is the checkout the tray was built from, when
       that checkout has a laris venv.
@@ -48,18 +48,18 @@ the v1.0.0 ledger stay untouched.
       and a CLI start/stop/process run pass live. Open: the tray's "Gravar
       reunião" run (plan criterion 29), which needs `~/.local/bin/miris` and
       a real `vault_root`.
-- [ ] **Ducking on Linux (slice 4):** `wpctl set-volume` on
-      `@DEFAULT_AUDIO_SINK@` (`wpctl` is installed with PipeWire); today a
-      no-op.
+- [x] **Ducking on Linux (slice 4):** hands-free drops the default output
+      to 20% through `wpctl` and gives the same sink its volume back after.
 - [ ] **Per-app formatting on Linux.** GNOME gives clients no focused-window
       API. The disabled `voxis-context@sammyjdev` extension (not in this
       repo) already exports `org.voxis.Context.GetFocusedAppContext` on the
       session bus, but it also grabs `<Super>c` with an empty handler, which
       ate the dictation shortcut. Needs the extension in the repo without the
       grab, and a Linux reader in laris.
-- [ ] **Linux job in CI.** CI runs only on macOS. A job on `ubuntu-latest`
-      would run the laris suite (CPU torch, `requirements-linux.txt`) and the
-      tray's `cargo test` (WebKit2 4.1 and appindicator dev packages).
+- [ ] **Linux job in CI.** `.github/workflows/linux.yml` runs the laris and
+      miris suites on Python 3.12 with `requirements-linux.txt` and the
+      tray's `cargo test` on ubuntu-24.04. Replayed locally from a clean copy;
+      not yet run on GitHub.
 
 ## P1 - macOS UX gaps
 
