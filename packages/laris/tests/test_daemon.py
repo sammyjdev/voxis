@@ -441,6 +441,88 @@ def test_missing_vad_degrades_hands_free_to_ptt(monkeypatch):
     assert armed == [True, False], "hands-free must disarm and fall back to PTT"
 
 
+def test_a_push_to_talk_daemon_names_its_key_and_mode_when_ready(monkeypatch, capsys):
+    import laris.config as config_mod
+
+    monkeypatch.setattr(config_mod, "DICTATE_KEY", "cmd_r")
+    _run_with_fakes(monkeypatch, "ptt")
+    lines = [line for line in capsys.readouterr().out.splitlines() if "pronta" in line]
+
+    assert lines == ["[Voice] Laris (transcritora) pronta, pura (VOICE_ASSISTANT=0, muda) - "
+                     "PTT: cmd_r, modo: ptt"]
+
+
+def test_each_hands_free_line_shows_the_audio_length_and_the_stt_time(monkeypatch, capsys):
+    """Per-utterance latency is read off laris.log: a 1.5 s utterance that
+    took 0.42 s to transcribe says both, in seconds."""
+    import threading
+    import types
+
+    import numpy as np
+
+    import laris.audio_capture as audio_mod
+    import laris.daemon as daemon_mod
+    import laris.platform as platform_mod
+
+    clock = {"now": 100.0}
+
+    class SlowBackend:
+        def warm(self):
+            pass
+
+        def transcribe(self, audio, sample_rate):
+            clock["now"] += 0.42
+            return "teste de ditado"
+
+        def type_text(self, text):
+            pass
+
+        def make_overlay(self, url):
+            return MagicMock()
+
+        def make_ducker(self):
+            return MagicMock()
+
+    class OneUtterance:
+        def stream_utterances(self, should_stop, on_chunk=None):
+            yield np.zeros(24000, dtype=np.float32), 16000  # 1.5 s at 16 kHz
+
+    class ToggledOn:
+        label, stop_hint = "toggle", "toggle again to stop"
+
+        def __init__(self):
+            self.pressed = threading.Event()
+            self.hands_free = threading.Event()
+            self.hands_free.set()
+
+        def start(self):
+            pass
+
+    trigger = ToggledOn()
+    waits = iter([("hands_free", trigger.hands_free)])
+
+    def fake_wait(pressed, hands_free=None, on_tick=lambda: None):
+        try:
+            return next(waits)
+        except StopIteration:
+            raise _StopLoop
+
+    monkeypatch.setattr(platform_mod, "get_backend", lambda: SlowBackend())
+    monkeypatch.setattr(audio_mod, "VadCapture", OneUtterance)
+    monkeypatch.setattr(daemon_mod, "_wait_for_ptt", fake_wait)
+    monkeypatch.setattr(daemon_mod, "time",
+                        types.SimpleNamespace(monotonic=lambda: clock["now"], sleep=lambda s: None))
+
+    try:
+        daemon_mod.run(make_voice_session=lambda: MagicMock(), trigger=trigger)
+    except _StopLoop:
+        pass
+    lines = [line for line in capsys.readouterr().out.splitlines()
+             if line.startswith("[Voice] hands-free: ")]
+
+    assert lines == ["[Voice] hands-free: 'teste de ditado' (audio=1.5s, stt=0.42s, amp=0.0000)"]
+
+
 def test_parent_watchdog_only_fires_for_a_tray_spawned_daemon(monkeypatch):
     """A daemon started by hand in a terminal has no VOXIS_PARENT_PID and must
     never be killed by this - the tray deliberately leaves external daemons

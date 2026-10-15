@@ -121,10 +121,13 @@ def _run_hands_free_session(vad, stt, typer, overlay, voice_queue, active, ducke
         ):
             try:
                 amplitude = compute_amplitude(audio)
+                started = time.monotonic()
                 text = stt.transcribe(audio, sample_rate)
+                stt_seconds = time.monotonic() - started
                 if text:
                     typer(text)
-                    print(f"[Voice] hands-free: {text!r} (amp={amplitude:.4f})")
+                    print(f"[Voice] hands-free: {text!r} (audio={len(audio) / sample_rate:.1f}s, "
+                          f"stt={stt_seconds:.2f}s, amp={amplitude:.4f})")
                 voice_queue.put(VoiceEvent(phase="recording", amplitude=amplitude))
             except Exception as exc:  # noqa: BLE001 - one bad utterance must not end the session
                 print(f"[Voice] {exc!r} (ignoring this utterance, hands-free keeps running)")
@@ -175,8 +178,11 @@ def run(
         trigger = PushToTalk(config.DICTATE_KEY)
         trigger_label = f"PTT: {config.DICTATE_KEY}"
         stop_hint = "tap the dictate key to stop"
+        mode = f", modo: {config.MODE}"
     else:
         trigger_label, stop_hint = trigger.label, trigger.stop_hint
+        # no key to hold: "ptt" would name a mode this trigger does not have
+        mode = "" if config.MODE == "ptt" else f", modo: {config.MODE}"
     ptt = trigger
     ptt.start()
     # only now is dictation real: the model is loaded and the key listener is
@@ -195,7 +201,7 @@ def run(
     kiris = "com Kiris (assistente)" if assistant else "pura (VOICE_ASSISTANT=0, muda)"
     print(
         f"[Voice] Laris (transcritora) pronta, {kiris} - "
-        f"{trigger_label}, modo: {config.MODE}"
+        f"{trigger_label}{mode}"
     )
 
     def _reset_orb_if_stale():

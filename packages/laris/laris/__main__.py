@@ -6,6 +6,7 @@ Boots the orb overlay server on 127.0.0.1:8421 in a background thread and
 runs the PTT voice loop on the calling thread."""
 from __future__ import annotations
 
+import importlib.util
 import queue
 import socket
 import sys
@@ -120,10 +121,16 @@ def main(argv: list[str] | None = None) -> None:
         trigger = ToggleTrigger()
         app.state.toggle_trigger = trigger
         trigger_label, stt_model = trigger.label, config.STT_MODEL_FASTER
+        # requirements-linux.txt leaves DeepFilterNet (import name `df`) out,
+        # and audio_capture then passes audio through untouched
+        denoise = config.NOISE_REDUCTION
+        if denoise == "on" and importlib.util.find_spec("df") is None:
+            denoise = "off (DeepFilterNet not installed)"
     else:
         from laris.hotkey import PushToTalk
         app.state.ptt_trusted = PushToTalk.check_trusted()
         trigger_label, stt_model = f"PTT: {config.DICTATE_KEY}", config.STT_MODEL
+        denoise = config.NOISE_REDUCTION
     # uvicorn binds the port before the model loads, so /theme answers long
     # before dictation works. Start explicitly not-ready.
     app.state.ready = False
@@ -165,7 +172,7 @@ def main(argv: list[str] | None = None) -> None:
     print(
         f"[Laris] STT: {stt_model} "
         f"(lang={config.STT_LANGUAGE or 'auto'}, "
-        f"denoise={config.NOISE_REDUCTION})"
+        f"denoise={denoise})"
     )
 
     from laris import daemon
