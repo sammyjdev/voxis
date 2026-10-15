@@ -278,3 +278,43 @@ def test_on_macos_the_doctor_still_checks_the_audiotap_binary(tmp_path, monkeypa
     cli.cmd_doctor(cfg, exit_on_finish=False)
 
     assert f"[ok] audiotap binary: {helper}" in capsys.readouterr().out
+
+
+def _doctor_output_for_llm_command(tmp_path, monkeypatch, capsys, llm_command):
+    import dataclasses
+
+    cfg = dataclasses.replace(_doctor_with_llm_ok(tmp_path, monkeypatch), llm_command=llm_command)
+    monkeypatch.setattr(cli, "run_doctor_capture", lambda cfg, duration_s=3.0: {
+        "mic": session.ChannelInfo("mic.wav", 48_000, 16_000, 1),
+        "system": session.ChannelInfo("system.wav", 48_000, 16_000, 1),
+    })
+    cli.cmd_doctor(cfg, exit_on_finish=False)
+    return capsys.readouterr().out
+
+
+def test_the_doctor_warns_that_a_bare_llm_command_is_not_found_from_the_tray(tmp_path, monkeypatch, capsys):
+    """The tray started at login has no shell PATH: a bare `agy` passed the
+    doctor in a terminal, then every meeting the tray stopped failed with
+    "No such file or directory: 'agy'" (2026-10-15)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "agy").write_text("#!/bin/sh\n")
+    (bin_dir / "agy").chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = _doctor_output_for_llm_command(tmp_path, monkeypatch, capsys, ["agy", "-p"])
+
+    assert (f"[WARN] llm_command: the tray started from the desktop does not have your "
+            f"shell PATH - write \"{bin_dir / 'agy'}\" instead of \"agy\"") in out
+
+
+def test_the_doctor_does_not_warn_about_an_llm_command_given_by_full_path(tmp_path, monkeypatch, capsys):
+    out = _doctor_output_for_llm_command(tmp_path, monkeypatch, capsys, ["/usr/bin/true"])
+
+    assert "[WARN] llm_command" not in out
+
+
+def test_the_doctor_reports_an_empty_llm_command_instead_of_crashing(tmp_path, monkeypatch, capsys):
+    out = _doctor_output_for_llm_command(tmp_path, monkeypatch, capsys, [])
+
+    assert "[FAIL] llm_command: " in out

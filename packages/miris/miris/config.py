@@ -8,7 +8,7 @@ DEFAULT_TOML = """\
 vault_root = "~/vault"
 inbox = "inbox"
 # swapping provider = edit this line, never code (Google killed gemini-cli logins mid-2026)
-llm_command = ["agy", "--model", "Gemini 3.5 Flash (Medium)", "-p"]
+llm_command = ["agy", "--model", "Gemini 3.8 Flash (Medium)", "-p"]
 
 [categories]
 # category -> vault-relative folder; edit to taste

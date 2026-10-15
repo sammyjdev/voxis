@@ -4,6 +4,7 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -287,14 +288,22 @@ def cmd_doctor(cfg: config.Config, exit_on_finish: bool = True) -> bool:
     print(f"[{'ok' if cfg.categories else 'WARN'}] categories configured: "
           f"{list(cfg.categories) or 'none (everything goes to inbox)'}")
 
-    try:
-        llm = subprocess.run(cfg.llm_command + ["Responda apenas: OK"],
-                             capture_output=True, text=True, timeout=120)
-        llm_ok = llm.returncode == 0 and llm.stdout.strip() != ""
-    except (OSError, subprocess.TimeoutExpired):
-        llm_ok = False
+    llm_ok = False
+    if cfg.llm_command:  # empty would run the prompt itself as the program
+        try:
+            llm = subprocess.run(cfg.llm_command + ["Responda apenas: OK"],
+                                 capture_output=True, text=True, timeout=120)
+            llm_ok = llm.returncode == 0 and llm.stdout.strip() != ""
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     print(f"[{'ok' if llm_ok else 'FAIL'}] llm_command: {' '.join(cfg.llm_command)}")
     ok &= llm_ok
+    llm_bin = cfg.llm_command[0] if cfg.llm_command else ""
+    if llm_bin and os.sep not in llm_bin:  # resolved through this terminal's PATH only
+        found = shutil.which(llm_bin)
+        found = os.path.abspath(found) if found else None  # PATH may hold relative dirs
+        print(f"[WARN] llm_command: the tray started from the desktop does not have your "
+              f"shell PATH - write \"{found or 'the full path'}\" instead of \"{llm_bin}\"")
 
     if tap_present:
         try:
