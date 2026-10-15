@@ -29,7 +29,8 @@ def main() -> None:
         res = d["results"]
         raw = " ".join(r["hyp"] for r in res)
         hyp = normalize(raw, lenient=True)
-        missed = [t for t in terms if normalize(t) not in hyp]
+        # whole words: "resting" is not "rest", "venvidularis" is not "venv"
+        missed = [t for t in terms if f" {normalize(t)} " not in f" {hyp} "]
         rows.append((d["config"], 100 * jiwer.wer(ref, hyp), 100 * (len(terms) - len(missed)) / len(terms),
                      pct([r["stt_s"] for r in res], .5), pct([r["stt_s"] for r in res], .9), missed, raw))
     rows.sort(key=lambda r: (-r[2], r[1]))

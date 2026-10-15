@@ -251,7 +251,7 @@ Python tests are in `packages/laris/tests/` (criteria 20-34 and 38-41:
 | 8 | `test_toggle.py::test_each_toggle_command_flips_hands_free_on_the_running_daemon`, `::test_the_toggle_command_fails_with_a_reason_when_no_daemon_answers`, `::test_the_toggle_command_fails_with_a_reason_when_no_daemon_is_recorded` |
 | 9 | `test_linux_boot.py::test_a_daemon_driven_by_the_toggle_trigger_reaches_ready_without_a_key_listener`, `::test_on_linux_a_toggle_reaches_the_event_the_daemon_loop_waits_on` |
 | 10 | the whole suite: `cd packages/laris && .venv/bin/python -m pytest -q` (one failure predates this work: `test_audio_capture.py::test_denoise_on_changes_audio`, red on `e635955` too) |
-| 11 | manual |
+| 11 | manual; 2026-10-15: 20 phrases in one hands-free session, one utterance each, transcribed in 0.11-0.14 s per 1.2-4.2 s utterance (0.23 s for the first); browser field and Ptyxis not checked separately |
 | 12 | `test_dictation_linux.py::test_a_keystroke_that_fails_midway_still_releases_shift`, `::test_a_failed_insert_release_still_releases_shift`, `::test_when_the_keystroke_fails_the_text_stays_on_the_clipboard_for_a_manual_paste` |
 | 13 | `test_linux_boot.py::test_on_linux_the_boot_log_names_the_faster_whisper_model_and_the_toggle`, `::test_a_toggled_hands_free_session_tells_how_to_stop_it_with_laris_toggle` |
 | 14 | `test_platform.py::test_on_linux_the_orb_runs_in_the_system_python_on_xwayland` |

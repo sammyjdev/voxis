@@ -23,6 +23,10 @@ import soundfile as sf
 BENCH_HOME = os.path.expanduser(os.environ.get("STT_BENCH_HOME", "~/.cache/voxis-bench"))
 PER_SOURCE = int(os.environ.get("PER_SOURCE", "100"))
 SEED = 7
+# the owner's vocabulary as LARIS's INITIAL_PROMPT would carry it
+VOCABULARY_PROMPT = ("LARIS, VOXIS, MIRIS, tray, hands-free, Super C, orb, sink, PipeWire, wpctl, "
+                     "diff, commit, push, pull request, master, README, BACKLOG, REST, JSON, venv, "
+                     "pytest, cargo test, Codex, Claude, faster-whisper, Obsidian, vault.")
 
 CONFIGS = {
     # name: (engine, model, options)
@@ -32,6 +36,7 @@ CONFIGS = {
     "turbo-en-b5": ("fw", "large-v3-turbo", {"language": "en", "beam_size": 5}),
     # detection limited to the two meeting languages: the larger of p(pt), p(en)
     "turbo-pten-b5": ("fw", "large-v3-turbo", {"language": "pt|en", "beam_size": 5}),
+    "turbo-pt-b5-prompt": ("fw", "large-v3-turbo", {"language": "pt", "beam_size": 5, "prompt": True}),
     "large-v3-pt-b5": ("fw", "large-v3", {"language": "pt", "beam_size": 5}),
     "medium-pt-b5": ("fw", "medium", {"language": "pt", "beam_size": 5}),
     "small-pt-b5": ("fw", "small", {"language": "pt", "beam_size": 5}),
@@ -97,8 +102,9 @@ def load(engine: str, model: str, opts: dict):
             if language == "pt|en":
                 probs = dict(m.detect_language(audio)[2])
                 language = "pt" if probs.get("pt", 0) >= probs.get("en", 0) else "en"
+            extra = {"initial_prompt": VOCABULARY_PROMPT} if opts.get("prompt") else {}
             segs, info = m.transcribe(audio, language=language, beam_size=opts["beam_size"],
-                                      task="transcribe", condition_on_previous_text=False)
+                                      task="transcribe", condition_on_previous_text=False, **extra)
             return "".join(s.text for s in segs).strip(), info.language
         return run
     import onnxruntime as ort

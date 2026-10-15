@@ -103,6 +103,34 @@ the error on dictated commands. The dictation test with the owner's voice
 (`scripts/stt_bench/voice-phrases.tsv`, 20 phrases with technical terms)
 measures that case.
 
-## Owner's voice (pending)
+## Owner's voice: live dictation (2026-10-15)
 
-Pending a recording. Terms recall and WER per model will go here.
+The owner read the 20 phrases of `scripts/stt_bench/voice-phrases.tsv` in
+one hands-free session, through the real LARIS pipeline (large-v3-turbo, pt,
+beam 5, Silero VAD, paste). Each phrase became exactly one utterance.
+
+| metric | value |
+|---|---|
+| WER (lenient) / CER | 12.6% / 4.1% |
+| technical terms right (whole words) | 30 of 42 |
+| phrases exactly right | 6 of 20 |
+| transcribe time | 0.11-0.14 s per 1.2-4.2 s utterance (0.23 s for the first) |
+
+Portuguese, numbers ("40%", "2.500", "três da tarde") and widely used terms
+(pytest, commit, push, pull request, Kafka, Spring Boot, JSON, PipeWire,
+faster-whisper, DeepFilterNet, Obsidian) came out right. The misses are
+project names and short English words inside Portuguese: LARIS -> "Larys",
+VOXIS -> "Voxys", tray -> "trade", hands-free -> "Hunts Free", sink ->
+"sync", diff -> "DIF", REST -> "resting", README -> "Redmi", cargo test ->
+"CargoTest", venv do laris -> "Venvidularis", vault -> "Valt". One phrase
+lost its first word ("Qual a latência" -> "a latência").
+
+**`INITIAL_PROMPT` is not a free fix.** The obvious lever for those misses is
+LARIS's `INITIAL_PROMPT` (empty today). With the owner's vocabulary as the
+prompt, turbo got worse on CORAA: 20.3 -> 21.2 WER overall and 40.9 -> 46.5
+on 1-5 word utterances. On fragments and fillers the prompt leaks into the
+output: "é" -> "LARIS, MIRIS, MIRIS, MIRIS,", "eh" -> "REST, JSON, venv.".
+In hands-free, a cough could paste that. Whether it is worth it depends on
+the owner's own audio, which the live run did not keep: a `pw-record` take of
+the same phrases lets turbo with and without the prompt, large-v3 and
+Parakeet be compared on it.
