@@ -67,6 +67,12 @@ the v1.0.0 ledger stay untouched.
 - [ ] **Check the Mac's `~/.miris/config.toml`:** it was created with the old
       model name and a bare `agy`, which both break the summary from the
       tray. Run `miris doctor` there.
+- [x] **Hands-free pasted consecutive sentences glued** ("falhas.Faz o
+      commit"), both platforms. Every utterance after the first of a session
+      now gets a leading space.
+- [x] **The VAD clipped the first word** ("Qual a latência" -> "a
+      latência"), both platforms. LARIS keeps 200 ms from before the VAD
+      fires; WER on a replayed conversation 20.6-21.4% -> 16.6%.
 - [ ] **Dictation test with the owner's voice:** 20 phrases with technical
       terms (`scripts/stt_bench/voice-phrases.tsv`) to measure dictation on
       real use instead of CORAA fragments.

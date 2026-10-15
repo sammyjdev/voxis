@@ -283,6 +283,8 @@ Python tests are in `packages/laris/tests/` (criteria 20-34 and 38-41:
 | 40 | miris `test_transcribe.py::test_a_channel_whose_language_cannot_be_detected_is_still_transcribed`; unchanged `test_pipeline.py::test_on_linux_meetings_reach_faster_whisper_with_language_auto_detect` runs this path |
 | 41 | miris `test_cli.py::test_the_doctor_warns_that_a_bare_llm_command_is_not_found_from_the_tray`, `::test_the_doctor_does_not_warn_about_an_llm_command_given_by_full_path`, `::test_the_doctor_reports_an_empty_llm_command_instead_of_crashing` |
 | 42 | live: a fresh `MIRIS_HOME`'s default `llm_command` exited 1 with "model Gemini 3.5 Flash (Medium) is not recognized" before, printed `OK` after |
+| 43 | `test_daemon.py::test_utterances_of_one_hands_free_session_are_pasted_a_space_apart`, `::test_a_new_hands_free_session_starts_without_a_space`, `test_app_context.py::test_prose_formatting_keeps_the_space_before_a_follow_up_utterance` |
+| 44 | `test_audio_capture.py::test_the_audio_just_before_the_vad_hears_speech_starts_the_utterance`, `::test_a_blip_is_dropped_even_when_the_audio_before_it_would_make_it_long_enough`; replay numbers in the benchmark spec |
 
 ## Slice 3 - MIRIS on Linux
 
@@ -483,6 +485,15 @@ in `agy`, and the tray started at login cannot find a bare `agy`.
     nothing is run.
 42. Given a fresh `~/.miris`, when the default config is created, then its
     `llm_command` model is one `agy` offers (`Gemini 3.8 Flash (Medium)`).
+43. Given a hands-free session, when it pastes its second and later
+    utterances, then each goes in with one leading space; the first
+    utterance of every session has none. On macOS, prose formatting keeps
+    that space in front and still capitalizes the first letter. (Both
+    platforms; the owner's dictation test pasted "falhas.Faz o commit".)
+44. Given the VAD fires on chunk N, when the utterance is cut, then it starts
+    200 ms (6 chunks) before chunk N; an utterance whose speech after the
+    VAD fired is under 400 ms is still dropped. (Both platforms; it had
+    pasted "Qual a latência" as "a latência".)
 
 ### Live results (2026-10-15)
 

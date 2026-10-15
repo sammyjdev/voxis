@@ -123,7 +123,30 @@ project names and short English words inside Portuguese: LARIS -> "Larys",
 VOXIS -> "Voxys", tray -> "trade", hands-free -> "Hunts Free", sink ->
 "sync", diff -> "DIF", REST -> "resting", README -> "Redmi", cargo test ->
 "CargoTest", venv do laris -> "Venvidularis", vault -> "Valt". One phrase
-lost its first word ("Qual a latência" -> "a latência").
+lost its first word ("Qual a latência" -> "a latência"); see the next
+section. The 20 utterances were also pasted glued ("falhas.Faz o commit"):
+hands-free now puts a space before every utterance after the first of a
+session.
+
+## The VAD clipped the first word (2026-10-15)
+
+LARIS started each utterance at the 32 ms chunk where Silero's VADIterator
+fired. That chunk is already a few chunks into the word. Replaying the
+150 s pt-BR conversation used for the MIRIS test through LARIS's VAD loop
+(`scripts/stt_bench/preroll.py`), then transcribing with turbo:
+
+| audio before the VAD fired | WER |
+|---|---|
+| none (LARIS until now) | 20.6-21.4% (float16 on the GPU varies a little between runs) |
+| 100 ms | 17.7% |
+| 200 ms | 17.7% |
+| 300 ms | 17.7% |
+
+Recovered first words: "Fez um" -> "Você fez um?" (said: "cê fez um"),
+"Uma gravidez" -> "É uma gravidez", "Onde eu morava" -> "Bom, onde eu
+morava". LARIS now keeps 200 ms (`PREROLL_MS`). The 400 ms minimum that
+drops blips counts only the speech after the VAD fired. The real
+`stream_utterances` with the change, fed from the same recording: 16.6%.
 
 **`INITIAL_PROMPT` is not a free fix.** The obvious lever for those misses is
 LARIS's `INITIAL_PROMPT` (empty today). With the owner's vocabulary as the

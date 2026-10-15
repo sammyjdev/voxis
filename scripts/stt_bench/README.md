@@ -64,3 +64,13 @@ mkdir -p $B/voice; for c in turbo-pt-b5 large-v3-pt-b5 parakeet-v3; do
   $B/.venv/bin/python voice.py $c $B/voice.wav $B/voice.spans.json $B/voice; done
 $B/.venv/bin/python voice_score.py $B/voice
 ```
+
+## First-word clipping
+
+`preroll.py` replays a recording through LARIS's VAD loop and transcribes
+each utterance as LARIS cuts it and with some audio from before the VAD
+fired. It runs in laris's venv:
+
+```bash
+../../packages/laris/.venv/bin/python preroll.py $B/voice.wav 200 $B/preroll-200
+```
