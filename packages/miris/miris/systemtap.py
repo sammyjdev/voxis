@@ -3,6 +3,7 @@
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
 DEFAULT_BIN = Path(__file__).resolve().parent.parent / "helper" / "audiotap"
@@ -14,6 +15,10 @@ class SystemTap:
         # explicit binary wins; MIRIS_AUDIOTAP only overrides the default
         self.binary = Path(binary or os.environ.get("MIRIS_AUDIOTAP") or DEFAULT_BIN)
         self.proc: subprocess.Popen | None = None
+
+    def requirement(self) -> tuple[str, str, bool]:
+        """(what, where, present) for `miris doctor`."""
+        return "audiotap binary", str(self.binary), self.binary.exists()
 
     def start(self) -> None:
         if not self.binary.exists():
@@ -40,3 +45,12 @@ class SystemTap:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait()
+
+
+def default_tap_factory(out_wav: Path) -> SystemTap:
+    """The system-audio tap for this platform: pw-record on Linux, the
+    audiotap helper on macOS."""
+    if sys.platform.startswith("linux"):
+        from miris.systemtap_linux import PwRecordTap
+        return PwRecordTap(out_wav)
+    return SystemTap(out_wav)

@@ -217,3 +217,64 @@ def test_doctor_reports_missing_channel_and_returns_false(tmp_path, monkeypatch,
     output = capsys.readouterr().out
     assert "[FAIL]" in output
     assert "missing capture: mic.wav" in output
+
+
+def _doctor_with_llm_ok(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.vault_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess([], 0, stdout="OK"))
+    return cfg
+
+
+def test_on_linux_the_doctor_checks_pw_record_and_runs_the_capture(tmp_path, monkeypatch, capsys):
+    cfg = _doctor_with_llm_ok(tmp_path, monkeypatch)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "pw-record").write_text("#!/bin/sh\n")
+    (bin_dir / "pw-record").chmod(0o755)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(cli, "run_doctor_capture", lambda cfg, duration_s=3.0: {
+        "mic": session.ChannelInfo("mic.wav", 48_000, 16_000, 1),
+        "system": session.ChannelInfo("system.wav", 48_000, 16_000, 1),
+    })
+
+    assert cli.cmd_doctor(cfg, exit_on_finish=False) is True
+    output = capsys.readouterr().out
+
+    assert f"[ok] pw-record: {bin_dir / 'pw-record'}" in output
+    assert "audiotap" not in output
+    assert "[ok] system-audio capture: 48000 frames (3.0s @ 16000 Hz)" in output
+
+
+def test_on_linux_without_pw_record_the_doctor_fails_and_skips_the_capture(
+        tmp_path, monkeypatch, capsys):
+    cfg = _doctor_with_llm_ok(tmp_path, monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+
+    def capture_must_not_run(cfg, duration_s=3.0):
+        raise AssertionError("capture ran without pw-record")
+
+    monkeypatch.setattr(cli, "run_doctor_capture", capture_must_not_run)
+
+    assert cli.cmd_doctor(cfg, exit_on_finish=False) is False
+    assert "[FAIL] pw-record: not found" in capsys.readouterr().out
+
+
+def test_on_macos_the_doctor_still_checks_the_audiotap_binary(tmp_path, monkeypatch, capsys):
+    cfg = _doctor_with_llm_ok(tmp_path, monkeypatch)
+    helper = tmp_path / "audiotap"
+    helper.write_text("")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("MIRIS_AUDIOTAP", str(helper))
+    monkeypatch.setattr(cli, "run_doctor_capture", lambda cfg, duration_s=3.0: {
+        "mic": session.ChannelInfo("mic.wav", 48_000, 16_000, 1),
+        "system": session.ChannelInfo("system.wav", 144_000, 48_000, 2),
+    })
+
+    cli.cmd_doctor(cfg, exit_on_finish=False)
+
+    assert f"[ok] audiotap binary: {helper}" in capsys.readouterr().out

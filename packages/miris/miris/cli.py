@@ -274,12 +274,12 @@ def run_doctor_capture(cfg: config.Config, duration_s: float = 3.0) -> dict:
 
 def cmd_doctor(cfg: config.Config, exit_on_finish: bool = True) -> bool:
     """End-to-end smoke: binary, vault, llm, bounded two-channel capture."""
-    from miris.systemtap import SystemTap
+    from miris.systemtap import default_tap_factory
     ok = True
 
-    tap_bin = SystemTap(Path("/dev/null")).binary
-    print(f"[{'ok' if tap_bin.exists() else 'FAIL'}] audiotap binary: {tap_bin}")
-    ok &= tap_bin.exists()
+    tap_label, tap_where, tap_present = default_tap_factory(Path(os.devnull)).requirement()
+    print(f"[{'ok' if tap_present else 'FAIL'}] {tap_label}: {tap_where}")
+    ok &= tap_present
 
     print(f"[{'ok' if cfg.vault_root.is_dir() else 'FAIL'}] vault_root: {cfg.vault_root}")
     ok &= cfg.vault_root.is_dir()
@@ -296,7 +296,7 @@ def cmd_doctor(cfg: config.Config, exit_on_finish: bool = True) -> bool:
     print(f"[{'ok' if llm_ok else 'FAIL'}] llm_command: {' '.join(cfg.llm_command)}")
     ok &= llm_ok
 
-    if tap_bin.exists():
+    if tap_present:
         try:
             channels = run_doctor_capture(cfg)
             for name, label in (("mic", "microphone capture"),

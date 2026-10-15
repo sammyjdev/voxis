@@ -20,12 +20,27 @@ def _write_text_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+class _BackendTranscriber:
+    """MIRIS transcribes 16 kHz spans with transcribe(audio); the platform
+    backend (mlx-whisper on macOS, faster-whisper on Linux) takes the rate."""
+
+    def __init__(self, backend):
+        self._backend = backend
+
+    def warm(self) -> None:
+        self._backend.warm()
+
+    def transcribe(self, audio) -> str:
+        return self._backend.transcribe(audio, transcribe.TARGET_SR)
+
+
 def _default_transcriber_factory():
     # meetings are bilingual (pt-BR + English): default Whisper to auto-detect
-    # per utterance unless the user pinned STT_LANGUAGE themselves
+    # per utterance unless the user pinned STT_LANGUAGE themselves. Set before
+    # the backend import, which reads laris.config once.
     os.environ.setdefault("STT_LANGUAGE", "")
-    from laris.transcriber import Transcriber
-    return Transcriber()
+    from laris.platform import get_backend
+    return _BackendTranscriber(get_backend())
 
 
 def build_transcript(session_dir: Path, transcriber_factory=None) -> str:

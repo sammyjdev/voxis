@@ -15,7 +15,7 @@ from typing import Callable
 import numpy as np
 
 from miris import session
-from miris.systemtap import SystemTap
+from miris.systemtap import SystemTap, default_tap_factory
 
 SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 1600  # 100ms
@@ -117,7 +117,7 @@ def _heartbeat(session_dir: Path, mic_frames: int, system_bytes: int) -> None:
 def record(
     session_dir: Path,
     stop: threading.Event,
-    tap_factory: Callable[[Path], SystemTap] = SystemTap,
+    tap_factory: Callable[[Path], SystemTap] = default_tap_factory,
     open_stream: Callable | None = None,
     now: Callable[[], float] = time.monotonic,
 ) -> session.SessionState:

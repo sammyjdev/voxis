@@ -1,0 +1,9 @@
+# Linux (GNOME on Wayland) runtime for miris, in its own Python 3.12 venv.
+# torch from the CPU index first, as for laris (see ../laris/requirements-linux.txt):
+#   uv venv --python 3.12 .venv
+#   uv pip install --python .venv torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   uv pip install --python .venv -r requirements-linux.txt
+# System audio comes from pw-record (Ubuntu package pipewire-bin).
+-r ../laris/requirements-linux.txt
+-e ../laris
+-e .

@@ -143,3 +143,99 @@ def test_empty_transcript_cache_is_rebuilt(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "build_transcript", lambda *args: "rebuilt")
     pipeline.process_session(cfg, session_dir, transcriber_factory=FakeTranscriber)
     assert (session_dir / "transcript.md").read_text(encoding="utf-8") == "rebuilt"
+
+
+def _transcribe_one_second_of_mic(tmp_path, monkeypatch):
+    """build_transcript with its default transcriber over a 1 s mic.wav whose
+    VAD finds one span covering the whole second."""
+    monkeypatch.setenv("STT_LANGUAGE", "placeholder")  # restored after the test
+    monkeypatch.delenv("STT_LANGUAGE")
+    monkeypatch.setattr(pipeline.transcribe, "speech_spans", lambda audio: [(0, len(audio))])
+    session_dir = _session_with_mic(tmp_path)
+    return pipeline.build_transcript(session_dir)
+
+
+def test_on_linux_meetings_are_transcribed_by_faster_whisper_at_16khz(tmp_path, monkeypatch):
+    import sys
+
+    calls = []
+
+    class FakeFasterWhisper:
+        def warm(self):
+            calls.append("warm")
+
+        def transcribe(self, audio, sample_rate):
+            calls.append((len(audio), sample_rate))
+            return "reunião no linux"
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "mlx_whisper", None)
+    monkeypatch.setitem(sys.modules, "laris.transcriber", None)
+    monkeypatch.setattr("laris.stt_faster.FasterWhisperTranscriber", FakeFasterWhisper)
+
+    transcript = _transcribe_one_second_of_mic(tmp_path, monkeypatch)
+
+    assert transcript == "[00:00] Eu: reunião no linux"
+    assert calls == ["warm", (16000, 16000)]
+
+
+LANGUAGE_PROBE = """
+import os, sys, types
+sys.platform = "linux"
+os.environ.pop("STT_LANGUAGE", None)
+
+
+class LanguageProbe:
+    def warm(self):
+        pass
+
+    def transcribe(self, audio, sample_rate):
+        from laris import config  # what faster-whisper is handed at transcribe time
+        return f"lang={config.STT_LANGUAGE!r}"
+
+
+sys.modules["laris.stt_faster"] = types.SimpleNamespace(FasterWhisperTranscriber=LanguageProbe)
+from miris import pipeline
+pipeline.transcribe.speech_spans = lambda audio: [(0, len(audio))]
+print(pipeline.build_transcript(__import__("pathlib").Path(sys.argv[1])))
+"""
+
+
+def test_on_linux_meetings_reach_faster_whisper_with_language_auto_detect(tmp_path):
+    """Meetings mix pt-BR and English. laris.config reads STT_LANGUAGE once,
+    at its first import, so the "" default must be set before that import;
+    a fresh process is the only place that ordering is real."""
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "STT_LANGUAGE"}
+    session_dir = _session_with_mic(tmp_path)
+
+    out = subprocess.run([sys.executable, "-c", LANGUAGE_PROBE, str(session_dir)],
+                         capture_output=True, text=True, env=env, check=True)
+
+    assert out.stdout.strip() == "[00:00] Eu: lang=''"
+
+
+def test_on_macos_meetings_are_still_transcribed_by_mlx_whisper(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    calls = []
+
+    class FakeMlxTranscriber:
+        def warm(self):
+            calls.append("warm")
+
+        def transcribe(self, audio, sample_rate=16000):
+            calls.append((len(audio), sample_rate))
+            return "reunião no mac"
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "laris.transcriber",
+                        types.SimpleNamespace(Transcriber=FakeMlxTranscriber))
+
+    transcript = _transcribe_one_second_of_mic(tmp_path, monkeypatch)
+
+    assert transcript == "[00:00] Eu: reunião no mac"
+    assert calls == ["warm", (16000, 16000)]
