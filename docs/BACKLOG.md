@@ -64,11 +64,10 @@ the v1.0.0 ledger stay untouched.
       session bus, but it also grabs `<Super>c` with an empty handler, which
       ate the dictation shortcut. Needs the extension in the repo without the
       grab, and a Linux reader in laris.
-- [ ] **Linux job in CI.** `.github/workflows/linux.yml` runs the laris and
+- [x] **Linux job in CI.** `.github/workflows/linux.yml` runs the laris and
       miris suites on Python 3.12 with `requirements-linux.txt` and the
-      tray's `cargo test` on ubuntu-24.04. First run: python green, tray red
-      on an ETXTBSY race in the tests' fake python, now fixed; waiting on a
-      green run.
+      tray's `cargo test` on ubuntu-24.04. Green since run 38689785980
+      (2026-10-15), after fixing an ETXTBSY race in the tests' fake python.
 
 ## P1 - macOS UX gaps
 
