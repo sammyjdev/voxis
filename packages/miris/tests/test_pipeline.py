@@ -239,3 +239,20 @@ def test_on_macos_meetings_are_still_transcribed_by_mlx_whisper(tmp_path, monkey
 
     assert transcript == "[00:00] Eu: reunião no mac"
     assert calls == ["warm", (16000, 16000)]
+
+
+def test_the_pipeline_process_prints_the_note_path_for_the_tray(tmp_path, monkeypatch, capsys):
+    """`miris stop` and `miris process` run this module as a child that shares
+    their stdout, and the tray names the new note from its `note: <path>`
+    line. Without it every finished meeting read as "Falha ao processar"."""
+    import sys
+
+    note = tmp_path / "vault" / "inbox" / "2026-10-15-reuniao.md"
+    monkeypatch.setattr(pipeline, "process_session", lambda cfg, session_dir: note)
+    monkeypatch.setattr("miris.config.load", lambda: object())
+    monkeypatch.setattr(os, "umask", lambda mask: 0o022)  # main() sets it process-wide
+    monkeypatch.setattr(sys, "argv", ["miris.pipeline", str(tmp_path / "sessions" / "s1")])
+
+    pipeline.main()
+
+    assert capsys.readouterr().out == f"note: {note}\n"

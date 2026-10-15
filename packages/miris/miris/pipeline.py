@@ -112,7 +112,10 @@ def main() -> None:
 
     from miris import config
 
-    process_session(config.load(), Path(sys.argv[1]))
+    note = process_session(config.load(), Path(sys.argv[1]))
+    # the CLI that runs this process shares its stdout; the tray names the
+    # new note from this line
+    print(f"note: {note}")
 
 
 if __name__ == "__main__":
