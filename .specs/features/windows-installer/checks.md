@@ -78,6 +78,8 @@ Proof: `SMOKE -Edition vulkan -Check uninstall-keeps-models`
 
 ### S4 - downloadable from the repository · 3 files · 8 KB · ~2k
 
+Done: C18-C19 green on 2026-11-06 (run 42269948296 uploaded both installers to the v0.2.0-rc2 draft release; check-readme PASS)
+
 **C18** - After the run for tag `v<ver>` the draft release lists `VOXIS_<ver>_x64_cuda-setup.exe` and `VOXIS_<ver>_x64_vulkan-setup.exe`. The check script exits `1` naming any that is missing (AC 14)
 Proof: `powershell -File scripts\windows\check-release-assets.ps1 -Tag v0.2.0-rc2` (was rc1; that run's upload was skipped behind the broken macOS job, owner chose rc2 on 2026-11-06)
 
