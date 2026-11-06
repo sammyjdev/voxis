@@ -9,7 +9,7 @@ $m = [regex]::Match($readme, '(?ms)^## Windows\s*$(.*?)(?=^## |\z)')
 if (-not $m.Success) { Write-Output 'FAIL: no "## Windows" section'; exit 1 }
 $section = $m.Groups[1].Value
 $missing = @()
-foreach ($needle in '/releases/latest', '_x64_cuda-setup.exe', '_x64_vulkan-setup.exe', 'NVIDIA', '1,6 GB') {
+foreach ($needle in '/releases/latest', '_x64_cuda-setup.exe', '_x64_vulkan-setup.exe', 'NVIDIA', '1.6 GB') {
     if (-not $section.Contains($needle)) { $missing += $needle }
 }
 $cudaRow = ($section -split "`n") | Where-Object { $_ -match '_x64_cuda-setup\.exe' } | Select-Object -First 1
