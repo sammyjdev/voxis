@@ -161,11 +161,25 @@ fn pipeline(dir: &Path) -> Result<PathBuf, String> {
     let (model, vad) = super::models()?;
     super::transcribe(dir, &model.to_string_lossy(), &vad.to_string_lossy(), "pt");
     update(dir, |m| m["transcript_ready"] = json!(true))?;
-    let (title, link) = super::minutes::run(dir)?;
-    // "Última nota" opens this with the default handler: a .url opens the Doc
-    let safe: String = title.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '-' } else { c }).collect();
-    let note = dir.join(format!("{safe}.url"));
-    std::fs::write(&note, format!("[InternetShortcut]\r\nURL={link}\r\n")).map_err(|e| e.to_string())?;
+    let ata = super::minutes::run(dir)?;
+    finish(dir, ata)
+}
+
+/// Completes the session and returns its note: the Doc's .url, or ata.md
+/// when Google is not set up, or the transcript when no minutes were written.
+/// "Última nota" opens it with the default handler.
+fn finish(dir: &Path, ata: super::minutes::Ata) -> Result<PathBuf, String> {
+    use super::minutes::Ata;
+    let note = match ata {
+        Ata::Doc(title, link) => {
+            let safe: String = title.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '-' } else { c }).collect();
+            let url = dir.join(format!("{safe}.url"));
+            std::fs::write(&url, format!("[InternetShortcut]\r\nURL={link}\r\n")).map_err(|e| e.to_string())?;
+            url
+        }
+        Ata::Local(path) => path,
+        Ata::NotWritten => dir.join("transcript.md"),
+    };
     std::fs::write(dir.join("note.path"), note.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     update(dir, |m| {
         m["state"] = json!("completed");
@@ -278,5 +292,49 @@ pub fn cli(cmd: &str, args: &[String]) -> i32 {
             eprintln!("{e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::minutes::{run_with, Credentials};
+
+    /// A session folder the pipeline left after transcribing.
+    fn transcribed_session() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("session.json"), r#"{"schema": 1, "state": "processing"}"#).unwrap();
+        std::fs::write(dir.path().join("transcript.md"), "# Transcrição\n\n**[00:01] Você:** vamos fechar sexta\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn without_google_credentials_the_minutes_stay_in_ata_md() {
+        let session = transcribed_session();
+        let creds = Credentials { anthropic_key: Some("key".into()), google: false };
+        let minutes = |_: &str| -> Result<Value, String> {
+            Ok(json!({"titulo": "Alinhamento", "resumo": "Fechar sexta.", "decisoes": [], "action_items": []}))
+        };
+
+        let ata = run_with(session.path(), &creds, &minutes).unwrap();
+        let note = finish(session.path(), ata).unwrap();
+
+        assert_eq!(note, session.path().join("ata.md"));
+        assert!(std::fs::read_to_string(&note).unwrap().contains("Fechar sexta."));
+        assert_eq!(read(session.path()).unwrap()["state"], "completed");
+    }
+
+    #[test]
+    fn without_an_anthropic_key_the_session_completes_with_the_transcript() {
+        let session = transcribed_session();
+        let creds = Credentials { anthropic_key: None, google: true };
+        let minutes = |_: &str| -> Result<Value, String> { panic!("no key: the minutes must not be asked for") };
+
+        let ata = run_with(session.path(), &creds, &minutes).unwrap();
+        let note = finish(session.path(), ata).unwrap();
+
+        assert_eq!(note, session.path().join("transcript.md"));
+        assert!(!session.path().join("ata.md").exists());
+        assert_eq!(read(session.path()).unwrap()["state"], "completed");
     }
 }

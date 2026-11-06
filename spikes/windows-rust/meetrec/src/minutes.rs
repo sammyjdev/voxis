@@ -247,23 +247,70 @@ pub fn upload_doc(title: &str, markdown: &str) -> Result<Value, String> {
     check(resp, "drive upload")
 }
 
+/// What the machine has set up for the minutes: an Anthropic key, and both
+/// Google files (OAuth client and token).
+pub struct Credentials {
+    pub anthropic_key: Option<String>,
+    pub google: bool,
+}
+
+impl Credentials {
+    pub fn here() -> Self {
+        let dir = config_dir();
+        Self {
+            anthropic_key: api_key().ok(),
+            google: dir.join("google-oauth-client.json").is_file() && dir.join("google-token.json").is_file(),
+        }
+    }
+}
+
+/// Where the minutes of a meeting ended up.
+#[derive(Debug, PartialEq)]
+pub enum Ata {
+    /// a Google Doc: (title, link)
+    Doc(String, String),
+    /// ata.md in the session folder, for a machine without Google set up
+    Local(PathBuf),
+    /// no Anthropic key: only the transcript exists
+    NotWritten,
+}
+
 /// summarize -> render -> ata.md next to the recording -> Google Doc.
-/// Returns (doc title, Google Doc link).
-pub fn run(dir: &Path) -> Result<(String, String), String> {
+pub fn run(dir: &Path) -> Result<Ata, String> {
+    let model = minutes_model(crate::config_text().as_deref());
+    let raw_log = dir.join("minutes.json");
+    let summarize_with_model = |transcript: &str| -> Result<Value, String> {
+        let t = std::time::Instant::now();
+        let (m, usage) = summarize(&model, transcript, &raw_log)?;
+        println!("{model}: {:.1} s, {} in / {} out tokens", t.elapsed().as_secs_f64(), usage["input_tokens"], usage["output_tokens"]);
+        Ok(m)
+    };
+    run_with(dir, &Credentials::here(), &summarize_with_model)
+}
+
+/// `run` with the setup and the summarizer passed in. Without a key nothing
+/// is asked for; without Google the minutes stay in ata.md.
+pub fn run_with(dir: &Path, creds: &Credentials, summarize: &dyn Fn(&str) -> Result<Value, String>) -> Result<Ata, String> {
+    if creds.anthropic_key.is_none() {
+        println!("no anthropic_api_key: minutes not written");
+        return Ok(Ata::NotWritten);
+    }
     let transcript = std::fs::read_to_string(dir.join("transcript.md"))
         .map_err(|e| format!("{}: {e} (run transcribe first)", dir.join("transcript.md").display()))?;
     let date = recording_date(dir);
-    let t = std::time::Instant::now();
-    let model = minutes_model(crate::config_text().as_deref());
-    let (m, usage) = summarize(&model, &transcript, &dir.join("minutes.json"))?;
-    println!("{model}: {:.1} s, {} in / {} out tokens", t.elapsed().as_secs_f64(), usage["input_tokens"], usage["output_tokens"]);
+    let m = summarize(&transcript)?;
     let md = render(&m, &date, &transcript);
-    std::fs::write(dir.join("ata.md"), &md).map_err(|e| e.to_string())?;
+    let ata = dir.join("ata.md");
+    std::fs::write(&ata, &md).map_err(|e| e.to_string())?;
+    if !creds.google {
+        println!("no Google credentials: minutes kept in {}", ata.display());
+        return Ok(Ata::Local(ata));
+    }
     let title = format!("{} - {}", date, m["titulo"].as_str().unwrap_or("Reunião"));
     let doc = upload_doc(&title, &md)?;
     let link = doc["webViewLink"].as_str().unwrap_or("").to_owned();
     println!("ata: {link}");
-    Ok((title, link))
+    Ok(Ata::Doc(title, link))
 }
 
 #[cfg(test)]

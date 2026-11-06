@@ -209,6 +209,19 @@ fn take_snapshot(state: &AppState) -> Snapshot {
     }
 }
 
+/// The toast after a meeting is processed, from the note the CLI returned:
+/// a Google Doc shortcut, a local ata.md, or only the transcript.
+fn note_message(note: &std::path::Path) -> String {
+    match note.file_name().and_then(|n| n.to_str()) {
+        Some("ata.md") => format!("Ata salva em {}", note.display()),
+        Some("transcript.md") => {
+            r"Ata não gerada: configure anthropic_api_key em %APPDATA%\voxis\secrets.toml".to_owned()
+        }
+        Some(name) => format!("Nota salva: {name}"),
+        None => format!("Nota salva: {}", note.display()),
+    }
+}
+
 /// Hover text of the tray icon: how long the meeting has been recording.
 fn tray_tooltip(recording_session: Option<&str>, now: chrono::DateTime<chrono::Local>) -> String {
     match recording_session.and_then(|id| recording_clock(id, now)) {
@@ -531,10 +544,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
             let bin = state.config.miris_bin.clone();
             std::thread::spawn(move || {
                 let msg = match miris::stop(&bin) {
-                    Ok(miris::StopOutcome::Note(note)) => format!(
-                        "Nota salva: {}",
-                        note.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                    ),
+                    Ok(miris::StopOutcome::Note(note)) => note_message(&note),
                     Ok(miris::StopOutcome::Interrupted) => {
                         "Gravação interrompida: recupere pelo menu".to_owned()
                     }
@@ -571,10 +581,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
                     }
                 } else {
                     match result {
-                        Ok(Some(note)) => format!(
-                            "Nota salva: {}",
-                            note.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                        ),
+                        Ok(Some(note)) => note_message(&note),
                         Ok(None) => unreachable!("process maps to Some"),
                         Err(e) => format!("Falha ao processar reunião: {e}"),
                     }
@@ -871,6 +878,31 @@ mod tests {
         let tip = tray_tooltip(Some("20261105-210228"), now);
 
         assert_eq!(tip, "VOXIS - gravando reunião há 01:12:34");
+    }
+
+    #[test]
+    fn a_meeting_kept_locally_names_its_ata_in_the_toast() {
+        let note = PathBuf::from(r"C:\Users\x\.miris\sessions\20261106-101500\ata.md");
+
+        let msg = note_message(&note);
+
+        assert_eq!(msg, r"Ata salva em C:\Users\x\.miris\sessions\20261106-101500\ata.md");
+    }
+
+    #[test]
+    fn a_meeting_without_a_key_says_where_to_put_it() {
+        let note = PathBuf::from(r"C:\Users\x\.miris\sessions\20261106-101500\transcript.md");
+
+        let msg = note_message(&note);
+
+        assert_eq!(msg, r"Ata não gerada: configure anthropic_api_key em %APPDATA%\voxis\secrets.toml");
+    }
+
+    #[test]
+    fn a_meeting_published_to_drive_names_its_note() {
+        let note = PathBuf::from(r"C:\s\2026-11-06 10-15 - Alinhamento.url");
+
+        assert_eq!(note_message(&note), "Nota salva: 2026-11-06 10-15 - Alinhamento.url");
     }
 
     #[test]

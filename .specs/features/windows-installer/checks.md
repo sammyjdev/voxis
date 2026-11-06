@@ -96,6 +96,8 @@ Proof: `TRAY_TEST the_autostart_menu_item_mirrors_the_run_value`
 
 ### S6 - meetings for someone without the owner's Google setup · 3 files · 46 KB · ~12k
 
+Done: C22-C23 green on 2026-11-06 (meetrec suite 20 passed, tray suite 55 passed)
+
 **C22** - With no `google-oauth-client.json`/`google-token.json`, processing ends with `state: completed`, `ata.md` in the session dir, and the process output naming `ata.md`. The tray's toast reads `Ata salva em <path>\ata.md` (AC 17)
 Proof: `MEETREC_TEST without_google_credentials_the_minutes_stay_in_ata_md`
 Proof: `TRAY_TEST a_meeting_kept_locally_names_its_ata_in_the_toast`
