@@ -1,0 +1,29 @@
+[package]
+name = "meetrec"
+version = "0.1.0"
+edition = "2021"
+description = "Spike: record a meeting (mic + WASAPI loopback), transcribe with whisper.cpp, summarize with Claude Haiku and save the minutes to Google Drive"
+
+[features]
+default = ["vulkan"]
+vulkan = ["whisper-rs/vulkan"]
+cuda = ["whisper-rs/cuda"]
+
+[dependencies]
+cpal = "0.16"
+hound = "3.5"
+whisper-rs = "0.16"
+ureq = { version = "3", features = ["json"] }
+serde_json = "1"
+chrono = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+] }
+arboard = "3"
+wry = "0.55.1"
+tao = "0.35.3"
+tungstenite = "0.27"
