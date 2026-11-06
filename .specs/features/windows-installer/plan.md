@@ -175,7 +175,7 @@ The thinnest real path: installer, Start menu, tray, bundled `meetrec`, orb page
 | # | Kind | Question | Until answered |
 | --- | --- | --- | --- |
 | 1 | resolved 2026-11-06 | Does the CUDA 13.5 EULA list `cublas64_13.dll` and `cublasLt64_13.dll` as redistributable? | Yes: `EULA.txt` Attachment A lists "CUDA BLAS Library - Windows: cublas.dll, cublasLt.dll", version-named variants included; §1.1.2 asks for material added functionality and that only the app uses them, both true here |
-| 2 | open | Can a CUDA whisper.cpp build for four archs finish inside GitHub's 6-hour job limit with a cache? | measured on the first CI run; fallback is fewer archs |
+| 2 | resolved 2026-11-06 | Can a CUDA whisper.cpp build for four archs finish inside GitHub's 6-hour job limit with a cache? | Yes: run 42259089107 built the CUDA edition for `75;86;89;120` in 68 min (installer 499 MB) and the Vulkan one in 19 min (9 MB), with meetrec uncached |
 
 ## Observable
 

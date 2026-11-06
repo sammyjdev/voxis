@@ -28,7 +28,7 @@ Download one installer from the
 
 | Installer | Pick it when |
 |-----------|--------------|
-| `VOXIS_<version>_x64_cuda-setup.exe` | you have an NVIDIA GPU (GTX 16xx, RTX 20xx or newer). Fastest. About 430 MB, because it carries NVIDIA's cuBLAS, redistributed under the NVIDIA CUDA EULA. |
+| `VOXIS_<version>_x64_cuda-setup.exe` | you have an NVIDIA GPU (GTX 16xx, RTX 20xx or newer). Fastest. About 500 MB, because it carries NVIDIA's cuBLAS, redistributed under the NVIDIA CUDA EULA. |
 | `VOXIS_<version>_x64_vulkan-setup.exe` | any other GPU (AMD, Intel) or an NVIDIA card without CUDA. About 9 MB. |
 
 - It installs for the current user, with no admin prompt, and adds VOXIS to
