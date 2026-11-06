@@ -2,6 +2,8 @@ mod commands;
 mod laris;
 mod miris;
 mod settings;
+#[cfg(windows)]
+mod toast;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +13,7 @@ use std::time::Duration;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Manager, Wry};
+#[cfg(not(windows))]
 use tauri_plugin_notification::NotificationExt;
 
 const ARCHETYPES: [&str; 3] = ["waveform", "reactor", "faceted"];
@@ -199,6 +202,30 @@ fn take_snapshot(state: &AppState) -> Snapshot {
     }
 }
 
+/// Hover text of the tray icon: how long the meeting has been recording.
+fn tray_tooltip(recording_session: Option<&str>, now: chrono::DateTime<chrono::Local>) -> String {
+    match recording_session.and_then(|id| recording_clock(id, now)) {
+        Some((_, elapsed)) => format!("VOXIS - gravando reunião há {elapsed}"),
+        None => "VOXIS".to_owned(),
+    }
+}
+
+/// ~/.voxis/logs/tray-<date>.log: the tray has no console on Windows.
+fn tray_log(msg: &str) {
+    let Some(home) = dirs::home_dir() else { return };
+    let dir = home.join(".voxis").join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let now = chrono::Local::now();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("tray-{}.log", now.format("%Y-%m-%d"))))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{} {msg}", now.format("%H:%M:%S"));
+    }
+}
+
 fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
     let active_state = meeting_state(snap);
     let (id, base_label, enabled) = primary_action(active_state);
@@ -306,7 +333,23 @@ fn set_tray_icon(tray: &TrayIcon, recording: bool) {
 }
 
 fn notify(app: &AppHandle, body: &str) {
+    #[cfg(windows)]
+    {
+        let _ = app;
+        toast::notify(body);
+    }
+    #[cfg(not(windows))]
     let _ = app.notification().builder().title("VOXIS").body(body).show();
+}
+
+/// (start "HH:MM", elapsed "HH:MM:SS") of a recording session id.
+fn recording_clock(session_id: &str, now: chrono::DateTime<chrono::Local>) -> Option<(String, String)> {
+    let started = chrono::NaiveDateTime::parse_from_str(session_id, "%Y%m%d-%H%M%S")
+        .ok()?
+        .and_local_timezone(chrono::Local)
+        .single()?;
+    let s = (now - started).num_seconds().max(0);
+    Some((started.format("%H:%M").to_string(), format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)))
 }
 
 /// Raise the macOS microphone prompt when it hasn't been decided yet. laris
@@ -505,6 +548,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::save_laris_settings,
+            commands::get_audio_devices,
+            commands::save_audio_devices,
             commands::save_miris_config,
             commands::save_theme,
         ])
@@ -518,7 +563,8 @@ pub fn run() {
             let daemon = laris::LarisDaemon::new(
                 PathBuf::from(&config.laris_dir),
                 Some(settings::config_dir().join("laris.log")),
-            );
+            )
+            .with_bin(&config.laris_bin);
             app.manage(AppState {
                 config,
                 daemon: Mutex::new(daemon),
@@ -554,6 +600,21 @@ pub fn run() {
                 .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
                 .build(app)?;
             set_tray_icon(&tray, shows_live_icon(&snap));
+            // a tray (re)started mid-meeting sees no start transition: show it now
+            tray_log(&format!("tray started, meeting={:?}", snap.meeting));
+            #[cfg(windows)]
+            toast::register();
+            if is_recording(&snap) {
+                if let Some((id, _, _)) = &snap.meeting {
+                    let _ = tray.set_tooltip(Some(tray_tooltip(Some(id), chrono::Local::now())));
+                    // a tray restarted mid-meeting puts the live toast back
+                    #[cfg(windows)]
+                    if let Some((started, elapsed)) = recording_clock(id, chrono::Local::now()) {
+                        toast::recording_ended();
+                        toast::recording_started(&started, &elapsed);
+                    }
+                }
+            }
 
             // poll loop: snapshot off the main thread, menu mutations on it
             // (macOS requires menu construction on the main thread)
@@ -583,6 +644,43 @@ pub fn run() {
                         }
                     }
 
+                    // the tooltip clock moves every tick, even when nothing else does
+                    let recording_id = current
+                        .meeting
+                        .as_ref()
+                        .filter(|_| is_recording(&current))
+                        .map(|(id, _, _)| id.clone());
+                    let tip = tray_tooltip(recording_id.as_deref(), chrono::Local::now());
+                    let h3 = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        if let Some(tray) = h3.tray_by_id("voxis") {
+                            let _ = tray.set_tooltip(Some(tip));
+                        }
+                    });
+                    // status lives in the notification area only: red icon,
+                    // tooltip clock, and a live toast in the notification center
+                    let clock = recording_id.as_deref().and_then(|id| recording_clock(id, chrono::Local::now()));
+                    if is_recording(&current) != is_recording(&last) {
+                        let ended = last.meeting.as_ref().map(|(id, _, _)| id.clone());
+                        match (&clock, &ended) {
+                            (Some((started, elapsed)), _) => {
+                                #[cfg(windows)]
+                                toast::recording_started(started, elapsed);
+                                #[cfg(not(windows))]
+                                notify(&handle, &format!("Gravando reunião desde {started} ({elapsed})"));
+                            }
+                            (None, Some(id)) => {
+                                #[cfg(windows)]
+                                toast::recording_ended();
+                                let dur = recording_clock(id, chrono::Local::now()).map(|c| c.1).unwrap_or_default();
+                                notify(&handle, &format!("Gravação encerrada ({dur}) - gerando a ata"));
+                            }
+                            _ => {}
+                        }
+                    } else if let Some((_started, _elapsed)) = &clock {
+                        #[cfg(windows)]
+                        toast::recording_tick(_started, _elapsed);
+                    }
                     if current == last && !dirty {
                         continue;
                     }
@@ -642,6 +740,23 @@ fn should_prevent_exit(code: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tray_tooltip_shows_how_long_the_meeting_has_been_recording() {
+        let now = chrono::NaiveDateTime::parse_from_str("20261105-221502", "%Y%m%d-%H%M%S")
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+
+        let tip = tray_tooltip(Some("20261105-210228"), now);
+
+        assert_eq!(tip, "VOXIS - gravando reunião há 01:12:34");
+    }
+
+    #[test]
+    fn the_tray_tooltip_is_just_the_name_when_nothing_records() {
+        assert_eq!(tray_tooltip(None, chrono::Local::now()), "VOXIS");
+    }
 
     #[test]
     fn closing_the_settings_window_must_not_exit_the_tray() {

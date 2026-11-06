@@ -132,6 +132,22 @@ fn parse_manifest(dir: &Path) -> Option<SessionManifest> {
     }
 }
 
+#[cfg(windows)]
+fn ps_command(pid: i32) -> String {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let pid = Pid::from_u32(pid as u32);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    sys.process(pid)
+        .map(|p| p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "))
+        .unwrap_or_default()
+}
+
+#[cfg(not(windows))]
 fn ps_command(pid: i32) -> String {
     Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
@@ -143,9 +159,9 @@ fn ps_command(pid: i32) -> String {
 /// The process must name both the marker module and this exact session dir,
 /// mirroring the Python identity check: a recycled PID never looks alive.
 fn command_matches(command: &str, marker: &str, dir: &Path) -> bool {
-    let dir = dir.to_string_lossy().into_owned();
+    // compared as paths: on Windows "C:\x/.miris" and "C:\x\.miris" are one dir
     command.split_whitespace().any(|t| t == marker)
-        && command.split_whitespace().any(|t| t == dir)
+        && command.split_whitespace().any(|t| Path::new(t) == dir)
 }
 
 fn derive_state(
@@ -277,8 +293,15 @@ pub fn parse_note_path(stdout: &str) -> Option<PathBuf> {
 }
 
 fn run_cli(miris_bin: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(miris_bin)
-        .args(args)
+    let mut cmd = Command::new(miris_bin);
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        // a console binary started from the GUI tray would flash a window
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("failed to run {miris_bin}: {e}"))?;
     if out.status.success() {
@@ -348,7 +371,11 @@ mod tests {
 
     #[test]
     fn run_cli_captures_stdout_and_stderr() {
+        #[cfg(unix)]
         assert_eq!(run_cli("echo", &["start"]).unwrap().trim(), "start");
+        // echo is a cmd builtin on Windows, not a program
+        #[cfg(windows)]
+        assert_eq!(run_cli("cmd", &["/c", "echo", "start"]).unwrap().trim(), "start");
         assert!(run_cli("/nonexistent-bin-xyz", &["start"]).is_err());
     }
 
@@ -393,6 +420,35 @@ mod tests {
             snap.pending.as_ref().unwrap().manifest.session_id,
             "20260914-110000"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_recorder_is_recognized_whatever_slashes_the_session_path_uses() {
+        // the default miris_home is "C:\Users\x/.miris": mixed separators
+        let dir = Path::new(r"C:\Users\x/.miris/sessions/20260914-130000");
+        let command = r"C:\vxc\meetrec.exe miris.recorder C:\Users\x\.miris\sessions\20260914-130000";
+
+        assert!(command_matches(command, "miris.recorder", dir));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_live_recorder_keeps_the_meeting_recording_on_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("20260914-130000");
+        // a stand-in whose command line names the marker and the session dir
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep 20;#", "miris.recorder"])
+            .arg(&dir)
+            .spawn()
+            .unwrap();
+        write_manifest(tmp.path(), "20260914-130000", "recording", Some(child.id() as i32));
+
+        let snap = snapshot(tmp.path());
+
+        child.kill().unwrap();
+        assert_eq!(snap.active.unwrap().derived_state, SessionState::Recording);
     }
 
     #[test]
@@ -478,3 +534,4 @@ mod tests {
         assert!(stop_outcome("idle\n").is_err());
     }
 }
+

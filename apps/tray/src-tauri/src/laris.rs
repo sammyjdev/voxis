@@ -67,6 +67,8 @@ pub struct LarisDaemon {
     child: Option<Child>,
     laris_dir: PathBuf,
     log_path: Option<PathBuf>,   // where the daemon's stdout/stderr are captured
+    /// native dictation binary (`<bin> dictate`); None = python -m laris
+    laris_bin: Option<PathBuf>,
 }
 
 impl LarisDaemon {
@@ -79,7 +81,13 @@ impl LarisDaemon {
             child: None,
             laris_dir,
             log_path,
+            laris_bin: None,
         }
+    }
+
+    pub fn with_bin(mut self, bin: &str) -> Self {
+        self.laris_bin = (!bin.is_empty()).then(|| PathBuf::from(bin));
+        self
     }
 
     pub fn owns_running(&mut self) -> bool {
@@ -96,12 +104,21 @@ impl LarisDaemon {
         if self.owns_running() {
             return Ok(()); // don't orphan a live child by overwriting its handle
         }
-        let python = self.laris_dir.join(".venv/bin/python");
+        let python = self.laris_bin.clone().unwrap_or_else(|| self.laris_dir.join(crate::settings::VENV_PYTHON));
         let mut cmd = Command::new(&python);
-        // -u: stdout goes to a file below, and Python block-buffers a
-        // non-tty stdout - the [Voice] prints would sit in the buffer
-        // instead of reaching the log this exists to produce.
-        cmd.args(["-u", "-m", "laris"]).current_dir(&self.laris_dir);
+        if self.laris_bin.is_some() {
+            cmd.arg("dictate");
+        } else {
+            // -u: stdout goes to a file below, and Python block-buffers a
+            // non-tty stdout - the [Voice] prints would sit in the buffer
+            // instead of reaching the log this exists to produce.
+            cmd.args(["-u", "-m", "laris"]).current_dir(&self.laris_dir);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
         // Only "Sair" ever signalled the daemon, so a Force Quit, a crash or a
         // logout left it running with no tray to stop it. The daemon watches
         // this pid and exits when it goes; a daemon started by hand never sees
@@ -142,6 +159,12 @@ impl LarisDaemon {
         unsafe {
             libc::kill(child.id() as i32, libc::SIGTERM);
         }
+        // no SIGTERM on Windows, and the dictation binary keeps no state
+        // worth a graceful exit
+        #[cfg(windows)]
+        {
+            let _ = child.kill();
+        }
         for _ in 0..30 {
             if let Ok(Some(_)) = child.try_wait() {
                 return;
@@ -157,6 +180,22 @@ impl LarisDaemon {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_native_dictation_binary_is_started_with_the_dictate_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("laris.log");
+        // powershell runs its first argument as a command and reports it by name
+        let mut d = LarisDaemon::new(tmp.path().to_path_buf(), Some(log.clone())).with_bin("powershell");
+
+        d.spawn().unwrap();
+        let mut child = d.child.take().unwrap();
+        child.wait().unwrap();
+
+        // powershell writes its error in the console code page, not UTF-8
+        assert!(String::from_utf8_lossy(&fs::read(&log).unwrap()).contains("dictate"));
+    }
 
     /// Installs a fake `.venv/bin/python` that runs `script`. It is a symlink
     /// to a launcher checked into tests/fixtures, which hands the script to

@@ -48,7 +48,16 @@ pub struct TrayConfig {
     pub miris_bin: String,
     pub laris_dir: String,
     pub miris_home: String,
+    /// A native dictation binary run as `<laris_bin> dictate`; empty runs the
+    /// Python daemon from laris_dir (macOS, Linux).
+    pub laris_bin: String,
 }
+
+/// The venv interpreter, relative to the package dir.
+#[cfg(windows)]
+pub const VENV_PYTHON: &str = ".venv/Scripts/python.exe";
+#[cfg(not(windows))]
+pub const VENV_PYTHON: &str = ".venv/bin/python";
 
 /// packages/laris of the checkout this binary was built from.
 const BUILD_LARIS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../packages/laris");
@@ -57,7 +66,7 @@ const BUILD_LARIS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../pac
 /// A CI release bakes a runner path that exists on no user's machine, so the
 /// checkout counts only when its venv is there.
 fn laris_dir_default(build_checkout: &Path, home: &Path) -> String {
-    if build_checkout.join(".venv/bin/python").is_file() {
+    if build_checkout.join(VENV_PYTHON).is_file() {
         if let Ok(dir) = std::fs::canonicalize(build_checkout) {
             return dir.to_string_lossy().into_owned();
         }
@@ -73,6 +82,7 @@ impl Default for TrayConfig {
             miris_bin: format!("{h}/.local/bin/miris"),
             laris_dir: laris_dir_default(Path::new(BUILD_LARIS_DIR), &home()),
             miris_home: format!("{h}/.miris"),
+            laris_bin: String::new(),
         }
     }
 }
@@ -83,6 +93,30 @@ pub fn load_tray_config() -> TrayConfig {
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
+}
+
+/// The native binary's own config (%APPDATA%\voxis\config.toml on Windows):
+/// `mic` and `speaker` name the recording and playback devices; empty means
+/// the system default.
+pub fn voxis_config_path() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(home).join("voxis").join("config.toml")
+}
+
+pub fn read_audio_devices(path: &Path) -> (String, String) {
+    let doc: toml_edit::DocumentMut = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or_default();
+    let get = |k: &str| doc.get(k).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    (get("mic"), get("speaker"))
+}
+
+pub fn write_audio_devices(path: &Path, mic: &str, speaker: &str) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| e.to_string())?;
+    doc["mic"] = toml_edit::value(mic);
+    doc["speaker"] = toml_edit::value(speaker);
+    write_atomic(path, &doc.to_string())
 }
 
 pub fn read_miris_config(path: &Path) -> Result<serde_json::Value, String> {
@@ -131,7 +165,13 @@ pub fn update_miris_config(
     llm_command: &[String],
     categories: &[(String, String)],
 ) -> Result<(), String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    // MIRIS writes config.toml on its first run; saving from the tray before
+    // that (a fresh install) starts from an empty file instead of failing
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.to_string()),
+    };
     let mut doc: toml_edit::DocumentMut = raw
         .parse()
         .map_err(|e: toml_edit::TomlError| e.to_string())?;
@@ -198,8 +238,9 @@ mod tests {
     #[test]
     fn a_source_build_defaults_to_the_laris_venv_of_its_own_checkout() {
         let checkout = tempfile::tempdir().unwrap();
-        fs::create_dir_all(checkout.path().join(".venv/bin")).unwrap();
-        fs::write(checkout.path().join(".venv/bin/python"), "").unwrap();
+        let python = checkout.path().join(VENV_PYTHON);
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(&python, "").unwrap();
 
         let dir = laris_dir_default(checkout.path(), Path::new("/home/u"));
 
@@ -268,5 +309,36 @@ trabalho = \"work-notes\"
         assert!(raw.contains("vault_root = \"~/vault2\""));
         assert!(raw.contains("entrevistas"));
         assert!(!raw.contains("trabalho")); // categories table fully replaced
+    }
+
+    #[test]
+    fn chosen_audio_devices_are_saved_without_losing_other_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.toml");
+        fs::write(&p, "# minha config
+model = \"turbo\"
+mic = \"fifine\"
+").unwrap();
+
+        write_audio_devices(&p, "Microfone (Anker PowerConf C200)", "Alto-falantes (2- fifine Microphone)").unwrap();
+
+        let (mic, speaker) = read_audio_devices(&p);
+        assert_eq!(mic, "Microfone (Anker PowerConf C200)");
+        assert_eq!(speaker, "Alto-falantes (2- fifine Microphone)");
+        let raw = fs::read_to_string(&p).unwrap();
+        assert!(raw.contains("# minha config") && raw.contains("model = \"turbo\""));
+    }
+
+    #[test]
+    fn saving_meetings_settings_creates_the_config_on_a_fresh_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".miris").join("config.toml");
+
+        update_miris_config(&p, "~/vault", &["agy".into(), "-p".into()], &[("1on1".into(), "work/1on1".into())])
+            .unwrap();
+
+        let saved = read_miris_config(&p).unwrap();
+        assert_eq!(saved["vault_root"], "~/vault");
+        assert_eq!(saved["categories"]["1on1"], "work/1on1");
     }
 }
