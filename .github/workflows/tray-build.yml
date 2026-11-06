@@ -125,10 +125,12 @@ jobs:
           path: apps/tray/src-tauri/target/release/bundle/nsis/*_${{ matrix.edition }}-setup.exe
           if-no-files-found: error
 
-  # On a tag, the two installers join the draft release the macOS job made.
+  # On a tag, the two installers go to the tag's draft release, created here
+  # when missing. It does not wait for the macOS job: that one has failed
+  # since the mic helper started signing with a local-only identity.
   windows-release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build, windows]
+    needs: [windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -140,4 +142,8 @@ jobs:
       - name: Upload to the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$GITHUB_REF_NAME" installers/*.exe --clobber --repo "$GITHUB_REPOSITORY"
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --draft --title "VOXIS $GITHUB_REF_NAME" \
+              --notes "Windows installers: see the Windows section of the README." --repo "$GITHUB_REPOSITORY"
+          gh release upload "$GITHUB_REF_NAME" installers/*.exe --clobber --repo "$GITHUB_REPOSITORY"
