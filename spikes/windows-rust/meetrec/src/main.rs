@@ -6,7 +6,7 @@
 //!   meetrec devices
 //!   meetrec record <dir> [mic-name-substring] [secs] Enter stops, or after secs
 //!   meetrec transcribe <dir> <model.bin> <vad.bin> [lang=pt]
-//!   meetrec summarize <dir>                         Haiku minutes -> Google Doc
+//!   meetrec summarize <dir>                         Claude minutes -> Google Doc
 //!   meetrec meeting [mic]                           record (Enter stops) + transcribe + summarize
 //!     into %USERPROFILE%\.voxis\meetings\<date>; models from VOXIS_MODELS
 //!     (default %USERPROFILE%\.cache\voxis-bench\models)
@@ -118,8 +118,17 @@ fn devices(as_json: bool) {
 /// A key of %APPDATA%\voxis\config.toml (the tray's Áudio settings write
 /// `mic` and `speaker`); empty or missing is None.
 pub fn config_value(key: &str) -> Option<String> {
+    config_value_in(&config_text()?, key)
+}
+
+/// The text of %APPDATA%\voxis\config.toml, if there is one.
+pub fn config_text() -> Option<String> {
     let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from)?;
-    let raw = std::fs::read_to_string(base.join("voxis").join("config.toml")).ok()?;
+    std::fs::read_to_string(base.join("voxis").join("config.toml")).ok()
+}
+
+/// `key` in a config.toml text; empty or missing is None.
+pub fn config_value_in(raw: &str, key: &str) -> Option<String> {
     raw.lines()
         .filter_map(|l| l.split_once('='))
         .filter(|(k, _)| k.trim() == key)
@@ -363,12 +372,126 @@ pub fn transcribe(dir: &Path, model: &str, vad: &str, lang: &str) {
         }
         println!("{file}: {secs:.0} s of audio in {el:.1} s ({:.0}x real time), {n} segments", secs / el.max(1e-9));
     }
+    let total = lines.len();
+    let (md, dropped) = transcript_md(lines);
+    std::fs::write(dir.join("transcript.md"), &md).unwrap();
+    println!("{} lines ({dropped} repeats dropped) -> {}", total - dropped, dir.join("transcript.md").display());
+}
+
+/// Whisper can loop on one phrase for minutes (205 copies in a 15-minute
+/// meeting), so a line equal to the same speaker's previous line, ignoring
+/// case and punctuation, is dropped. Only lines of three words or more: in
+/// that meeting 249 of the 260 repeats were that long, while a short answer
+/// ("Sim.") given to two questions in a row is real speech. Returns the
+/// markdown and how many lines were dropped.
+fn transcript_md(mut lines: Vec<Line>) -> (String, usize) {
+    let key = |s: &str| -> String {
+        s.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect::<String>()
+            .to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    };
     lines.sort_by_key(|l| l.t0);
+    let mut last: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
     let mut md = String::from("# Transcrição\n\n");
+    let mut dropped = 0;
     for l in &lines {
+        let k = key(&l.text);
+        if k.split(' ').count() >= 3 && last.get(l.who) == Some(&k) {
+            dropped += 1;
+            continue;
+        }
+        last.insert(l.who, k);
         let s = l.t0 / 100;
         md += &format!("**[{:02}:{:02}] {}:** {}\n\n", s / 60, s % 60, l.who, l.text);
     }
-    std::fs::write(dir.join("transcript.md"), md).unwrap();
-    println!("{} lines -> {}", lines.len(), dir.join("transcript.md").display());
+    (md, dropped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(t0: i64, who: &'static str, text: &str) -> Line {
+        Line { t0, who, text: text.into() }
+    }
+
+    #[test]
+    fn a_line_whisper_repeats_for_one_speaker_is_kept_once_at_its_first_time() {
+        let lines = vec![
+            line(100, "Você", "Eu vou fazer com essa, né?"),
+            line(150, "Outros", "Bora."),
+            line(200, "Você", "eu vou fazer com essa né"),
+            line(300, "Você", "Eu vou fazer com essa,né?"),
+        ];
+
+        let (md, dropped) = transcript_md(lines);
+
+        assert_eq!(md, "# Transcrição\n\n\
+            **[00:01] Você:** Eu vou fazer com essa, né?\n\n\
+            **[00:01] Outros:** Bora.\n\n");
+        assert_eq!(dropped, 2);
+    }
+
+    #[test]
+    fn a_speaker_saying_the_same_thing_again_later_is_kept() {
+        let lines = vec![
+            line(100, "Você", "Vamos fechar o escopo."),
+            line(200, "Você", "Vamos marcar sexta."),
+            line(300, "Você", "Vamos fechar o escopo."),
+        ];
+
+        let (md, _) = transcript_md(lines);
+
+        assert_eq!(md.matches("Vamos fechar o escopo.").count(), 2);
+    }
+
+    #[test]
+    fn a_short_answer_given_twice_in_a_row_is_kept() {
+        let lines = vec![
+            line(100, "Você", "Sim."),
+            line(200, "Outros", "E o deploy fica pra sexta?"),
+            line(300, "Você", "Sim."),
+        ];
+
+        let (md, _) = transcript_md(lines);
+
+        assert_eq!(md.matches("Você:** Sim.").count(), 2);
+    }
+
+    #[test]
+    fn a_two_word_line_repeated_in_a_row_is_kept() {
+        let lines = vec![
+            line(100, "Você", "Tá bom."),
+            line(200, "Você", "Tá bom."),
+        ];
+
+        let (md, dropped) = transcript_md(lines);
+
+        assert_eq!(md.matches("Tá bom.").count(), 2);
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn a_three_word_line_repeated_in_a_row_is_kept_once() {
+        let lines = vec![
+            line(100, "Você", "Tá me ouvindo?"),
+            line(200, "Você", "Tá me ouvindo?"),
+        ];
+
+        let (md, dropped) = transcript_md(lines);
+
+        assert_eq!(md.matches("Tá me ouvindo?").count(), 1);
+        assert_eq!(dropped, 1);
+    }
+
+    #[test]
+    fn another_speaker_repeating_the_same_words_is_kept() {
+        let lines = vec![
+            line(100, "Você", "vamos marcar sexta então"),
+            line(200, "Outros", "vamos marcar sexta então"),
+        ];
+
+        let (md, _) = transcript_md(lines);
+
+        assert_eq!(md.matches("vamos marcar sexta então").count(), 2);
+    }
 }

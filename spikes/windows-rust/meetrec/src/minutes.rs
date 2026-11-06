@@ -1,4 +1,4 @@
-//! Meeting minutes: transcript -> Claude Haiku (structured JSON) -> Markdown
+//! Meeting minutes: transcript -> Claude (structured JSON; model from config `minutes_model`) -> Markdown
 //! -> Google Doc in the "VOXIS Atas" Drive folder.
 //!
 //! Secrets live in %APPDATA%\voxis (the OS config dir elsewhere):
@@ -10,7 +10,18 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-const MODEL: &str = "claude-haiku-5-5";
+/// Sonnet 5.5 at low effort framed a real meeting right where Haiku 5.5 got
+/// the speakers' roles backwards (A/B on 2026-11-06); `minutes_model` in
+/// config.toml overrides it.
+const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
+
+/// The model named by `minutes_model` in the config.toml text, or the default.
+fn minutes_model(config: Option<&str>) -> String {
+    config
+        .and_then(|raw| crate::config_value_in(raw, "minutes_model"))
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
+}
+
 pub const FOLDER: &str = "VOXIS Atas";
 
 fn config_dir() -> PathBuf {
@@ -77,7 +88,7 @@ fn schema() -> Value {
     })
 }
 
-/// Asks Haiku for the minutes as JSON matching `schema()`.
+/// Checks the minutes Claude returned as JSON matching `schema()`.
 /// A title and a summary, at least: structured output once came back with
 /// every field empty on a 15-minute meeting, and that was saved as a note.
 fn usable(m: &Value) -> bool {
@@ -100,33 +111,39 @@ fn recording_date(dir: &Path) -> String {
 }
 
 /// Low effort first; an empty answer gets one retry at medium.
-pub fn summarize(transcript: &str, raw_log: &Path) -> Result<(Value, Value), String> {
+pub fn summarize(model: &str, transcript: &str, raw_log: &Path) -> Result<(Value, Value), String> {
     let mut last = Value::Null;
     for effort in ["low", "medium"] {
-        let (m, usage) = summarize_once(transcript, effort, raw_log)?;
+        let (m, usage) = summarize_once(model, transcript, effort, raw_log)?;
         if usable(&m) {
             return Ok((m, usage));
         }
         last = m;
     }
-    Err(format!("Haiku devolveu a ata vazia duas vezes: {last}"))
+    Err(format!("{model} devolveu a ata vazia duas vezes: {last}"))
 }
 
-fn summarize_once(transcript: &str, effort: &str, raw_log: &Path) -> Result<(Value, Value), String> {
-    let body = json!({
-        "model": MODEL,
+fn request_body(model: &str, effort: &str, transcript: &str) -> Value {
+    json!({
+        "model": model,
         "max_tokens": 16000,
         "output_config": {"effort": effort, "format": {"type": "json_schema", "schema": schema()}},
         "system": SYSTEM,
         "messages": [{"role": "user", "content": format!("Transcrição:\n\n{transcript}")}],
-    });
+    })
+}
+
+fn summarize_once(model: &str, transcript: &str, effort: &str, raw_log: &Path) -> Result<(Value, Value), String> {
+    let body = request_body(model, effort, transcript);
     let resp = agent()
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", &api_key()?)
         .header("anthropic-version", "2026-10-21")
         .send_json(&body)
         .map_err(|e| format!("anthropic: {e}"))?;
-    let msg = check(resp, "anthropic")?;
+    // an unknown model comes back as a 404 naming it; point at where it is set
+    let msg = check(resp, "anthropic")
+        .map_err(|e| format!("{e} (modelo {model}; mude em minutes_model no %APPDATA%\\voxis\\config.toml)"))?;
     // the raw answer, for when the minutes come out wrong
     let _ = std::fs::write(raw_log, serde_json::to_string_pretty(&msg).unwrap_or_default());
     match msg["stop_reason"].as_str() {
@@ -237,8 +254,9 @@ pub fn run(dir: &Path) -> Result<(String, String), String> {
         .map_err(|e| format!("{}: {e} (run transcribe first)", dir.join("transcript.md").display()))?;
     let date = recording_date(dir);
     let t = std::time::Instant::now();
-    let (m, usage) = summarize(&transcript, &dir.join("minutes.json"))?;
-    println!("haiku: {:.1} s, {} in / {} out tokens", t.elapsed().as_secs_f64(), usage["input_tokens"], usage["output_tokens"]);
+    let model = minutes_model(crate::config_text().as_deref());
+    let (m, usage) = summarize(&model, &transcript, &dir.join("minutes.json"))?;
+    println!("{model}: {:.1} s, {} in / {} out tokens", t.elapsed().as_secs_f64(), usage["input_tokens"], usage["output_tokens"]);
     let md = render(&m, &date, &transcript);
     std::fs::write(dir.join("ata.md"), &md).map_err(|e| e.to_string())?;
     let title = format!("{} - {}", date, m["titulo"].as_str().unwrap_or("Reunião"));
@@ -264,6 +282,31 @@ mod tests {
         let ok = json!({"titulo": "Contratação", "resumo": "Entrevista positiva.", "decisoes": [], "action_items": []});
 
         assert!(usable(&ok));
+    }
+
+    #[test]
+    fn without_a_config_file_the_minutes_are_written_by_sonnet() {
+        let body = request_body(&minutes_model(None), "low", "**[00:01] Você:** oi");
+
+        assert_eq!(body["model"], "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn a_config_without_minutes_model_keeps_sonnet() {
+        let config = "mic = \"Microfone (2- fifine Microphone)\"\nspeaker = \"\"\n";
+
+        let body = request_body(&minutes_model(Some(config)), "low", "**[00:01] Você:** oi");
+
+        assert_eq!(body["model"], "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn the_minutes_model_set_in_the_config_writes_the_minutes() {
+        let config = "mic = \"fifine\"\nminutes_model = \"claude-haiku-5-5\"\n";
+
+        let body = request_body(&minutes_model(Some(config)), "low", "**[00:01] Você:** oi");
+
+        assert_eq!(body["model"], "claude-haiku-5-5");
     }
 
     #[test]
