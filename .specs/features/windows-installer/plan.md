@@ -79,6 +79,7 @@ None - no stored-data shape change (files on disk only, no schema).
 | 6. autostart dependency | `tauri-plugin-autostart` (HKCU `...\CurrentVersion\Run` value `VOXIS`) | a hand-written registry call: same effect, but the plugin also covers macOS (LaunchAgent) for the shared tray |
 | 7. CI builds the CUDA edition | `windows-latest` job installs CUDA 13.5 (`Jimver/cuda-toolkit`, pinned by SHA like the other actions) and the Vulkan SDK; `CUDAARCHS="75;86;89;120"` | building on the owner's PC and uploading by hand: not reproducible, and it ties every release to one machine |
 
+| 8. main executable name (found while building S1) | `tauri.windows.conf.json`: `"mainBinaryName": "VOXIS"`, so the install holds `VOXIS.exe` | Tauri's default, the crate name `tray.exe`: the Start menu target, the autostart Run value and anything a user scripts would bind to an internal name |
 - Nothing else in this change is hard to reverse
 
 ## Criteria

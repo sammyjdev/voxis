@@ -15,6 +15,8 @@ Command shorthands used in the proofs:
 
 ### S1 - the owner installs the CUDA edition and dictates without a checkout · 6 files · 75 KB · ~19k
 
+Done: C1-C6 green on 2026-11-06 (tray suite 48 passed; smoke install, overlay, no-toolkit PASS)
+
 **C1** - The CUDA installer, run with `/S` from a non-elevated shell, exits `0`. It leaves `VOXIS.exe` and `meetrec.exe` in the same folder under `%LOCALAPPDATA%`, and `VOXIS.lnk` under `%APPDATA%\Microsoft\Windows\Start Menu\Programs` (AC 1)
 Proof: `SMOKE -Edition cuda -Check install`
 

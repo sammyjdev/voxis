@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "binaries/cuda/cublas64_13.dll": "cublas64_13.dll",
+      "binaries/cuda/cublasLt64_13.dll": "cublasLt64_13.dll"
+    }
+  }
+}

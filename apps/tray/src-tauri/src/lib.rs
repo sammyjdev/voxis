@@ -564,7 +564,16 @@ pub fn run() {
                 PathBuf::from(&config.laris_dir),
                 Some(settings::config_dir().join("laris.log")),
             )
-            .with_bin(&config.laris_bin);
+            .with_bin(&config.laris_bin)
+            // the installer ships the orb page as a resource; a dev build
+            // without it lets meetrec fall back to its checkout copy
+            .with_frontend(
+                app.path()
+                    .resource_dir()
+                    .ok()
+                    .map(|d| d.join("frontend"))
+                    .filter(|d| d.join("overlay.html").is_file()),
+            );
             app.manage(AppState {
                 config,
                 daemon: Mutex::new(daemon),

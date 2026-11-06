@@ -79,19 +79,33 @@ impl Default for TrayConfig {
         // GUI apps don't inherit shell PATH - absolute paths only
         let h = home().to_string_lossy().into_owned();
         Self {
-            miris_bin: format!("{h}/.local/bin/miris"),
+            miris_bin: native_bin_default().unwrap_or_else(|| format!("{h}/.local/bin/miris")),
             laris_dir: laris_dir_default(Path::new(BUILD_LARIS_DIR), &home()),
             miris_home: format!("{h}/.miris"),
-            laris_bin: String::new(),
+            laris_bin: native_bin_default().unwrap_or_default(),
         }
     }
+}
+
+/// On Windows the installer puts meetrec.exe beside the tray; it runs both
+/// meetings and dictation. Elsewhere there is no bundled native binary.
+fn native_bin_default() -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.with_file_name("meetrec.exe").to_string_lossy().into_owned())
+}
+
+/// tray.json text; a key left out takes its default, a bad file is all defaults.
+pub fn parse_tray_config(raw: &str) -> TrayConfig {
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 pub fn load_tray_config() -> TrayConfig {
     let path = config_dir().join("tray.json");
     std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .map(|raw| parse_tray_config(&raw))
         .unwrap_or_default()
 }
 
@@ -223,9 +237,31 @@ mod tests {
     #[test]
     fn tray_config_defaults() {
         let cfg = TrayConfig::default();
+        #[cfg(not(windows))]
         assert!(cfg.miris_bin.ends_with("/.local/bin/miris"));
         assert_eq!(cfg.laris_dir, laris_dir_default(Path::new(BUILD_LARIS_DIR), &home()));
         assert!(cfg.miris_home.ends_with("/.miris"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unset_meetrec_path_runs_the_copy_beside_the_tray() {
+        let beside_tray = std::env::current_exe().unwrap().with_file_name("meetrec.exe");
+
+        let cfg = parse_tray_config(r#"{"miris_home": "C:\\Users\\x\\.miris"}"#);
+
+        assert_eq!(PathBuf::from(&cfg.miris_bin), beside_tray);
+        assert_eq!(PathBuf::from(&cfg.laris_bin), beside_tray);
+    }
+
+    #[test]
+    fn a_meetrec_path_set_in_tray_json_wins_over_the_bundled_copy() {
+        let raw = r#"{"miris_bin": "C:\\vxc\\release\\meetrec.exe", "laris_bin": "C:\\vxc\\release\\meetrec.exe"}"#;
+
+        let cfg = parse_tray_config(raw);
+
+        assert_eq!(cfg.miris_bin, r"C:\vxc\release\meetrec.exe");
+        assert_eq!(cfg.laris_bin, r"C:\vxc\release\meetrec.exe");
     }
 
     #[test]
