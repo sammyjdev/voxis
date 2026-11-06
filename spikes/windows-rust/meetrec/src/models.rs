@@ -45,6 +45,12 @@ pub fn fetch_target(voxis_models: Option<PathBuf>, local_app_data: Option<PathBu
         .unwrap_or_else(|| home.join(".voxis").join("models"))
 }
 
+/// `fetch_target` fed from the environment variables `meetrec models fetch`
+/// reads; `env` looks one up by name.
+pub fn fetch_target_from_env(env: &dyn Fn(&str) -> Option<PathBuf>, home: &Path) -> PathBuf {
+    fetch_target(env("VOXIS_MODELS"), env("LOCALAPPDATA"), home)
+}
+
 /// The first place that holds both files.
 pub fn find(places: &[PathBuf]) -> Result<PathBuf, String> {
     places
@@ -225,6 +231,23 @@ mod tests {
 
         assert_eq!(installed, PathBuf::from(r"C:\Users\u\AppData\Local\voxis\models"));
         assert_eq!(overridden, PathBuf::from(r"D:\m"));
+    }
+
+    #[test]
+    fn models_fetch_reads_the_install_folder_from_the_environment() {
+        let home = Path::new(r"C:\Users\u");
+        let installed = |k: &str| (k == "LOCALAPPDATA").then(|| PathBuf::from(r"C:\Users\u\AppData\Local"));
+        let overridden = |k: &str| match k {
+            "VOXIS_MODELS" => Some(PathBuf::from(r"D:\m")),
+            "LOCALAPPDATA" => Some(PathBuf::from(r"C:\Users\u\AppData\Local")),
+            _ => None,
+        };
+
+        let from_install = fetch_target_from_env(&installed, home);
+        let from_override = fetch_target_from_env(&overridden, home);
+
+        assert_eq!(from_install, PathBuf::from(r"C:\Users\u\AppData\Local\voxis\models"));
+        assert_eq!(from_override, PathBuf::from(r"D:\m"));
     }
 
     #[test]

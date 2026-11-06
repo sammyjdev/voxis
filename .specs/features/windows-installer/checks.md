@@ -110,11 +110,12 @@ Proof: `TRAY_TEST a_meeting_without_a_key_says_where_to_put_it`
 
 ### Verification round 1 - gaps the Verifier found · 4 files · ~3k
 
-Done: C24-C26 green on 2026-11-06 (meetrec suite 23 passed, tray suite 56 passed)
+Done: C24-C26 green on 2026-11-06 (meetrec suite 24 passed, tray suite 56 passed; round 2 added the environment-level proof of C24)
 
 **C24** - The shipped pins are door 5's literal values: `ggml-large-v3-turbo.bin` from `huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/` with SHA-256 `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`, `ggml-silero-v5.1.2.bin` from `huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/` with SHA-256 `29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf`; and with `VOXIS_MODELS` unset, `models fetch` saves into `%LOCALAPPDATA%\voxis\models` (AC 8, door 5)
 Proof: `MEETREC_TEST the_shipped_pins_name_the_reviewed_commits_and_hashes`
 Proof: `MEETREC_TEST a_fetch_on_an_installed_machine_saves_into_local_app_data`
+Proof: `MEETREC_TEST models_fetch_reads_the_install_folder_from_the_environment`
 
 **C25** - Google counts as set up only when both `google-oauth-client.json` and `google-token.json` are present; with only one, the minutes stay in `ata.md` (AC 17)
 Proof: `MEETREC_TEST google_counts_as_set_up_only_with_both_its_files`
