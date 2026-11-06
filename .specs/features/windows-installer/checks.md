@@ -65,6 +65,8 @@ Proof: `TRAY_TEST while_models_download_dictation_stays_off_and_the_menu_says_wh
 
 ### S3 - the Vulkan edition · 2 files · 10 KB · ~3k
 
+Done: C15-C17 green on 2026-11-06 (Vulkan installer 9 MB; smoke transcribe, replace, uninstall-keeps-models PASS; C1 and C6 re-run PASS after the preinstall hook)
+
 **C15** - The Vulkan install dir contains no file matching `cublas*.dll`. Its `meetrec.exe transcribe` on a SAPI-synthesised pt-BR sentence (`teste de transcrição do voxis`) writes a `transcript.md` containing `transcrição` (AC 12)
 Proof: `SMOKE -Edition vulkan -Check transcribe`
 

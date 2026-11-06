@@ -4,14 +4,19 @@
     "beforeBuildCommand": "npm run build"
   },
   "bundle": {
-    "targets": ["nsis"],
-    "externalBin": ["binaries/meetrec"],
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/meetrec"
+    ],
     "resources": {
       "../../../packages/laris/frontend/": "frontend/"
     },
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh"
       }
     }
   }

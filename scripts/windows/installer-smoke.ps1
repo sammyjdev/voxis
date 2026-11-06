@@ -1,4 +1,4 @@
-<#
+﻿<#
 Smoke tests for the VOXIS Windows installers (checks C1, C5, C6, C15-C17 in
 .specs\features\windows-installer\checks.md). Exits 0 when the check holds.
 
@@ -25,6 +25,8 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
 # Windows PowerShell 5.1 leaves $PSScriptRoot empty inside param defaults
 if (-not $InstallerDir) { $InstallerDir = Join-Path $repo 'apps\tray\src-tauri\target\release\bundle\nsis' }
+# -File hands "cuda,vulkan" over as one string
+$Edition = @($Edition | ForEach-Object { $_ -split ',' })
 $uninstallRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
 
 function Fail($msg) { Write-Output "FAIL: $msg"; exit 1 }
@@ -61,7 +63,7 @@ function Uninstall {
         if (Test-Path $exe) { Start-Process $exe -ArgumentList '/S' -Wait | Out-Null }
     }
     # the NSIS uninstaller re-launches itself from %TEMP% and returns early
-    for ($i = 0; $i -lt 30 -and (Entries).Count; $i++) { Start-Sleep -Milliseconds 500 }
+    for ($i = 0; $i -lt 30 -and @(Entries).Count; $i++) { Start-Sleep -Milliseconds 500 }
 }
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -142,7 +144,11 @@ try {
             $s.Dispose()
             $models = if ($env:VOXIS_MODELS) { $env:VOXIS_MODELS } else { Join-Path $env:LOCALAPPDATA 'voxis\models' }
             if (-not (Test-Path "$models\ggml-large-v3-turbo.bin")) { $models = Join-Path $env:USERPROFILE '.cache\voxis-bench\models' }
+            # whisper logs to stderr, which Windows PowerShell turns into an
+            # error record under -ErrorAction Stop
+            $ErrorActionPreference = 'Continue'
             & (Join-Path $dir 'meetrec.exe') transcribe $work "$models\ggml-large-v3-turbo.bin" "$models\ggml-silero-v5.1.2.bin" pt 2>$null | Out-Null
+            $ErrorActionPreference = 'Stop'
             $t = Get-Content (Join-Path $work 'transcript.md') -Raw -Encoding UTF8
             Remove-Item $work -Recurse -Force
             if ($t -notmatch 'transcrição') { Fail "transcript lacks 'transcrição': $t" }
@@ -151,7 +157,7 @@ try {
         'replace' {
             Install $Edition[0]
             Install $Edition[1]
-            $n = (Entries).Count
+            $n = @(Entries).Count
             if ($n -ne 1) { Fail "$n uninstall entries named VOXIS" }
             $dir = InstallDir
             if ($Edition[1] -eq 'vulkan' -and (Get-ChildItem $dir -Filter 'cublas*.dll')) { Fail 'cublas DLLs left behind after switching to vulkan' }
@@ -166,7 +172,7 @@ try {
             Uninstall
             $left = Test-Path $marker
             Remove-Item $marker -ErrorAction SilentlyContinue
-            if ((Entries).Count) { Fail 'the uninstaller left its entry behind' }
+            if (@(Entries).Count) { Fail 'the uninstaller left its entry behind' }
             if (-not $left) { Fail "uninstall removed $models" }
             Pass "uninstall kept $models"
         }

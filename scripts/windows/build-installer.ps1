@@ -1,4 +1,4 @@
-<#
+﻿<#
 Builds one VOXIS installer edition for Windows.
 
   powershell -File scripts\windows\build-installer.ps1 -Edition cuda
