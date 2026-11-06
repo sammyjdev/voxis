@@ -256,9 +256,12 @@ pub struct Credentials {
 
 impl Credentials {
     pub fn here() -> Self {
-        let dir = config_dir();
+        Self::in_dir(&config_dir(), api_key().ok())
+    }
+
+    pub fn in_dir(dir: &Path, anthropic_key: Option<String>) -> Self {
         Self {
-            anthropic_key: api_key().ok(),
+            anthropic_key,
             google: dir.join("google-oauth-client.json").is_file() && dir.join("google-token.json").is_file(),
         }
     }
@@ -316,6 +319,19 @@ pub fn run_with(dir: &Path, creds: &Credentials, summarize: &dyn Fn(&str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn google_counts_as_set_up_only_with_both_its_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("google-oauth-client.json"), "{}").unwrap();
+
+        let only_client = Credentials::in_dir(tmp.path(), None);
+        std::fs::write(tmp.path().join("google-token.json"), "{}").unwrap();
+        let both = Credentials::in_dir(tmp.path(), None);
+
+        assert!(!only_client.google);
+        assert!(both.google);
+    }
 
     #[test]
     fn minutes_without_a_title_or_summary_are_not_accepted() {

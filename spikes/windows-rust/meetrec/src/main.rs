@@ -84,10 +84,11 @@ pub fn models() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
 /// app's %LOCALAPPDATA%\voxis\models.
 fn models_fetch() -> i32 {
     let places = model_places();
-    let target = std::env::var_os("VOXIS_MODELS")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("voxis").join("models")))
-        .unwrap_or_else(|| home().join(".voxis").join("models"));
+    let target = models::fetch_target(
+        std::env::var_os("VOXIS_MODELS").map(Into::into),
+        std::env::var_os("LOCALAPPDATA").map(Into::into),
+        &home(),
+    );
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     models::fetch(&places, &target, &models::PINS, &mut out, &mut err)
 }

@@ -108,6 +108,20 @@ Proof: `TRAY_TEST a_meeting_kept_locally_names_its_ata_in_the_toast`
 Proof: `MEETREC_TEST without_an_anthropic_key_the_session_completes_with_the_transcript`
 Proof: `TRAY_TEST a_meeting_without_a_key_says_where_to_put_it`
 
+### Verification round 1 - gaps the Verifier found · 4 files · ~3k
+
+Done: C24-C26 green on 2026-11-06 (meetrec suite 23 passed, tray suite 56 passed)
+
+**C24** - The shipped pins are door 5's literal values: `ggml-large-v3-turbo.bin` from `huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/` with SHA-256 `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`, `ggml-silero-v5.1.2.bin` from `huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/` with SHA-256 `29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf`; and with `VOXIS_MODELS` unset, `models fetch` saves into `%LOCALAPPDATA%\voxis\models` (AC 8, door 5)
+Proof: `MEETREC_TEST the_shipped_pins_name_the_reviewed_commits_and_hashes`
+Proof: `MEETREC_TEST a_fetch_on_an_installed_machine_saves_into_local_app_data`
+
+**C25** - Google counts as set up only when both `google-oauth-client.json` and `google-token.json` are present; with only one, the minutes stay in `ata.md` (AC 17)
+Proof: `MEETREC_TEST google_counts_as_set_up_only_with_both_its_files`
+
+**C26** - After a failed model download, the tray menu shows the disabled item `Ditado indisponível: falha ao baixar modelos` (AC 11, plan Observable menu failure copy)
+Proof: `TRAY_TEST after_a_failed_download_the_menu_says_the_models_failed`
+
 ## Coverage
 
 | Set (size) | Member -> proof | Unproven |
@@ -115,11 +129,12 @@ Proof: `TRAY_TEST a_meeting_without_a_key_says_where_to_put_it`
 | model lookup places (4) | `VOXIS_MODELS` C7 · `%LOCALAPPDATA%\voxis\models` C7 · bench cache C7 · none found C7 (table-driven over all 4, plus the one-file-only skip) | - |
 | `models fetch` exits (3) | `0` C8, C12 · `1` C10, C11 · `2` C9 | - |
 | tray reaction to fetch (4) | progress line C13 · exit `0` C13 · exit `1` C13 · exit `2` C13 | - |
+| dictation menu row (3 states) | downloading C14 · failed C26 · ready (no row) C14 | - |
 | editions (2) | `cuda` C1, C5, C6 · `vulkan` C15, C16 | - |
 | meetrec path resolution (2 sources) | unset -> sidecar C2 · set in `tray.json` C3 | - |
 | GitHub release asset statuses (2) | `200` C18 · `404` C18 (script exits `1` on a missing asset) | - |
-| Landing doors (7) | 1 install mode C1, C16 · 2 sidecar C1, C2 · 3 asset names C18 · 4 NVIDIA DLLs C6 · 5 models dir and pins C8, C9 · 6 autostart (superseded by 11) C20 · 11 quoted Run value C20 · 7 CI CUDA build C18 | - |
-| meeting outcome without setup (2) | no Google C22 · no Anthropic key C23 | - |
+| Landing doors (12) | 1 install mode C1, C16 · 2 sidecar C1, C2 · 3 asset names C18 · 4 NVIDIA DLLs C6 · 5 models dir and pins C24, C8, C9 · 6 autostart (superseded by 11) C20 · 7 CI CUDA build C18 · 8 main executable name C1 · 9 SHA-256 in meetrec C8, C9 · 10 installer hook C16 · 11 quoted Run value C20 · 12 CUDA 13.3.1 in CI C18 | - |
+| meeting outcome without setup (3) | no Google C22 · one Google file only C25 · no Anthropic key C23 | - |
 | startup config: orb page location (2 assemblies) | installed app C5 · tray spawn C4 | - |
 
 - Claims naming an exit code, a status or a file: C1, C6, C8-C12, C18 - each proof runs the real binary or a real HTTP server, not a mock of the call

@@ -79,6 +79,13 @@ mod tests {
         assert_eq!(outcome(Some(2)), Outcome::Toast("Falha ao baixar modelos: hash diferente; tente de novo"));
     }
 
+    #[test]
+    fn after_a_failed_download_the_menu_says_the_models_failed() {
+        let label = dictation_label(ModelState::Failed);
+
+        assert_eq!(label.as_deref(), Some("Ditado indisponível: falha ao baixar modelos"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn while_models_download_dictation_stays_off_and_the_menu_says_why() {
