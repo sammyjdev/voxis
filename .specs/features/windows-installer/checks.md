@@ -37,6 +37,8 @@ Proof: `SMOKE -Edition cuda -Check no-toolkit`
 
 ### S2 - a fresh install fetches its models · 5 files · 60 KB · ~15k
 
+Done: C7-C14 green on 2026-11-06 (meetrec suite 18 passed, tray suite 50 passed; installed app fetched both pinned models in ~230 s, then started dictation)
+
 **C7** - Model lookup: the first of `VOXIS_MODELS`, `%LOCALAPPDATA%\voxis\models`, `%USERPROFILE%\.cache\voxis-bench\models` that holds both files wins. A folder holding only one of them is skipped, and no match returns `Err` naming all three places (AC 6)
 Proof: `MEETREC_TEST models_are_found_in_the_first_place_that_holds_both_files`
 

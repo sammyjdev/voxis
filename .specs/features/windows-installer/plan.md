@@ -80,6 +80,7 @@ None - no stored-data shape change (files on disk only, no schema).
 | 7. CI builds the CUDA edition | `windows-latest` job installs CUDA 13.5 (`Jimver/cuda-toolkit`, pinned by SHA like the other actions) and the Vulkan SDK; `CUDAARCHS="75;86;89;120"` | building on the owner's PC and uploading by hand: not reproducible, and it ties every release to one machine |
 
 | 8. main executable name (found while building S1) | `tauri.windows.conf.json`: `"mainBinaryName": "VOXIS"`, so the install holds `VOXIS.exe` | Tauri's default, the crate name `tray.exe`: the Start menu target, the autostart Run value and anything a user scripts would bind to an internal name |
+| 9. SHA-256 in meetrec (found while building S2) | dependency `sha2 = "0.10"` (RustCrypto) in `spikes/windows-rust/meetrec/Cargo.toml` | Windows CNG through `windows-sys`: Windows-only, and meetrec is meant to stay portable to the other two OSes; shelling out to `certutil`: a second process and output parsing for every model |
 - Nothing else in this change is hard to reverse
 
 ## Criteria

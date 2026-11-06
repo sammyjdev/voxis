@@ -8,12 +8,15 @@
 //!   meetrec transcribe <dir> <model.bin> <vad.bin> [lang=pt]
 //!   meetrec summarize <dir>                         Claude minutes -> Google Doc
 //!   meetrec meeting [mic]                           record (Enter stops) + transcribe + summarize
-//!     into %USERPROFILE%\.voxis\meetings\<date>; models from VOXIS_MODELS
-//!     (default %USERPROFILE%\.cache\voxis-bench\models)
+//!     into %USERPROFILE%\.voxis\meetings\<date>
+//!   meetrec models fetch                            download the pinned models (see models.rs)
+//! Models come from VOXIS_MODELS, %LOCALAPPDATA%\voxis\models, or the bench
+//! cache %USERPROFILE%\.cache\voxis-bench\models, first match wins.
 
 #[cfg(windows)]
 mod dictate;
 mod minutes;
+mod models;
 mod session;
 
 use std::io::BufRead;
@@ -38,6 +41,7 @@ fn main() {
             transcribe(Path::new(&a[2]), &a[3], &a[4], a.get(5).map(String::as_str).unwrap_or("pt"))
         }
         Some("meeting") => meeting(a.get(2).map(String::as_str)),
+        Some("models") if a.get(2).map(String::as_str) == Some("fetch") => std::process::exit(models_fetch()),
         #[cfg(windows)]
         Some("dictate") => dictate::run(),
         // MIRIS-compatible surface the tray drives (see session.rs)
@@ -51,7 +55,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: meetrec devices | record <dir> [mic] [secs] | transcribe <dir> <model.bin> <vad.bin> [lang] | summarize <dir>");
+            eprintln!("usage: meetrec devices | record <dir> [mic] [secs] | transcribe <dir> <model.bin> <vad.bin> [lang] | summarize <dir> | models fetch");
             std::process::exit(2);
         }
     }
@@ -61,19 +65,31 @@ pub fn home() -> std::path::PathBuf {
     std::env::var_os("USERPROFILE").map(std::path::PathBuf::from).unwrap_or_else(|| ".".into())
 }
 
-/// (whisper model, silero vad) from VOXIS_MODELS or the bench cache.
+/// Where this machine keeps the models, in lookup order.
+fn model_places() -> Vec<std::path::PathBuf> {
+    models::places(
+        std::env::var_os("VOXIS_MODELS").map(Into::into),
+        std::env::var_os("LOCALAPPDATA").map(Into::into),
+        &home(),
+    )
+}
+
+/// (whisper model, silero vad) from the first place that holds both.
 pub fn models() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    let models = std::env::var_os("VOXIS_MODELS")
+    let dir = models::find(&model_places())?;
+    Ok((dir.join(models::MODEL), dir.join(models::VAD)))
+}
+
+/// `meetrec models fetch`: into VOXIS_MODELS when set, else the installed
+/// app's %LOCALAPPDATA%\voxis\models.
+fn models_fetch() -> i32 {
+    let places = model_places();
+    let target = std::env::var_os("VOXIS_MODELS")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home().join(".cache").join("voxis-bench").join("models"));
-    let model = models.join("ggml-large-v3-turbo.bin");
-    let vad = models.join("ggml-silero-v5.1.2.bin");
-    for m in [&model, &vad] {
-        if !m.exists() {
-            return Err(format!("model missing: {}", m.display()));
-        }
-    }
-    Ok((model, vad))
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("voxis").join("models")))
+        .unwrap_or_else(|| home().join(".voxis").join("models"));
+    let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+    models::fetch(&places, &target, &models::PINS, &mut out, &mut err)
 }
 
 fn meeting(mic: Option<&str>) {

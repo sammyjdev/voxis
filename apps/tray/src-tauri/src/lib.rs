@@ -1,6 +1,7 @@
 mod commands;
 mod laris;
 mod miris;
+mod models;
 mod settings;
 #[cfg(windows)]
 mod toast;
@@ -30,6 +31,9 @@ pub struct AppState {
     /// when the action fails, so the next poll tick must rebuild regardless
     /// of whether the snapshot changed.
     pub menu_dirty: AtomicBool,
+    /// Windows installs fetch the whisper models on first run; dictation
+    /// waits for them.
+    pub models: Mutex<models::ModelState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -45,6 +49,7 @@ struct Snapshot {
     dictating: bool, // the daemon's toggle left the mic listening (Linux)
     has_last_note: bool,
     theme: Option<(String, String, String)>, // (archetype, palette, position)
+    models: models::ModelState,
 }
 
 /// One primary action represents only the active session; a second item
@@ -199,6 +204,7 @@ fn take_snapshot(state: &AppState) -> Snapshot {
         dictating,
         has_last_note: snap.last_note.is_some(),
         theme,
+        models: *state.models.lock().unwrap(),
     }
 }
 
@@ -208,6 +214,68 @@ fn tray_tooltip(recording_session: Option<&str>, now: chrono::DateTime<chrono::L
         Some((_, elapsed)) => format!("VOXIS - gravando reunião há {elapsed}"),
         None => "VOXIS".to_owned(),
     }
+}
+
+/// `<meetrec> models fetch`: progress goes to the tooltip and the menu, and
+/// a successful fetch starts dictation.
+fn fetch_models(app: &AppHandle, bin: &str) {
+    use std::io::BufRead;
+    let state = app.state::<AppState>();
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(["models", "fetch"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tray_log(&format!("models fetch: {bin}: {e}"));
+            *state.models.lock().unwrap() = models::ModelState::Failed;
+            state.menu_dirty.store(true, Ordering::SeqCst);
+            notify(app, "Falha ao baixar modelos: sem conexão; tente de novo");
+            return;
+        }
+    };
+    let stderr = child.stderr.take();
+    let err_log = std::thread::spawn(move || {
+        if let Some(e) = stderr {
+            for line in std::io::BufReader::new(e).lines().map_while(Result::ok) {
+                tray_log(&format!("models fetch: {line}"));
+            }
+        }
+    });
+    if let Some(out) = child.stdout.take() {
+        let mut last = None;
+        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+            if let Some(p) = models::progress_pct(&line) {
+                if last != Some(p) {
+                    last = Some(p);
+                    *state.models.lock().unwrap() = models::ModelState::Downloading(p);
+                }
+            } else {
+                tray_log(&format!("models fetch: {line}"));
+            }
+        }
+    }
+    let code = child.wait().ok().and_then(|s| s.code());
+    let _ = err_log.join();
+    match models::outcome(code) {
+        models::Outcome::StartDictation => {
+            *state.models.lock().unwrap() = models::ModelState::Ready;
+            if !external_daemon_alive() {
+                if let Err(e) = models::spawn_dictation(models::ModelState::Ready, &mut state.daemon.lock().unwrap()) {
+                    notify(app, &format!("Falha ao iniciar ditado: {e}"));
+                }
+            }
+        }
+        models::Outcome::Toast(msg) => {
+            *state.models.lock().unwrap() = models::ModelState::Failed;
+            notify(app, msg);
+        }
+    }
+    state.menu_dirty.store(true, Ordering::SeqCst);
 }
 
 /// ~/.voxis/logs/tray-<date>.log: the tray has no console on Windows.
@@ -262,7 +330,8 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
     let dictation = MenuItem::with_id(
         app,
         "dictation_status",
-        dictation_status_label(snap.laris_alive, snap.laris_ready),
+        models::dictation_label(snap.models)
+            .unwrap_or_else(|| dictation_status_label(snap.laris_alive, snap.laris_ready).to_owned()),
         false, // disabled: nothing to click
         None::<&str>,
     )?;
@@ -574,11 +643,20 @@ pub fn run() {
                     .map(|d| d.join("frontend"))
                     .filter(|d| d.join("overlay.html").is_file()),
             );
+            // the native binary looks for its models and fetches them when
+            // missing; the Python daemon manages its own
+            let fetch_with = (cfg!(windows) && !config.laris_bin.is_empty()).then(|| config.laris_bin.clone());
+            let model_state = if fetch_with.is_some() {
+                models::ModelState::Downloading(0)
+            } else {
+                models::ModelState::Ready
+            };
             app.manage(AppState {
                 config,
                 daemon: Mutex::new(daemon),
                 processing: AtomicBool::new(false),
                 menu_dirty: AtomicBool::new(false),
+                models: Mutex::new(model_state),
             });
 
             // The model costs ~3.6s and 276MB to load. Loading it once per
@@ -591,11 +669,16 @@ pub fn run() {
                     // peers.json with a token the first server rejects, and
                     // still starts its own keyboard listener alongside it
                     notify(app.handle(), "Ditado foi iniciado fora do VOXIS - encerre-o por lá");
-                } else if let Err(e) = daemon.spawn() {
+                } else if let Err(e) = models::spawn_dictation(*state.models.lock().unwrap(), &mut daemon) {
                     // a bad laris_dir would otherwise fail silently at boot -
                     // the old code path surfaced this from the menu handler
                     notify(app.handle(), &format!("Falha ao iniciar ditado: {e}"));
                 }
+            }
+
+            if let Some(bin) = fetch_with {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || fetch_models(&handle, &bin));
             }
 
             let snap = take_snapshot(&app.state::<AppState>());
@@ -646,9 +729,12 @@ pub fn run() {
                     // restart path is gated on owns_running() and stays a
                     // permanent no-op once the child has exited
                     let owns = state.daemon.lock().unwrap().owns_running();
-                    if should_respawn(owns, current.laris_alive, respawn_attempts, RESPAWN_CAP) {
+                    // a first run still fetching its models has nothing to respawn
+                    if current.models == models::ModelState::Ready
+                        && should_respawn(owns, current.laris_alive, respawn_attempts, RESPAWN_CAP)
+                    {
                         respawn_attempts += 1;
-                        if let Err(e) = state.daemon.lock().unwrap().spawn() {
+                        if let Err(e) = models::spawn_dictation(current.models, &mut state.daemon.lock().unwrap()) {
                             notify(&handle, &format!("Falha ao reiniciar ditado: {e}"));
                         }
                     }
@@ -659,7 +745,10 @@ pub fn run() {
                         .as_ref()
                         .filter(|_| is_recording(&current))
                         .map(|(id, _, _)| id.clone());
-                    let tip = tray_tooltip(recording_id.as_deref(), chrono::Local::now());
+                    let tip = match current.models {
+                        models::ModelState::Downloading(p) if recording_id.is_none() => models::download_tooltip(p),
+                        _ => tray_tooltip(recording_id.as_deref(), chrono::Local::now()),
+                    };
                     let h3 = handle.clone();
                     let _ = handle.run_on_main_thread(move || {
                         if let Some(tray) = h3.tray_by_id("voxis") {
