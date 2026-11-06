@@ -41,8 +41,8 @@ second release channel.
    (door 5), then the legacy bench cache. If none is found, the tray runs `meetrec models fetch`
    (new command), which downloads the pinned files to `.part`, verifies SHA-256, renames them, and
    prints progress lines that the tray shows in the tooltip and a toast.
-6. tray menu `Iniciar com o Windows` -> `tauri-plugin-autostart` (door 6) - writes or removes the
-   HKCU `Run` entry.
+6. tray menu `Iniciar com o Windows` -> `apps/tray` `autostart.rs` (door 11) - writes or removes the
+   HKCU `Run` entry, path quoted.
 7. meeting -> `meetrec` `session.rs` / `minutes.rs` (exists) - without Google credentials, the
    session ends `completed` with `ata.md` kept locally instead of `failed`.
 
@@ -82,6 +82,7 @@ None - no stored-data shape change (files on disk only, no schema).
 | 8. main executable name (found while building S1) | `tauri.windows.conf.json`: `"mainBinaryName": "VOXIS"`, so the install holds `VOXIS.exe` | Tauri's default, the crate name `tray.exe`: the Start menu target, the autostart Run value and anything a user scripts would bind to an internal name |
 | 9. SHA-256 in meetrec (found while building S2) | dependency `sha2 = "0.10"` (RustCrypto) in `spikes/windows-rust/meetrec/Cargo.toml` | Windows CNG through `windows-sys`: Windows-only, and meetrec is meant to stay portable to the other two OSes; shelling out to `certutil`: a second process and output parsing for every model |
 | 10. installer hook (found while building S3) | `tauri.windows.conf.json`: `"installerHooks": "windows/installer-hooks.nsh"`, whose `NSIS_HOOK_PREINSTALL` deletes `$INSTDIR\cublas64_13.dll` and `$INSTDIR\cublasLt64_13.dll`, which the CUDA installer then writes back | a custom NSIS template: the whole installer becomes ours to keep in step with Tauri; leaving the DLLs: the Vulkan edition would carry 530 MB it never loads and C16 fails |
+| 11. autostart write, supersedes 6 (owner's choice, 2026-11-06, while building S5) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `VOXIS` = `"<install dir>\VOXIS.exe"` (quoted), written and removed with the `windows` crate's registry API already in the tray | `tauri-plugin-autostart` (row 6): it writes the path unquoted, which a profile with a space in its name turns into the unquoted-path pattern, and the item is Windows-only so its macOS support buys nothing |
 - Nothing else in this change is hard to reverse
 
 ## Criteria

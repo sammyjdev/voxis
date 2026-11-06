@@ -86,6 +86,8 @@ Proof: `powershell -File scripts\windows\check-readme.ps1`
 
 ### S5 - starts with Windows · 3 files · 42 KB · ~10k
 
+Done: C20-C21 green on 2026-11-06 (tray suite 52 passed; mechanism changed to door 11 with the owner's OK)
+
 **C20** - Enabling autostart through the tray's autostart module writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `<name>` = the quoted exe path. Disabling removes the value (AC 16)
 Proof: `TRAY_TEST enabling_autostart_writes_the_run_value_and_disabling_removes_it`
 
@@ -112,7 +114,7 @@ Proof: `TRAY_TEST a_meeting_without_a_key_says_where_to_put_it`
 | editions (2) | `cuda` C1, C5, C6 · `vulkan` C15, C16 | - |
 | meetrec path resolution (2 sources) | unset -> sidecar C2 · set in `tray.json` C3 | - |
 | GitHub release asset statuses (2) | `200` C18 · `404` C18 (script exits `1` on a missing asset) | - |
-| Landing doors (7) | 1 install mode C1, C16 · 2 sidecar C1, C2 · 3 asset names C18 · 4 NVIDIA DLLs C6 · 5 models dir and pins C8, C9 · 6 autostart C20 · 7 CI CUDA build C18 | - |
+| Landing doors (7) | 1 install mode C1, C16 · 2 sidecar C1, C2 · 3 asset names C18 · 4 NVIDIA DLLs C6 · 5 models dir and pins C8, C9 · 6 autostart (superseded by 11) C20 · 11 quoted Run value C20 · 7 CI CUDA build C18 | - |
 | meeting outcome without setup (2) | no Google C22 · no Anthropic key C23 | - |
 | startup config: orb page location (2 assemblies) | installed app C5 · tray spawn C4 | - |
 

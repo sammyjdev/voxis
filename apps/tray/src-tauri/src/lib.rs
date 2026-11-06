@@ -1,3 +1,4 @@
+mod autostart;
 mod commands;
 mod laris;
 mod miris;
@@ -372,6 +373,14 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
 
     let sep2 = PredefinedMenuItem::separator(app)?;
     items.push(Box::new(sep2));
+    #[cfg(windows)]
+    {
+        let autostart = CheckMenuItem::with_id(
+            app, "autostart", "Iniciar com o Windows", true,
+            autostart::menu_checked(&run_key()), None::<&str>,
+        )?;
+        items.push(Box::new(autostart));
+    }
     let settings_item =
         MenuItem::with_id(app, "settings", "Configurações...", true, None::<&str>)?;
     items.push(Box::new(settings_item));
@@ -471,10 +480,23 @@ fn ensure_mic_access() {
     }
 }
 
+/// The HKCU Run value that starts this VOXIS.exe at logon.
+#[cfg(windows)]
+fn run_key() -> autostart::RunKey {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("VOXIS.exe"));
+    autostart::RunKey::new("VOXIS", &exe)
+}
+
 fn handle_menu(app: &AppHandle, id: &str) {
     let state = app.state::<AppState>();
     state.menu_dirty.store(true, Ordering::SeqCst);
     match id {
+        #[cfg(windows)]
+        "autostart" => {
+            if let Err(e) = autostart::toggle(&run_key()) {
+                notify(app, &format!("Falha ao configurar o início com o Windows: {e}"));
+            }
+        }
         "quit" => {
             // the menu item is disabled during active work, but a click can
             // race a session that started since the last 2s poll - re-check
