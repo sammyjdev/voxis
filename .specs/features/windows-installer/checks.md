@@ -79,7 +79,7 @@ Proof: `SMOKE -Edition vulkan -Check uninstall-keeps-models`
 ### S4 - downloadable from the repository · 3 files · 8 KB · ~2k
 
 **C18** - After the run for tag `v<ver>` the draft release lists `VOXIS_<ver>_x64_cuda-setup.exe` and `VOXIS_<ver>_x64_vulkan-setup.exe`. The check script exits `1` naming any that is missing (AC 14)
-Proof: `powershell -File scripts\windows\check-release-assets.ps1 -Tag v0.2.0-rc1`
+Proof: `powershell -File scripts\windows\check-release-assets.ps1 -Tag v0.2.0-rc2` (was rc1; that run's upload was skipped behind the broken macOS job, owner chose rc2 on 2026-11-06)
 
 **C19** - `README.md` has a `Windows` section with a link to `/releases/latest`, the two asset name patterns, `NVIDIA` beside the CUDA edition, and `1.6 GB` (AC 15; was `1,6 GB`, changed with the owner's OK on 2026-11-06 because the README is in English)
 Proof: `powershell -File scripts\windows\check-readme.ps1`
