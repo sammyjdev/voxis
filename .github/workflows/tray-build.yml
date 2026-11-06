@@ -12,8 +12,8 @@ permissions:
 jobs:
   build:
     # macOS only: LARIS transcribes with mlx-whisper (Apple Silicon) and the
-    # tray drives macOS-specific TCC and menu-bar APIs. The Windows port has
-    # its own fork.
+    # tray drives macOS-specific TCC and menu-bar APIs. Windows is the
+    # `windows` job below.
     runs-on: macos-latest
     steps:
       # actions pinned by commit SHA (a moved tag can ship malicious code) -
@@ -62,3 +62,82 @@ jobs:
             apps/tray/src-tauri/target/release/bundle/dmg/*.dmg
             apps/tray/src-tauri/target/release/bundle/macos/*.app/**
           if-no-files-found: warn
+
+  # Windows: two installer editions, built from the native meetrec. CUDA for
+  # NVIDIA GPUs (carries cuBLAS), Vulkan for any GPU. Same identifier, so one
+  # replaces the other. See .specs/features/windows-installer/.
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [cuda, vulkan]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master @ 2026-07-17
+        with:
+          toolchain: stable
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # meetrec builds into C:\vxi<c|v> (MAX_PATH), outside what this caches
+          workspaces: apps/tray/src-tauri
+          key: ${{ matrix.edition }}
+
+      # whisper.cpp's Vulkan backend compiles its shaders with glslc, which
+      # ships in the LunarG SDK; both editions link ggml, only one uses it
+      - name: Vulkan SDK
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe -OutFile $env:RUNNER_TEMP\vulkan-sdk.exe
+          & $env:RUNNER_TEMP\vulkan-sdk.exe --root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install | Out-Host
+          "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
+          "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
+
+      # 13.3.1 is the newest CUDA the pinned action knows; the DLLs keep the
+      # cublas64_13 names the installer config lists
+      - uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        if: matrix.edition == 'cuda'
+        with:
+          cuda: '13.3.1'
+          method: local
+
+      - name: Install frontend deps
+        working-directory: apps/tray
+        run: npm install
+
+      - name: Build the ${{ matrix.edition }} installer
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { '' }
+          $buildArgs = @{ Edition = '${{ matrix.edition }}'; CudaArchs = '75;86;89;120' }
+          if ($version) { $buildArgs.Version = $version }
+          ./scripts/windows/build-installer.ps1 @buildArgs
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: voxis-windows-${{ matrix.edition }}
+          path: apps/tray/src-tauri/target/release/bundle/nsis/*_${{ matrix.edition }}-setup.exe
+          if-no-files-found: error
+
+  # On a tag, the two installers join the draft release the macOS job made.
+  windows-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: voxis-windows-*
+          merge-multiple: true
+          path: installers
+
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" installers/*.exe --clobber --repo "$GITHUB_REPOSITORY"

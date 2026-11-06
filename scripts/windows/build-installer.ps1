@@ -11,7 +11,9 @@ tray. Prints the path of the edition-named installer last.
 param(
     [Parameter(Mandatory)][ValidateSet('cuda', 'vulkan')][string]$Edition,
     # arches baked into the CUDA build; CI passes the release set
-    [string]$CudaArchs = '89'
+    [string]$CudaArchs = '89',
+    # the app and installer version; CI passes the tag without its leading v
+    [string]$Version
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
@@ -45,6 +47,12 @@ if ($Edition -eq 'cuda') {
         Copy-Item "$env:CUDA_PATH\bin\x64\$dll" "$bin\cuda\$dll" -Force
     }
     $extra = @('--config', 'src-tauri/tauri.cuda.conf.json')
+}
+if ($Version) {
+    $versionConf = Join-Path $tauri 'target\version.conf.json'
+    New-Item -ItemType Directory -Force (Split-Path $versionConf) | Out-Null
+    Set-Content $versionConf "{`"version`": `"$Version`"}" -Encoding ASCII
+    $extra += @('--config', $versionConf)
 }
 
 # the tray's own cargo build must not reuse the meetrec target dir

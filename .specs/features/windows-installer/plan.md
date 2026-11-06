@@ -163,7 +163,7 @@ The thinnest real path: installer, Start menu, tray, bundled `meetrec`, orb page
 
 | Assumption | Chosen default | Rationale | Confirmed? |
 | --- | --- | --- | --- |
-| cuBLAS may be redistributed | ship the two DLLs under NVIDIA's CUDA EULA redistribution terms, verified against the EULA text before go-live (open question 1) | the only way to run CUDA without the toolkit | n |
+| cuBLAS may be redistributed | ship the two DLLs under NVIDIA's CUDA EULA, Attachment A (open question 1, resolved) | the only way to run CUDA without the toolkit | n |
 | GPU architectures for the CUDA edition | `75;86;89;120` (Turing, Ampere, Ada, Blackwell) | covers the NVIDIA cards in use; each arch adds compile time and size | n |
 | model download size and source | only turbo f16 + Silero VAD, from Hugging Face at pinned commits | what both editions use today; q8 or large-v3 are not used | n |
 | owner's existing `tray.json` | untouched; the owner removes `miris_bin` and `laris_bin` to switch to the installed copy | an installer must not rewrite a user's config | n |
@@ -173,7 +173,7 @@ The thinnest real path: installer, Start menu, tray, bundled `meetrec`, orb page
 
 | # | Kind | Question | Until answered |
 | --- | --- | --- | --- |
-| 1 | blocks go-live | Does the CUDA 13.5 EULA list `cublas64_13.dll` and `cublasLt64_13.dll` as redistributable? | the CUDA installer cannot be published; the Vulkan edition can |
+| 1 | resolved 2026-11-06 | Does the CUDA 13.5 EULA list `cublas64_13.dll` and `cublasLt64_13.dll` as redistributable? | Yes: `EULA.txt` Attachment A lists "CUDA BLAS Library - Windows: cublas.dll, cublasLt.dll", version-named variants included; §1.1.2 asks for material added functionality and that only the app uses them, both true here |
 | 2 | open | Can a CUDA whisper.cpp build for four archs finish inside GitHub's 6-hour job limit with a cache? | measured on the first CI run; fallback is fewer archs |
 
 ## Observable
