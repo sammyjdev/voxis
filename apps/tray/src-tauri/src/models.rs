@@ -143,6 +143,13 @@ pub fn retry(app: &AppHandle) {
     std::thread::spawn(move || fetch_models(&app, &bin));
 }
 
+/// What quitting the tray stops: a model download still running, and the
+/// dictation daemon.
+pub fn quit(state: &AppState) {
+    state.fetch.stop();
+    state.daemon.lock().unwrap().stop();
+}
+
 /// The fetch child, held so quitting the tray can stop it: a download left
 /// running would race the next launch's fetch on the same `.part` file.
 #[derive(Default)]
@@ -152,8 +159,14 @@ pub struct FetchRun {
 }
 
 impl FetchRun {
-    /// Spawns `program args`, without a console window, and hands back its output.
+    /// Spawns `program args`, without a console window, and hands back its
+    /// output. Refused once the tray has stopped it: quitting wins a race
+    /// with a fetch that was about to start.
     pub fn start(&self, program: &str, args: &[&str]) -> std::io::Result<(Option<ChildStdout>, Option<ChildStderr>)> {
+        let mut slot = self.child.lock().unwrap();
+        if self.stopped() {
+            return Err(std::io::Error::other("the tray is quitting"));
+        }
         let mut cmd = Command::new(program);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
@@ -162,9 +175,8 @@ impl FetchRun {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let mut child = cmd.spawn()?;
-        self.stopped.store(false, Ordering::SeqCst);
         let pipes = (child.stdout.take(), child.stderr.take());
-        *self.child.lock().unwrap() = Some(child);
+        *slot = Some(child);
         Ok(pipes)
     }
 
@@ -174,8 +186,9 @@ impl FetchRun {
 
     /// Kills the child; its `wait` then returns at once.
     pub fn stop(&self) {
+        let mut slot = self.child.lock().unwrap();
         self.stopped.store(true, Ordering::SeqCst);
-        if let Some(c) = self.child.lock().unwrap().as_mut() {
+        if let Some(c) = slot.as_mut() {
             let _ = c.kill();
         }
     }
@@ -214,6 +227,49 @@ mod tests {
         assert_eq!(failed, Some("Baixar modelos de novo"));
         assert_eq!(retry_label(ModelState::Downloading(40)), None);
         assert_eq!(retry_label(ModelState::Ready), None);
+    }
+
+    /// A process that runs for about 30 s unless killed.
+    fn long_running() -> (&'static str, Vec<&'static str>) {
+        if cfg!(windows) {
+            ("ping", vec!["-n", "30", "127.0.0.1"])
+        } else {
+            ("sleep", vec!["30"])
+        }
+    }
+
+    #[test]
+    fn quitting_the_tray_stops_its_model_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState {
+            config: Default::default(),
+            daemon: Mutex::new(LarisDaemon::new(tmp.path().to_path_buf(), None)),
+            processing: AtomicBool::new(false),
+            menu_dirty: AtomicBool::new(false),
+            models: Mutex::new(ModelState::Downloading(10)),
+            fetch: FetchRun::default(),
+        };
+        let (program, args) = long_running();
+        let _pipes = state.fetch.start(program, &args).unwrap();
+        let started = std::time::Instant::now();
+
+        quit(&state);
+        let code = state.fetch.wait();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_ne!(code, Some(0));
+    }
+
+    #[test]
+    fn a_download_asked_for_after_quit_never_starts() {
+        let run = FetchRun::default();
+        run.stop();
+        let (program, args) = long_running();
+
+        let started = run.start(program, &args);
+
+        assert!(started.is_err());
+        assert!(!run.running());
     }
 
     #[test]

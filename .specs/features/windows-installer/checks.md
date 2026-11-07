@@ -3,7 +3,7 @@
 Profile: standard
 Plan: `.specs\features\windows-installer\plan.md`
 
-23 checks in 6 slices · 7 one-way doors · 2 open, of which 1 blocks go-live
+29 checks in 8 slices · 12 one-way doors · 3 open questions, all resolved
 
 Command shorthands used in the proofs:
 
@@ -125,7 +125,7 @@ Proof: `TRAY_TEST after_a_failed_download_the_menu_says_the_models_failed`
 
 ### PR review round 1 - findings the owner chose · 6 files · ~8k
 
-Done: C27-C29 green on 2026-11-06 (meetrec suite 25 passed, tray suite 58 passed)
+Done: C27-C29 green on 2026-11-06 (meetrec suite 25 passed, tray suite 60 passed; verification round 4 added the proofs through the quit path)
 
 **C27** - A model server that sends the headers and part of the body, then stops sending with the connection open, makes `models fetch` give up within the stall limit and exit `1`, with no file under the final name (PR review: download without a timeout)
 Proof: `MEETREC_TEST a_download_that_stops_sending_gives_up_and_exits_1`
@@ -133,8 +133,10 @@ Proof: `MEETREC_TEST a_download_that_stops_sending_gives_up_and_exits_1`
 **C28** - After a failed model download the tray menu offers `Baixar modelos de novo`; while downloading or ready it does not (PR review: no way to retry)
 Proof: `TRAY_TEST only_a_failed_download_offers_to_download_again`
 
-**C29** - Quitting stops a model download still running: its process ends within 5 s and does not report success (PR review: the fetch outlived the tray)
+**C29** - Quitting stops a model download still running: its process ends within 5 s and does not report success, and a download asked for after quitting never starts (PR review: the fetch outlived the tray)
 Proof: `TRAY_TEST quitting_stops_a_download_still_running`
+Proof: `TRAY_TEST quitting_the_tray_stops_its_model_download`
+Proof: `TRAY_TEST a_download_asked_for_after_quit_never_starts`
 
 ## Coverage
 

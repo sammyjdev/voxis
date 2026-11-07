@@ -448,8 +448,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
             if miris::snapshot(&sessions_dir(&state)).active.is_some() {
                 return;
             }
-            state.fetch.stop();
-            state.daemon.lock().unwrap().stop();
+            models::quit(&state);
             app.exit(0);
         }
         "retry_models" => models::retry(app),
