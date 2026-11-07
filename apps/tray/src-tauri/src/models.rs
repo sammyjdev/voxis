@@ -2,6 +2,11 @@
 //! shows its progress, and keeps dictation off until the models are there.
 
 use crate::laris::LarisDaemon;
+use crate::AppState;
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelState {
@@ -63,6 +68,129 @@ pub fn spawn_dictation(state: ModelState, daemon: &mut LarisDaemon) -> Result<bo
     daemon.spawn().map(|_| true)
 }
 
+/// Runs `meetrec models fetch`, feeding its progress into the tray state, then
+/// starts dictation or shows why it could not.
+pub fn fetch_models(app: &AppHandle, bin: &str) {
+    use std::io::BufRead;
+    let state = app.state::<AppState>();
+    let (stdout, stderr) = match state.fetch.start(bin, &["models", "fetch"]) {
+        Ok(pipes) => pipes,
+        Err(e) => {
+            crate::tray_log(&format!("models fetch: {bin}: {e}"));
+            *state.models.lock().unwrap() = ModelState::Failed;
+            state.menu_dirty.store(true, Ordering::SeqCst);
+            crate::notify(app, "Falha ao baixar modelos: sem conexão; tente de novo");
+            return;
+        }
+    };
+    let err_log = std::thread::spawn(move || {
+        if let Some(e) = stderr {
+            for line in std::io::BufReader::new(e).lines().map_while(Result::ok) {
+                crate::tray_log(&format!("models fetch: {line}"));
+            }
+        }
+    });
+    if let Some(out) = stdout {
+        let mut last = None;
+        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+            if let Some(p) = progress_pct(&line) {
+                if last != Some(p) {
+                    last = Some(p);
+                    *state.models.lock().unwrap() = ModelState::Downloading(p);
+                }
+            } else {
+                crate::tray_log(&format!("models fetch: {line}"));
+            }
+        }
+    }
+    let code = state.fetch.wait();
+    let _ = err_log.join();
+    if state.fetch.stopped() {
+        return; // the tray is quitting
+    }
+    match outcome(code) {
+        Outcome::StartDictation => {
+            *state.models.lock().unwrap() = ModelState::Ready;
+            if !crate::external_daemon_alive() {
+                if let Err(e) = spawn_dictation(ModelState::Ready, &mut state.daemon.lock().unwrap()) {
+                    crate::notify(app, &format!("Falha ao iniciar ditado: {e}"));
+                }
+            }
+        }
+        Outcome::Toast(msg) => {
+            *state.models.lock().unwrap() = ModelState::Failed;
+            crate::notify(app, msg);
+        }
+    }
+    state.menu_dirty.store(true, Ordering::SeqCst);
+}
+
+/// The menu row that downloads the models again, shown only after a failure.
+pub fn retry_label(state: ModelState) -> Option<&'static str> {
+    (state == ModelState::Failed).then_some("Baixar modelos de novo")
+}
+
+/// The menu's "Baixar modelos de novo": fetches again unless one is running.
+pub fn retry(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut models = state.models.lock().unwrap();
+    if *models != ModelState::Failed || state.fetch.running() {
+        return;
+    }
+    *models = ModelState::Downloading(0);
+    drop(models);
+    let (app, bin) = (app.clone(), state.config.laris_bin.clone());
+    std::thread::spawn(move || fetch_models(&app, &bin));
+}
+
+/// The fetch child, held so quitting the tray can stop it: a download left
+/// running would race the next launch's fetch on the same `.part` file.
+#[derive(Default)]
+pub struct FetchRun {
+    child: Mutex<Option<Child>>,
+    stopped: AtomicBool,
+}
+
+impl FetchRun {
+    /// Spawns `program args`, without a console window, and hands back its output.
+    pub fn start(&self, program: &str, args: &[&str]) -> std::io::Result<(Option<ChildStdout>, Option<ChildStderr>)> {
+        let mut cmd = Command::new(program);
+        cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let mut child = cmd.spawn()?;
+        self.stopped.store(false, Ordering::SeqCst);
+        let pipes = (child.stdout.take(), child.stderr.take());
+        *self.child.lock().unwrap() = Some(child);
+        Ok(pipes)
+    }
+
+    pub fn running(&self) -> bool {
+        self.child.lock().unwrap().is_some()
+    }
+
+    /// Kills the child; its `wait` then returns at once.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(c) = self.child.lock().unwrap().as_mut() {
+            let _ = c.kill();
+        }
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Waits for the child to exit: its exit code, None when killed or never started.
+    pub fn wait(&self) -> Option<i32> {
+        let child = self.child.lock().unwrap().take();
+        child.and_then(|mut c| c.wait().ok()?.code())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +205,34 @@ mod tests {
         assert_eq!(outcome(Some(0)), Outcome::StartDictation);
         assert_eq!(outcome(Some(1)), Outcome::Toast("Falha ao baixar modelos: sem conexão; tente de novo"));
         assert_eq!(outcome(Some(2)), Outcome::Toast("Falha ao baixar modelos: hash diferente; tente de novo"));
+    }
+
+    #[test]
+    fn only_a_failed_download_offers_to_download_again() {
+        let failed = retry_label(ModelState::Failed);
+
+        assert_eq!(failed, Some("Baixar modelos de novo"));
+        assert_eq!(retry_label(ModelState::Downloading(40)), None);
+        assert_eq!(retry_label(ModelState::Ready), None);
+    }
+
+    #[test]
+    fn quitting_stops_a_download_still_running() {
+        let run = FetchRun::default();
+        #[cfg(windows)]
+        let (program, args) = ("ping", ["-n", "30", "127.0.0.1"]);
+        #[cfg(not(windows))]
+        let (program, args) = ("sleep", ["30", "", ""]);
+        let args: Vec<&str> = args.into_iter().filter(|a| !a.is_empty()).collect();
+        let _pipes = run.start(program, &args).unwrap();
+        let started = std::time::Instant::now();
+
+        run.stop();
+        let code = run.wait();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_ne!(code, Some(0));
+        assert!(!run.running());
     }
 
     #[test]

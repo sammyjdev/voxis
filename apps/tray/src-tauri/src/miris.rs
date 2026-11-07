@@ -320,6 +320,19 @@ fn run_cli(miris_bin: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The toast after a meeting is processed, from the note the CLI returned:
+/// a Google Doc shortcut, a local ata.md, or only the transcript.
+pub fn note_message(note: &std::path::Path) -> String {
+    match note.file_name().and_then(|n| n.to_str()) {
+        Some("ata.md") => format!("Ata salva em {}", note.display()),
+        Some("transcript.md") => {
+            r"Ata não gerada: configure anthropic_api_key em %APPDATA%\voxis\secrets.toml".to_owned()
+        }
+        Some(name) => format!("Nota salva: {name}"),
+        None => format!("Nota salva: {}", note.display()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +546,35 @@ mod tests {
         );
         assert!(stop_outcome("idle\n").is_err());
     }
-}
 
+    // Windows paths: meetrec, which writes these notes, runs only there
+    #[cfg(windows)]
+    #[test]
+    fn a_meeting_kept_locally_names_its_ata_in_the_toast() {
+        let note = std::path::PathBuf::from(r"C:\Users\x\.miris\sessions\20261106-101500\ata.md");
+
+        let msg = note_message(&note);
+
+        assert_eq!(msg, r"Ata salva em C:\Users\x\.miris\sessions\20261106-101500\ata.md");
+    }
+
+    // Windows paths: meetrec, which writes these notes, runs only there
+    #[cfg(windows)]
+    #[test]
+    fn a_meeting_without_a_key_says_where_to_put_it() {
+        let note = std::path::PathBuf::from(r"C:\Users\x\.miris\sessions\20261106-101500\transcript.md");
+
+        let msg = note_message(&note);
+
+        assert_eq!(msg, r"Ata não gerada: configure anthropic_api_key em %APPDATA%\voxis\secrets.toml");
+    }
+
+    // Windows paths: meetrec, which writes these notes, runs only there
+    #[cfg(windows)]
+    #[test]
+    fn a_meeting_published_to_drive_names_its_note() {
+        let note = std::path::PathBuf::from(r"C:\s\2026-11-06 10-15 - Alinhamento.url");
+
+        assert_eq!(note_message(&note), "Nota salva: 2026-11-06 10-15 - Alinhamento.url");
+    }
+}

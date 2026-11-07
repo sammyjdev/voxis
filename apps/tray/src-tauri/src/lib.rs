@@ -35,6 +35,8 @@ pub struct AppState {
     /// Windows installs fetch the whisper models on first run; dictation
     /// waits for them.
     pub models: Mutex<models::ModelState>,
+    /// the `meetrec models fetch` child, stopped on quit
+    pub fetch: models::FetchRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -209,19 +211,6 @@ fn take_snapshot(state: &AppState) -> Snapshot {
     }
 }
 
-/// The toast after a meeting is processed, from the note the CLI returned:
-/// a Google Doc shortcut, a local ata.md, or only the transcript.
-fn note_message(note: &std::path::Path) -> String {
-    match note.file_name().and_then(|n| n.to_str()) {
-        Some("ata.md") => format!("Ata salva em {}", note.display()),
-        Some("transcript.md") => {
-            r"Ata não gerada: configure anthropic_api_key em %APPDATA%\voxis\secrets.toml".to_owned()
-        }
-        Some(name) => format!("Nota salva: {name}"),
-        None => format!("Nota salva: {}", note.display()),
-    }
-}
-
 /// Hover text of the tray icon: how long the meeting has been recording.
 fn tray_tooltip(recording_session: Option<&str>, now: chrono::DateTime<chrono::Local>) -> String {
     match recording_session.and_then(|id| recording_clock(id, now)) {
@@ -232,66 +221,6 @@ fn tray_tooltip(recording_session: Option<&str>, now: chrono::DateTime<chrono::L
 
 /// `<meetrec> models fetch`: progress goes to the tooltip and the menu, and
 /// a successful fetch starts dictation.
-fn fetch_models(app: &AppHandle, bin: &str) {
-    use std::io::BufRead;
-    let state = app.state::<AppState>();
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(["models", "fetch"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            tray_log(&format!("models fetch: {bin}: {e}"));
-            *state.models.lock().unwrap() = models::ModelState::Failed;
-            state.menu_dirty.store(true, Ordering::SeqCst);
-            notify(app, "Falha ao baixar modelos: sem conexão; tente de novo");
-            return;
-        }
-    };
-    let stderr = child.stderr.take();
-    let err_log = std::thread::spawn(move || {
-        if let Some(e) = stderr {
-            for line in std::io::BufReader::new(e).lines().map_while(Result::ok) {
-                tray_log(&format!("models fetch: {line}"));
-            }
-        }
-    });
-    if let Some(out) = child.stdout.take() {
-        let mut last = None;
-        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-            if let Some(p) = models::progress_pct(&line) {
-                if last != Some(p) {
-                    last = Some(p);
-                    *state.models.lock().unwrap() = models::ModelState::Downloading(p);
-                }
-            } else {
-                tray_log(&format!("models fetch: {line}"));
-            }
-        }
-    }
-    let code = child.wait().ok().and_then(|s| s.code());
-    let _ = err_log.join();
-    match models::outcome(code) {
-        models::Outcome::StartDictation => {
-            *state.models.lock().unwrap() = models::ModelState::Ready;
-            if !external_daemon_alive() {
-                if let Err(e) = models::spawn_dictation(models::ModelState::Ready, &mut state.daemon.lock().unwrap()) {
-                    notify(app, &format!("Falha ao iniciar ditado: {e}"));
-                }
-            }
-        }
-        models::Outcome::Toast(msg) => {
-            *state.models.lock().unwrap() = models::ModelState::Failed;
-            notify(app, msg);
-        }
-    }
-    state.menu_dirty.store(true, Ordering::SeqCst);
-}
-
 /// ~/.voxis/logs/tray-<date>.log: the tray has no console on Windows.
 fn tray_log(msg: &str) {
     let Some(home) = dirs::home_dir() else { return };
@@ -350,6 +279,9 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
         None::<&str>,
     )?;
     items.push(Box::new(dictation));
+    if let Some(label) = models::retry_label(snap.models) {
+        items.push(Box::new(MenuItem::with_id(app, "retry_models", label, true, None::<&str>)?));
+    }
     let hands_free = CheckMenuItem::with_id(
         app, "hands_free", "Hands-free",
         hands_free_enabled(snap.laris_alive, snap.laris_ready),
@@ -516,9 +448,11 @@ fn handle_menu(app: &AppHandle, id: &str) {
             if miris::snapshot(&sessions_dir(&state)).active.is_some() {
                 return;
             }
+            state.fetch.stop();
             state.daemon.lock().unwrap().stop();
             app.exit(0);
         }
+        "retry_models" => models::retry(app),
         "settings" => commands::show_settings_window(app),
         "miris_start" => {
             // off the menu thread: the miris CLI takes seconds just to import
@@ -544,7 +478,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
             let bin = state.config.miris_bin.clone();
             std::thread::spawn(move || {
                 let msg = match miris::stop(&bin) {
-                    Ok(miris::StopOutcome::Note(note)) => note_message(&note),
+                    Ok(miris::StopOutcome::Note(note)) => miris::note_message(&note),
                     Ok(miris::StopOutcome::Interrupted) => {
                         "Gravação interrompida: recupere pelo menu".to_owned()
                     }
@@ -581,7 +515,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
                     }
                 } else {
                     match result {
-                        Ok(Some(note)) => note_message(&note),
+                        Ok(Some(note)) => miris::note_message(&note),
                         Ok(None) => unreachable!("process maps to Some"),
                         Err(e) => format!("Falha ao processar reunião: {e}"),
                     }
@@ -686,6 +620,7 @@ pub fn run() {
                 processing: AtomicBool::new(false),
                 menu_dirty: AtomicBool::new(false),
                 models: Mutex::new(model_state),
+                fetch: models::FetchRun::default(),
             });
 
             // The model costs ~3.6s and 276MB to load. Loading it once per
@@ -707,7 +642,7 @@ pub fn run() {
 
             if let Some(bin) = fetch_with {
                 let handle = app.handle().clone();
-                std::thread::spawn(move || fetch_models(&handle, &bin));
+                std::thread::spawn(move || models::fetch_models(&handle, &bin));
             }
 
             let snap = take_snapshot(&app.state::<AppState>());
@@ -878,31 +813,6 @@ mod tests {
         let tip = tray_tooltip(Some("20261105-210228"), now);
 
         assert_eq!(tip, "VOXIS - gravando reunião há 01:12:34");
-    }
-
-    #[test]
-    fn a_meeting_kept_locally_names_its_ata_in_the_toast() {
-        let note = PathBuf::from(r"C:\Users\x\.miris\sessions\20261106-101500\ata.md");
-
-        let msg = note_message(&note);
-
-        assert_eq!(msg, r"Ata salva em C:\Users\x\.miris\sessions\20261106-101500\ata.md");
-    }
-
-    #[test]
-    fn a_meeting_without_a_key_says_where_to_put_it() {
-        let note = PathBuf::from(r"C:\Users\x\.miris\sessions\20261106-101500\transcript.md");
-
-        let msg = note_message(&note);
-
-        assert_eq!(msg, r"Ata não gerada: configure anthropic_api_key em %APPDATA%\voxis\secrets.toml");
-    }
-
-    #[test]
-    fn a_meeting_published_to_drive_names_its_note() {
-        let note = PathBuf::from(r"C:\s\2026-11-06 10-15 - Alinhamento.url");
-
-        assert_eq!(note_message(&note), "Nota salva: 2026-11-06 10-15 - Alinhamento.url");
     }
 
     #[test]
