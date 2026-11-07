@@ -123,14 +123,27 @@ Proof: `MEETREC_TEST google_counts_as_set_up_only_with_both_its_files`
 **C26** - After a failed model download, the tray menu shows the disabled item `Ditado indisponível: falha ao baixar modelos` (AC 11, plan Observable menu failure copy)
 Proof: `TRAY_TEST after_a_failed_download_the_menu_says_the_models_failed`
 
+### PR review round 1 - findings the owner chose · 6 files · ~8k
+
+Done: C27-C29 green on 2026-11-06 (meetrec suite 25 passed, tray suite 58 passed)
+
+**C27** - A model server that sends the headers and part of the body, then stops sending with the connection open, makes `models fetch` give up within the stall limit and exit `1`, with no file under the final name (PR review: download without a timeout)
+Proof: `MEETREC_TEST a_download_that_stops_sending_gives_up_and_exits_1`
+
+**C28** - After a failed model download the tray menu offers `Baixar modelos de novo`; while downloading or ready it does not (PR review: no way to retry)
+Proof: `TRAY_TEST only_a_failed_download_offers_to_download_again`
+
+**C29** - Quitting stops a model download still running: its process ends within 5 s and does not report success (PR review: the fetch outlived the tray)
+Proof: `TRAY_TEST quitting_stops_a_download_still_running`
+
 ## Coverage
 
 | Set (size) | Member -> proof | Unproven |
 | --- | --- | --- |
 | model lookup places (4) | `VOXIS_MODELS` C7 · `%LOCALAPPDATA%\voxis\models` C7 · bench cache C7 · none found C7 (table-driven over all 4, plus the one-file-only skip) | - |
-| `models fetch` exits (3) | `0` C8, C12 · `1` C10, C11 · `2` C9 | - |
+| `models fetch` exits (3) | `0` C8, C12 · `1` C10, C11, C27 · `2` C9 | - |
 | tray reaction to fetch (4) | progress line C13 · exit `0` C13 · exit `1` C13 · exit `2` C13 | - |
-| dictation menu row (3 states) | downloading C14 · failed C26 · ready (no row) C14 | - |
+| dictation menu row (3 states) | downloading C14 · failed C26 and retry row C28 · ready (no row) C14, C28 | - |
 | editions (2) | `cuda` C1, C5, C6 · `vulkan` C15, C16 | - |
 | meetrec path resolution (2 sources) | unset -> sidecar C2 · set in `tray.json` C3 | - |
 | GitHub release asset statuses (2) | `200` C18 · `404` C18 (script exits `1` on a missing asset) | - |
