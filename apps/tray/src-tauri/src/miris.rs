@@ -142,8 +142,9 @@ fn ps_command(pid: i32) -> String {
         true,
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
+    // NUL-joined: an argument such as C:\Users\Sam Doe\... keeps its spaces
     sys.process(pid)
-        .map(|p| p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "))
+        .map(|p| p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join("\0"))
         .unwrap_or_default()
 }
 
@@ -158,10 +159,16 @@ fn ps_command(pid: i32) -> String {
 
 /// The process must name both the marker module and this exact session dir,
 /// mirroring the Python identity check: a recycled PID never looks alive.
+/// The Windows reader gives the argv elements NUL-joined, compared element by
+/// element; `ps` output (macOS, Linux) is split on whitespace as before.
 fn command_matches(command: &str, marker: &str, dir: &Path) -> bool {
+    let tokens: Vec<&str> = if command.contains('\0') {
+        command.split('\0').collect()
+    } else {
+        command.split_whitespace().collect()
+    };
     // compared as paths: on Windows "C:\x/.miris" and "C:\x\.miris" are one dir
-    command.split_whitespace().any(|t| t == marker)
-        && command.split_whitespace().any(|t| Path::new(t) == dir)
+    tokens.iter().any(|t| *t == marker) && tokens.iter().any(|t| Path::new(t) == dir)
 }
 
 fn derive_state(
@@ -576,5 +583,42 @@ mod tests {
         let note = std::path::PathBuf::from(r"C:\s\2026-11-06 10-15 - Alinhamento.url");
 
         assert_eq!(note_message(&note), "Nota salva: 2026-11-06 10-15 - Alinhamento.url");
+    }
+
+    // a profile such as C:\Users\Sam Doe: the session folder holds a space (F23)
+    #[cfg(windows)]
+    #[test]
+    fn a_live_recorder_under_a_profile_with_spaces_shows_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("Sam Doe").join(".miris").join("sessions");
+        let dir = sessions.join("20261107-143200");
+        // a stand-in whose argv names the marker and the spaced session dir
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep 20;#", "miris.recorder"])
+            .arg(&dir)
+            .spawn()
+            .unwrap();
+        write_manifest(&sessions, "20261107-143200", "recording", Some(child.id() as i32));
+
+        let snap = snapshot(&sessions);
+
+        child.kill().unwrap();
+        assert_eq!(snap.active.map(|v| v.derived_state), Some(SessionState::Recording));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_reused_pid_with_a_different_argv_is_not_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("Sam Doe").join(".miris").join("sessions");
+        write_manifest(&sessions, "20261107-143200", "recording", Some(4242));
+
+        // the pid now belongs to an editor opened on an unrelated file
+        let snap = snapshot_with_command_reader(&sessions, |_, _| {
+            ["C:\\Windows\\notepad.exe", "C:\\Users\\Sam Doe\\notas.txt"].join("\0")
+        });
+
+        assert!(snap.active.is_none());
+        assert_eq!(snap.pending.unwrap().derived_state, SessionState::Interrupted);
     }
 }

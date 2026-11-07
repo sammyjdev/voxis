@@ -104,10 +104,172 @@ fn spawn_child(marker: &str, dir: &Path, detached: bool) -> Result<std::process:
     cmd.spawn().map_err(|e| format!("spawn {marker}: {e}"))
 }
 
-fn start() -> Result<(), String> {
-    if let Some(dir) = newest_with_state(&["starting", "recording", "stopping", "processing"]) {
-        return Err(format!("a session is already active: {}", dir.display()));
+/// Whether the process a session names is alive as its owner, and ending one.
+pub trait Owners {
+    fn live(&self, pid: Option<u64>, marker: &str, dir: &Path) -> bool;
+    /// Ends the process; true when the end was requested.
+    fn end(&self, pid: u64) -> bool;
+}
+
+/// A process as `sysinfo` reads it: its image and its argv elements.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcInfo {
+    pub exe: Option<PathBuf>,
+    pub args: Vec<String>,
+}
+
+pub fn process_identity(pid: u32) -> Option<ProcInfo> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let pid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_exe(UpdateKind::Always),
+    );
+    let p = sys.process(pid)?;
+    Some(ProcInfo {
+        exe: p.exe().map(Path::to_path_buf),
+        args: p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect(),
+    })
+}
+
+/// The owner of a session: this `meetrec` image, run with exactly the marker
+/// and the session folder as its arguments, compared element by element (a
+/// profile path with spaces stays one element), the folder as a path.
+fn is_owner(info: &ProcInfo, me: &Path, marker: &str, dir: &Path) -> bool {
+    let same_image = info.exe.as_deref().is_some_and(|exe| {
+        exe == me || matches!((std::fs::canonicalize(exe), std::fs::canonicalize(me)), (Ok(a), Ok(b)) if a == b)
+    });
+    same_image && info.args.len() == 3 && info.args[1] == marker && Path::new(&info.args[2]) == dir
+}
+
+/// The real processes of this machine.
+struct SysOwners;
+
+impl Owners for SysOwners {
+    fn live(&self, pid: Option<u64>, marker: &str, dir: &Path) -> bool {
+        let Ok(me) = std::env::current_exe() else { return false };
+        pid.and_then(|p| u32::try_from(p).ok())
+            .and_then(process_identity)
+            .is_some_and(|info| is_owner(&info, &me, marker, dir))
     }
+
+    fn end(&self, pid: u64) -> bool {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let Ok(pid) = u32::try_from(pid).map(Pid::from_u32) else { return false };
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
+        let ended = sys.process(pid).is_some_and(|p| p.kill());
+        // TerminateProcess returns before the process is gone
+        for _ in 0..30 {
+            sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
+            if sys.process(pid).is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        ended
+    }
+}
+
+/// The pid and marker of the process that owns a session in `state`.
+fn owner_of(m: &Value) -> Option<(Option<u64>, &'static str)> {
+    match m["state"].as_str()? {
+        "starting" | "recording" | "stopping" => Some((m["recorder_pid"].as_u64(), "miris.recorder")),
+        "processing" => Some((m["processing_pid"].as_u64(), "miris.pipeline")),
+        _ => None,
+    }
+}
+
+fn session_dirs_newest_first(sessions: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(sessions)
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect())
+        .unwrap_or_default();
+    dirs.sort();
+    dirs.reverse();
+    dirs
+}
+
+/// Whether a new session may start: refused while an active session has a
+/// live owner; an active session whose owner died is settled first, keeping
+/// every file (recorder -> interrupted, pipeline -> captured, `owner_died`).
+fn admit(sessions: &Path, owners: &dyn Owners) -> Result<(), String> {
+    for dir in session_dirs_newest_first(sessions) {
+        let Ok(m) = read(&dir) else { continue };
+        let Some((pid, marker)) = owner_of(&m) else { continue };
+        if owners.live(pid, marker, &dir) {
+            return Err(format!("a session is already active: {}", dir.display()));
+        }
+        if marker == "miris.recorder" {
+            fail(&dir, "interrupted", "owner_died", "the recorder ended without finishing the recording");
+        } else {
+            fail(&dir, "captured", "owner_died", "the pipeline ended before the note; process retries it");
+        }
+    }
+    Ok(())
+}
+
+/// Waits for the recorder to report `recording`. A recorder that exits
+/// before that fails the session with `recorder_error`, so no session is
+/// left in `starting`.
+fn wait_until_recording(dir: &Path, mut exited: impl FnMut() -> bool, tries: u32, every: std::time::Duration) -> Result<(), String> {
+    let tail = || {
+        let log = std::fs::read_to_string(dir.join("recorder.log")).unwrap_or_default();
+        log.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("no output").to_owned()
+    };
+    for _ in 0..tries {
+        std::thread::sleep(every);
+        match read(dir)?["state"].as_str() {
+            Some("recording") => {
+                println!("recording: {}", dir.display());
+                return Ok(());
+            }
+            Some("failed") | Some("interrupted") => return Err(format!("recorder did not start: {}", tail())),
+            _ => {}
+        }
+        if exited() {
+            let e = format!("recorder exited before recording: {}", tail());
+            fail(dir, "failed", "recorder_error", &e);
+            return Err(e);
+        }
+    }
+    Err(format!("recorder did not start: {}", tail()))
+}
+
+/// `process` and `recover` change nothing while the session's owner lives.
+fn guard_inactive(dir: &Path, owners: &dyn Owners) -> Result<(), String> {
+    let m = read(dir)?;
+    match owner_of(&m) {
+        Some((pid, marker)) if owners.live(pid, marker, dir) => Err(format!("session is active: {}", dir.display())),
+        _ => Ok(()),
+    }
+}
+
+/// `transcript.md` stands for this session's audio when the manifest says
+/// it is ready, it is not empty, and it is newer than both recordings.
+fn transcript_fresh(dir: &Path, transcript_ready: bool) -> bool {
+    let modified = |f: &str| std::fs::metadata(dir.join(f)).and_then(|m| m.modified()).ok();
+    let Some(t) = modified("transcript.md") else { return false };
+    let not_empty = std::fs::metadata(dir.join("transcript.md")).is_ok_and(|m| m.len() > 0);
+    transcript_ready && not_empty && ["mic.wav", "system.wav"].iter().all(|w| modified(w).is_none_or(|m| t > m))
+}
+
+/// Milliseconds since the epoch, for the meeting latency marks.
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
+/// The transcript is on disk: the manifest says so, and the meeting latency
+/// mark `transcript_ready <unix_ms>` goes to the output.
+fn transcribed(dir: &Path, out: &mut dyn std::io::Write) -> Result<(), String> {
+    update(dir, |m| m["transcript_ready"] = json!(true))?;
+    let _ = writeln!(out, "transcript_ready {}", unix_ms());
+    Ok(())
+}
+
+fn start() -> Result<(), String> {
+    admit(&sessions_dir(), &SysOwners)?;
     let id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let dir = create_session_dir(&sessions_dir(), &id)?;
     let t = now();
@@ -116,22 +278,10 @@ fn start() -> Result<(), String> {
         "recorder_pid": null, "processing_pid": null, "channels": {"mic": null, "system": null},
         "error": null, "note_path": null, "transcript_ready": false,
     }))?;
-    let child = spawn_child("miris.recorder", &dir, true)?;
+    let mut child = spawn_child("miris.recorder", &dir, true)?;
     update(&dir, |m| m["recorder_pid"] = json!(child.id()))?;
     // opening WASAPI takes about a second
-    for _ in 0..100 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        match read(&dir)?["state"].as_str() {
-            Some("recording") => {
-                println!("recording: {}", dir.display());
-                return Ok(());
-            }
-            Some("failed") | Some("interrupted") => break,
-            _ => {}
-        }
-    }
-    let log = std::fs::read_to_string(dir.join("recorder.log")).unwrap_or_default();
-    Err(format!("recorder did not start: {}", log.lines().last().unwrap_or("no output")))
+    wait_until_recording(&dir, || matches!(child.try_wait(), Ok(Some(_))), 100, std::time::Duration::from_millis(100))
 }
 
 /// A recorder that failed: `failed`, with `disk_write_error` when a track
@@ -169,14 +319,18 @@ fn recorder(dir: &Path) -> Result<(), String> {
 }
 
 fn pipeline(dir: &Path) -> Result<PathBuf, String> {
+    let ready = read(dir)?["transcript_ready"].as_bool().unwrap_or(false);
     update(dir, |m| {
         m["state"] = json!("processing");
         m["processing_pid"] = json!(std::process::id());
         m["error"] = Value::Null;
     })?;
-    let (model, vad) = super::models()?;
-    super::transcribe(dir, &model.to_string_lossy(), &vad.to_string_lossy(), "pt");
-    update(dir, |m| m["transcript_ready"] = json!(true))?;
+    // a retry keeps a transcript that already covers both recordings
+    if !transcript_fresh(dir, ready) {
+        let (model, vad) = super::models()?;
+        super::transcribe(dir, &model.to_string_lossy(), &vad.to_string_lossy(), "pt");
+    }
+    transcribed(dir, &mut std::io::stdout())?;
     let ata = super::minutes::run(dir)?;
     finish(dir, ata)
 }
@@ -225,17 +379,47 @@ fn newest_with_state(states: &[&str]) -> Option<PathBuf> {
 
 fn stop() -> Result<(), String> {
     let dir = newest_with_state(&["recording", "starting"]).ok_or("no recording session")?;
-    update(&dir, |m| m["state"] = json!("stopping"))?;
+    stop_with(&dir, &SysOwners, 600, std::time::Duration::from_millis(100), &mut std::io::stdout(), run_pipeline)
+}
+
+/// `stop` on `dir`: the stop file only for a verified recorder; `tries`
+/// polls `every` apart for `captured`, then `stopped <unix_ms>` and the
+/// pipeline. A recorder that never finishes is ended (identity checked
+/// again) and the session marked `interrupted`; one that cannot be ended
+/// keeps `stopping`, so `start` keeps refusing.
+fn stop_with(
+    dir: &Path,
+    owners: &dyn Owners,
+    tries: u32,
+    every: std::time::Duration,
+    out: &mut dyn std::io::Write,
+    pipeline: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let pid = read(dir)?["recorder_pid"].as_u64();
+    if !owners.live(pid, "miris.recorder", dir) {
+        fail(dir, "interrupted", "owner_died", "the recorder ended without finishing the recording");
+        let _ = writeln!(out, "recording interrupted: {}", dir.display());
+        return Ok(());
+    }
+    update(dir, |m| m["state"] = json!("stopping"))?;
     std::fs::write(dir.join("stop"), b"").map_err(|e| e.to_string())?;
     // the recorder flips the manifest to captured once both WAVs are final
-    for _ in 0..600 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if read(&dir)?["state"] == "captured" {
-            return run_pipeline(&dir);
+    for _ in 0..tries {
+        std::thread::sleep(every);
+        if read(dir)?["state"] == "captured" {
+            let _ = writeln!(out, "stopped {}", unix_ms());
+            let _ = out.flush();
+            return pipeline(dir);
         }
     }
-    fail(&dir, "interrupted", "recorder_timeout", "recorder did not finish within 60 s");
-    println!("recording interrupted: {}", dir.display());
+    if let Some(p) = pid.filter(|_| owners.live(pid, "miris.recorder", dir)) {
+        owners.end(p);
+    }
+    if owners.live(pid, "miris.recorder", dir) {
+        return Err(format!("recorder did not stop; owner still live: {}", dir.display()));
+    }
+    fail(dir, "interrupted", "recorder_timeout", "recorder did not finish within 60 s; stop ended it");
+    let _ = writeln!(out, "recording interrupted: {}", dir.display());
     Ok(())
 }
 
@@ -274,8 +458,12 @@ pub fn cli(cmd: &str, args: &[String]) -> i32 {
     let result = match cmd {
         "start" => start(),
         "stop" => stop(),
-        "process" => arg(0).and_then(session_dir).and_then(|d| run_pipeline(&d)),
+        "process" => arg(0).and_then(session_dir).and_then(|d| {
+            guard_inactive(&d, &SysOwners)?;
+            run_pipeline(&d)
+        }),
         "recover" => arg(0).and_then(session_dir).and_then(|d| {
+            guard_inactive(&d, &SysOwners)?;
             for f in ["mic.wav", "system.wav"] {
                 if d.join(f).exists() {
                     repair_wav(&d.join(f))?;
@@ -431,5 +619,298 @@ mod tests {
         repair_wav(&path).unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    // ------------------------------------------------------------ S3 owners (F19, F23, AC 12-17, 85, 86)
+
+    /// Owners whose liveness the test decides; `end` kills only when allowed.
+    struct Fake {
+        live: std::cell::Cell<bool>,
+        can_end: bool,
+    }
+
+    impl Owners for Fake {
+        fn live(&self, _: Option<u64>, _: &str, _: &Path) -> bool {
+            self.live.get()
+        }
+        fn end(&self, _: u64) -> bool {
+            if self.can_end {
+                self.live.set(false);
+            }
+            self.can_end
+        }
+    }
+
+    fn alive() -> Fake {
+        Fake { live: std::cell::Cell::new(true), can_end: true }
+    }
+
+    fn dead() -> Fake {
+        Fake { live: std::cell::Cell::new(false), can_end: true }
+    }
+
+    /// A schema 1 manifest in `sessions/<id>` with a recording beside it.
+    fn session_in(sessions: &Path, id: &str, state: &str, recorder: Option<u64>, pipeline: Option<u64>) -> PathBuf {
+        let dir = sessions.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, &json!({
+            "schema_version": 1, "session_id": id, "state": state, "created_at": "x", "updated_at": "x",
+            "recorder_pid": recorder, "processing_pid": pipeline, "channels": {"mic": null, "system": null},
+            "error": null, "note_path": null, "transcript_ready": false,
+        }))
+        .unwrap();
+        std::fs::write(dir.join("mic.wav"), b"audio").unwrap();
+        dir
+    }
+
+    #[test]
+    fn start_refuses_while_the_newest_active_session_has_a_live_owner() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-143200", "recording", Some(4242), None);
+
+        let e = admit(sessions.path(), &alive()).unwrap_err();
+
+        assert_eq!(e, format!("a session is already active: {}", dir.display()));
+        assert_eq!(read(&dir).unwrap()["state"], "recording");
+        assert_eq!(std::fs::read_dir(sessions.path()).unwrap().count(), 1, "nothing created");
+    }
+
+    #[test]
+    fn a_dead_recorder_is_marked_interrupted_with_owner_died_and_a_new_session_starts() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dirs: Vec<PathBuf> = ["starting", "recording", "stopping"]
+            .iter()
+            .enumerate()
+            .map(|(i, st)| session_in(sessions.path(), &format!("20261107-14320{i}"), st, Some(4242), None))
+            .collect();
+
+        admit(sessions.path(), &dead()).unwrap();
+        let new = create_session_dir(sessions.path(), "20261107-143300");
+
+        for d in &dirs {
+            let m = read(d).unwrap();
+            assert_eq!(m["state"], "interrupted", "{}", d.display());
+            assert_eq!(m["error"]["code"], "owner_died");
+            assert_eq!(std::fs::read(d.join("mic.wav")).unwrap(), b"audio");
+        }
+        assert!(new.is_ok());
+    }
+
+    #[test]
+    fn a_pid_reused_by_another_program_is_not_a_live_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("20261107-143200");
+        let me = std::env::current_exe().unwrap();
+        let notepad = ProcInfo {
+            exe: Some(PathBuf::from(r"C:\Windows\System32\notepad.exe")),
+            args: vec!["notepad.exe".into(), "miris.recorder".into(), dir.to_string_lossy().into_owned()],
+        };
+        let mut child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep 20;#", "miris.recorder"])
+            .arg(&dir)
+            .spawn()
+            .unwrap();
+
+        let live = SysOwners.live(Some(child.id() as u64), "miris.recorder", &dir);
+
+        let _ = child.kill();
+        assert!(!is_owner(&notepad, &me, "miris.recorder", &dir));
+        assert!(!live, "a process that is not this meetrec never owns a session");
+    }
+
+    #[test]
+    fn a_dead_pipeline_puts_its_session_back_to_captured() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-143200", "processing", None, Some(4242));
+
+        admit(sessions.path(), &dead()).unwrap();
+
+        let m = read(&dir).unwrap();
+        assert_eq!(m["state"], "captured");
+        assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), b"audio");
+    }
+
+    #[test]
+    fn a_recorder_that_exits_before_recording_fails_the_session_with_recorder_error() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-143200", "starting", Some(4242), None);
+        std::fs::write(dir.join("recorder.log"), "nenhum microfone disponível\n").unwrap();
+
+        let e = wait_until_recording(&dir, || true, 50, std::time::Duration::from_millis(1)).unwrap_err();
+
+        let m = read(&dir).unwrap();
+        assert_eq!(m["state"], "failed");
+        assert_eq!(m["error"]["code"], "recorder_error");
+        assert!(e.contains("nenhum microfone disponível"), "{e}");
+    }
+
+    #[test]
+    fn stop_ends_a_recorder_that_never_finishes_and_marks_it_interrupted() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-143200", "recording", Some(4242), None);
+        let owners = alive();
+        let mut out = Vec::new();
+
+        let r = stop_with(&dir, &owners, 3, std::time::Duration::from_millis(1), &mut out, |_| panic!("no capture, no pipeline"));
+
+        assert_eq!(r, Ok(()));
+        let m = read(&dir).unwrap();
+        assert_eq!(m["state"], "interrupted");
+        assert_eq!(m["error"]["code"], "recorder_timeout");
+        assert!(!owners.live.get(), "stop ended the recorder");
+        assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), b"audio");
+        assert!(String::from_utf8_lossy(&out).contains("recording interrupted:"));
+    }
+
+    #[test]
+    fn stop_keeps_stopping_when_the_recorder_cannot_be_ended() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-143200", "recording", Some(4242), None);
+        let owners = Fake { live: std::cell::Cell::new(true), can_end: false };
+
+        let e = stop_with(&dir, &owners, 3, std::time::Duration::from_millis(1), &mut Vec::new(), |_| Ok(())).unwrap_err();
+
+        assert!(e.contains("recorder did not stop; owner still live"), "{e}");
+        assert_eq!(read(&dir).unwrap()["state"], "stopping");
+        assert!(admit(sessions.path(), &owners).is_err(), "start refuses while it lives");
+    }
+
+    #[test]
+    fn an_owner_is_live_only_with_this_image_and_exactly_the_marker_and_folder() {
+        let me = PathBuf::from(r"C:\Users\Sam Doe\AppData\Local\VOXIS\meetrec.exe");
+        let dir = PathBuf::from(r"C:\Users\Sam Doe\.miris\sessions\20261107-143200");
+        let info = |exe: &str, args: &[&str]| ProcInfo {
+            exe: Some(PathBuf::from(exe)),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        };
+        let exe = me.to_str().unwrap();
+        let d = dir.to_str().unwrap();
+
+        assert!(is_owner(&info(exe, &[exe, "miris.recorder", d]), &me, "miris.recorder", &dir));
+        assert!(is_owner(&info(exe, &[exe, "miris.recorder", r"C:\Users\Sam Doe/.miris/sessions/20261107-143200"]), &me, "miris.recorder", &dir));
+        assert!(!is_owner(&info(r"C:\Windows\notepad.exe", &[exe, "miris.recorder", d]), &me, "miris.recorder", &dir));
+        assert!(!is_owner(&info(exe, &[exe, "miris.pipeline", d]), &me, "miris.recorder", &dir));
+        assert!(!is_owner(&info(exe, &[exe, "miris.recorder", d, "extra"]), &me, "miris.recorder", &dir));
+        assert!(!is_owner(&info(exe, &[exe, "miris.recorder", r"C:\Users\Sam Doe\.miris\sessions\20261107-143201"]), &me, "miris.recorder", &dir));
+        assert!(!is_owner(&info(exe, &[exe, "miris.recorder C:\\Users\\Sam", "Doe\\.miris"]), &me, "miris.recorder", &dir));
+        assert!(!is_owner(&ProcInfo { exe: None, args: vec![exe.into(), "miris.recorder".into(), d.into()] }, &me, "miris.recorder", &dir));
+    }
+
+    #[test]
+    fn sysinfo_reads_the_argv_elements_of_a_spawned_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Sam Doe").join("20261107-143200");
+        let mut child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep 20;#", "miris.recorder"])
+            .arg(&dir)
+            .spawn()
+            .unwrap();
+
+        let info = process_identity(child.id());
+
+        let _ = child.kill();
+        let info = info.expect("a live process is readable");
+        assert!(info.exe.unwrap().to_string_lossy().to_lowercase().ends_with("powershell.exe"));
+        assert_eq!(info.args[info.args.len() - 2], "miris.recorder");
+        assert_eq!(info.args.last().unwrap(), &dir.to_string_lossy().into_owned(), "a spaced folder is one element");
+    }
+
+    #[test]
+    fn process_and_recover_refuse_a_session_whose_owner_is_live() {
+        let sessions = tempfile::tempdir().unwrap();
+        let recording = session_in(sessions.path(), "20261107-143200", "recording", Some(4242), None);
+        let processing = session_in(sessions.path(), "20261107-143300", "processing", None, Some(4343));
+        let before = std::fs::read(recording.join("session.json")).unwrap();
+
+        let r1 = guard_inactive(&recording, &alive());
+        let r2 = guard_inactive(&processing, &alive());
+
+        assert_eq!(r1, Err(format!("session is active: {}", recording.display())));
+        assert_eq!(r2, Err(format!("session is active: {}", processing.display())));
+        assert_eq!(std::fs::read(recording.join("session.json")).unwrap(), before);
+        assert_eq!(guard_inactive(&recording, &dead()), Ok(()));
+    }
+
+    #[test]
+    fn stop_writes_the_stop_file_only_after_checking_the_recorder() {
+        let sessions = tempfile::tempdir().unwrap();
+        let gone = session_in(sessions.path(), "20261107-143200", "recording", Some(4242), None);
+        let live = session_in(sessions.path(), "20261107-143300", "recording", Some(4343), None);
+        let mut out = Vec::new();
+
+        stop_with(&gone, &dead(), 3, std::time::Duration::from_millis(1), &mut out, |_| Ok(())).unwrap();
+        stop_with(&live, &alive(), 1, std::time::Duration::from_millis(1), &mut Vec::new(), |_| Ok(())).unwrap();
+
+        assert!(!gone.join("stop").exists(), "no stop file for a recorder that is not ours");
+        assert_eq!(read(&gone).unwrap()["error"]["code"], "owner_died");
+        assert!(String::from_utf8_lossy(&out).contains(&format!("recording interrupted: {}", gone.display())));
+        assert!(live.join("stop").exists());
+    }
+
+    // ------------------------------------------------------------ retry reuse and latency marks (AC 81, 88)
+
+    fn set_age(path: &Path, secs_ago: u64) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago)).unwrap();
+    }
+
+    #[test]
+    fn a_retry_reuses_a_fresh_transcript_and_runs_only_the_minutes() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["mic.wav", "system.wav"] {
+            std::fs::write(dir.path().join(f), b"audio").unwrap();
+            set_age(&dir.path().join(f), 600);
+        }
+        std::fs::write(dir.path().join("transcript.md"), "# Transcrição\n\nfechar sexta\n").unwrap();
+
+        assert!(transcript_fresh(dir.path(), true));
+        assert!(!transcript_fresh(dir.path(), false), "only when the manifest says it is ready");
+    }
+
+    #[test]
+    fn a_wav_newer_than_the_transcript_runs_the_full_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("transcript.md"), "# Transcrição\n\nfechar sexta\n").unwrap();
+        set_age(&dir.path().join("transcript.md"), 600);
+        std::fs::write(dir.path().join("mic.wav"), b"audio").unwrap();
+        std::fs::write(dir.path().join("system.wav"), b"audio").unwrap();
+        set_age(&dir.path().join("system.wav"), 900);
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(empty.path().join("transcript.md"), "").unwrap();
+
+        assert!(!transcript_fresh(dir.path(), true));
+        assert!(!transcript_fresh(empty.path(), true), "an empty transcript is not reused");
+    }
+
+    #[test]
+    fn the_meeting_latency_marks_name_the_stop_and_the_ready_transcript() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-143200", "recording", Some(4242), None);
+        let flip = dir.clone();
+        // the recorder side: captured once the stop file shows up
+        let recorder = std::thread::spawn(move || {
+            while !flip.join("stop").exists() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            update(&flip, |m| m["state"] = json!("captured")).unwrap();
+        });
+        let mut out = Vec::new();
+        let mut piped = false;
+
+        stop_with(&dir, &alive(), 2000, std::time::Duration::from_millis(1), &mut out, |_| {
+            piped = true;
+            Ok(())
+        })
+        .unwrap();
+        recorder.join().unwrap();
+        let mut marks = Vec::new();
+        transcribed(&dir, &mut marks).unwrap();
+
+        let out = String::from_utf8(out).unwrap();
+        let marks = String::from_utf8(marks).unwrap();
+        assert!(piped);
+        assert!(out.lines().any(|l| l.strip_prefix("stopped ").is_some_and(|t| t.parse::<u128>().is_ok())), "{out}");
+        assert!(marks.lines().any(|l| l.strip_prefix("transcript_ready ").is_some_and(|t| t.parse::<u128>().is_ok())), "{marks}");
+        assert_eq!(read(&dir).unwrap()["transcript_ready"], true);
     }
 }
