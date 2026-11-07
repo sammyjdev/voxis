@@ -113,7 +113,7 @@ These are proof assignments, not observed coverage results. All observations awa
 ## Handoff
 
 - **Settled mid-build:** native Bash execution authorized by Sammy in message 11fa12c4-3882-464f-9b22-ffd425097c73; exact words are in the plan amendment.
-- **Dispatched:** none. No builder, release job, reviewer or QA was started.
+- **Dispatched:** Rita independent review pending at implementation HEAD 26d839621abd4e47da26ef183f4f78c1907f7da1, range 55260fe4d019ae53e7d7895417539d9e0f124322..HEAD; read-only review of this Bash execution slice, not final installer acceptance.
 - **Boundary:** baseline native tests passed (meetrec 25, tray 61); Bash README and replacement development fixtures pass. Installed rc3 artifacts and independent verification are pending; release SHA not frozen.
 - **Abandoned:** none.
 - **Walked:** none; every walk proof above is a future acceptance procedure.
