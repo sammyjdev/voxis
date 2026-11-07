@@ -761,8 +761,8 @@ pub fn run() {
                         (daemon.owns_running(), daemon.take_exit())
                     };
                     let exit = exited.map(|code| {
-                        let tail = std::fs::read_to_string(settings::config_dir().join("laris.log")).unwrap_or_default();
-                        dictation_exit(code, &tail, cfg!(windows))
+                        let log = std::fs::read_to_string(settings::config_dir().join("laris.log")).unwrap_or_default();
+                        dictation_exit(code, laris::current_run(&log), cfg!(windows))
                     });
                     let tick = supervise_tick(exit, current.mic_lost, current.models, owns, current.laris_alive, respawn_attempts, RESPAWN_CAP);
                     if exit.is_some() {
@@ -997,6 +997,14 @@ mod tests {
 
         assert!(other.respawn && quiet.respawn);
         assert!(!capped.respawn && !still_downloading.respawn && !mic_still_lost.respawn && !external_daemon.respawn);
+    }
+
+    #[test]
+    fn an_exit_is_classified_from_the_latest_run_not_from_an_older_one_in_the_appended_log() {
+        let log = format!("modelo não carregou: C:\\m\\x.bin: bad\n{}1 ---\nmicrofone: USB\nother failure\n", laris::RUN_MARKER);
+
+        assert_eq!(dictation_exit(Some(1), &log, true), DictationExit::ModelNotLoaded, "the whole file says the old failure");
+        assert_eq!(dictation_exit(Some(1), laris::current_run(&log), true), DictationExit::Other);
     }
 
     #[test]

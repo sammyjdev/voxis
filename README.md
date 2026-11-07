@@ -73,10 +73,15 @@ What Windows does differently from macOS:
   `%USERPROFILE%\.miris\sessions\<id>`; `meetrec meeting` runs keep theirs in
   `%USERPROFILE%\.voxis\meetings`; logs are in `%USERPROFILE%\.voxis\logs` and
   `%USERPROFILE%\.config\voice-at\laris.log`. Nothing deletes them
-  automatically: to remove a recording, delete its folder; to remove logs,
-  delete the files while VOXIS is closed. Dictation logs written by builds
-  before this change hold the dictated text; delete `dictate-*.log` to remove
-  it.
+  automatically, and nothing moves or compresses them: each dictation start
+  appends to `laris.log` after a `--- voxis run <time> ---` line, with no
+  rotation. To remove a
+  recording, delete its folder; to remove logs, delete the files while VOXIS
+  is closed. Dictation logs written by builds before this change hold the
+  dictated text in three places: `%USERPROFILE%\.voxis\logs\dictate-*.log`,
+  `%USERPROFILE%\.config\voice-at\laris.log` (the tray captures dictate's
+  output there) and `%USERPROFILE%\.config\voice-at\laris.log.1` (the
+  previous run, kept by those builds). Delete all three to remove it.
 
 ## Family
 

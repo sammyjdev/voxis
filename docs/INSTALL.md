@@ -386,7 +386,8 @@ Verified configuration: Windows 11 x64 with an NVIDIA GeForce RTX 4070 Ti, the C
   `%USERPROFILE%\.miris\sessions\<id>`; `meetrec meeting` runs keep theirs in
   `%USERPROFILE%\.voxis\meetings`; logs are in `%USERPROFILE%\.voxis\logs`
   and `%USERPROFILE%\.config\voice-at\laris.log`. Nothing deletes them
-  automatically. To remove them, close VOXIS and delete the session folders
+  automatically, and nothing moves or compresses them: `laris.log` is appended
+  to, one `--- voxis run <time> ---` line per dictation start. To remove them, close VOXIS and delete the session folders
   and log files you no longer want; uninstalling does not remove them.
 - **Settings.** `%APPDATA%\voxis\config.toml` (`mic`, `speaker`,
   `minutes_model`), `%APPDATA%\voxis\secrets.toml` and the two Google files
