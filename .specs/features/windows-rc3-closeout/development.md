@@ -49,6 +49,37 @@ Full local logs and exit files:
 Native baseline logs are under `native-baseline/`; fixture outputs are named
 `check-readme-test.log`, `rc3-baseline-test.log`, `check-replacement-test.log`.
 
+## Review finding F16 - CRLF registry output
+
+Rita's review 5809904701 at `ae47579da7199055dbf41a03e7571fa7aa766eeb` found that
+native Windows Python prints the registry count as `1\r\n`, so `mapfile -t` kept
+`1\r` and a valid installation failed the single-entry check. Correction of this
+implementation was authorized in Engineering messages
+`8d197ffe-c2b2-444a-b020-73ce4eccad1c` and `11fa12c4-3882-464f-9b22-ffd425097c73`.
+
+- Criterion C12 was added to `checks.md` first; RC1-RC10 and C1-C11 are unchanged.
+- Baseline at `ae47579`: the three Bash suites exited 0; `check-replacement.sh`
+  SHA-256 `4bd0d2eec65bbb9e1708969aedcf359057dba7fa7999b05c489e89915d5bb7c2`.
+- Red: three command-line cases run the script itself with a `python3` stub on
+  PATH that prints fixed CRLF bytes. Against the unchanged script the suite
+  exited 1 with `FAIL: 1\r uninstall entries named VOXIS` and
+  `FAIL: cli_accepts_crlf_registry_output_for_valid_cuda (exit 1)`.
+- Green: `main` removes carriage returns from the helper output before parsing.
+  `check-replacement-test.sh` exited 0 with 11 named cases, including
+  `cli_rejects_crlf_duplicate_entries` and `cli_rejects_crlf_failed_devices`, both
+  exit 1 with their cause. `check-readme-test.sh` and `rc3-baseline-test.sh`
+  exited 0; `bash -n` and `git diff --check` exited 0.
+- A probe with this machine's native `python3` printing `1` and a folder showed
+  the unchanged script exit 1 and the corrected script exit 0 (Vulkan, empty
+  folder). No registry, installation or configuration was read or changed.
+- `validate_plan.py` exit 0 (1 warning); `validate_checks.py` exit 0 (15 selector
+  warnings).
+
+Logs, exit files and hashes:
+`C:\Users\samde\OpenBot\Shared\evidence\dani-voxis-f16-ae47579\{baseline,red,green}\`.
+This is author development evidence; Rita's re-review and Vera's verification
+at the new SHA are pending.
+
 ## Remaining obligations
 
 - Rita independently reviews this slice and reruns its development proofs.

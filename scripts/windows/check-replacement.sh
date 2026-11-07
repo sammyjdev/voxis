@@ -75,6 +75,8 @@ if len(entries) == 1:
     print(entries[0])
 PY
     ) || return 1
+    # Native Windows Python ends its lines with CRLF.
+    registry=${registry//$'\r'/}
     local -a values
     mapfile -t values <<< "$registry"
     check_replacement "$2" "${values[1]:-}" "$1" "${values[0]}"

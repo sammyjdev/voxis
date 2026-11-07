@@ -130,5 +130,8 @@ Proof: `bash scripts/windows/check-readme-test.sh`
 Proof: `bash scripts/windows/rc3-baseline-test.sh`
 Proof: `bash scripts/windows/rc3-baseline.sh`
 
+**C12** - WHEN the registry helper prints the entry count and install folder with CRLF line endings, as native Windows Python does, THEN `check-replacement.sh` run from the command line SHALL read count `1` and that folder, reach the CUDA DLL and installed runtime checks and exit `0` for a valid installation, and SHALL still exit `1` naming the cause for `2` entries or a nonzero installed `devices --json` (RC7, RC9; review F16).
+Proof: `bash scripts/windows/check-replacement-test.sh` - cases `cli_accepts_crlf_registry_output_for_valid_cuda`, `cli_rejects_crlf_duplicate_entries`, `cli_rejects_crlf_failed_devices`. The registry helper is replaced by a `python3` stub on PATH that prints fixed CRLF bytes; no registry is read.
+
 The new Bash route replaces the blocked development baseline invocation only;
 All C1-C10 remain pending their required installed-artifact and independent proofs.
