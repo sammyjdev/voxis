@@ -329,3 +329,24 @@ def test_bench_flags_are_split_from_the_positionals():
     import bench
 
     assert bench.split_flags(["a", "--sweeps", "10", "b", "--out", "x.json"]) == (["a", "b"], 10, "x.json")
+
+
+# ------------------------------------------------------------ protocol first (69)
+
+def test_a_run_without_a_protocol_file_runs_nothing(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    ran = []
+    monkeypatch.setattr(pd, "check_corpus", lambda wav, spans: {"audio_sha256": "a", "spans_sha256": "s"})
+    monkeypatch.setattr(pd, "run_variant", lambda *a, **k: ran.append(a))
+    args = argparse.Namespace(protocol=str(tmp_path / "perf-protocol.md"), variants=str(tmp_path / "variants.json"),
+                              wav="voice.wav", spans="voice.spans.json", out=str(tmp_path), table="prompt",
+                              blocks=6, sweeps=10, repo=str(tmp_path))
+
+    with pytest.raises(SystemExit) as e:
+        pd.cmd_run(args)
+
+    assert e.value.code == 1
+    assert "no protocol" in capsys.readouterr().err
+    assert ran == []
+    assert not (tmp_path / "manifest-prompt.json").exists()

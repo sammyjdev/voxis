@@ -256,7 +256,7 @@ Proof: run contract | PASS: msys_argument_rewrite_note
 **C59** - The README states dictation replaces non-text clipboard contents, Windows blocks injection into administrator windows silently, and what VOXIS does then (AC 59)
 Proof: run contract | PASS: clipboard_and_elevated_window_limits
 
-**C60** - The audit claim names the lockfiles scanned, and the workflow scans `spikes/windows-rust/Cargo.lock` (AC 60)
+**C60** - The audit claim names the lockfiles the workflow scans; while the workflow does not scan `spikes/windows-rust/Cargo.lock`, the README says the native binary is not covered (AC 60; the Rec workflow job needs a token with `workflow` scope, see Handoff)
 Proof: run contract | PASS: audit_scope_names_the_native_lock
 
 ### S9 - Verification, immutability and the acceptance matrix
