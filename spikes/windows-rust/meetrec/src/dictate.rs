@@ -454,41 +454,93 @@ fn foreground_elevated() -> bool {
     }
 }
 
-/// Clipboard + Ctrl+V, then the user's clipboard text comes back. Returns
-/// the log lines (never the text).
-fn paste_with(clip: Result<&mut dyn Clip, String>, text: &str, inject: &mut dyn FnMut() -> u32, elevated: bool, wait: Duration) -> Vec<String> {
+/// How one paste ended. Only `Pasted` carries timestamps: a failed, skipped
+/// or empty paste has no completion time to report.
+#[derive(Debug, Clone, PartialEq)]
+enum PasteOutcome {
+    /// Ctrl+V was sent at `injected_ms`; the previous clipboard text was back
+    /// at `restored_ms`, after the restore wait.
+    Pasted { injected_ms: u128, restored_ms: u128 },
+    /// nothing was transcribed, so nothing was pasted
+    Empty,
+    /// the clipboard could not be opened or set (AC 42)
+    ClipboardFailed(String),
+    /// `SendInput` reported fewer than 4 events (AC 41)
+    InjectFailed(u32),
+    /// the target window is elevated; the text stays on the clipboard
+    SkippedElevated,
+}
+
+impl PasteOutcome {
+    /// The log lines of this outcome (never the text).
+    fn log_lines(&self) -> Vec<String> {
+        match self {
+            Self::Pasted { .. } | Self::Empty => Vec::new(),
+            Self::ClipboardFailed(e) => vec![format!("paste failed: clipboard {e}")],
+            Self::InjectFailed(n) => vec![format!("paste failed: injected {n} of 4")],
+            Self::SkippedElevated => vec!["paste skipped: elevated target".to_owned()],
+        }
+    }
+}
+
+/// Clipboard + Ctrl+V, then the user's clipboard text comes back. `now` reads
+/// the clock: once right after Ctrl+V was sent, once after the restore.
+fn paste_outcome_with(
+    clip: Result<&mut dyn Clip, String>,
+    text: &str,
+    inject: &mut dyn FnMut() -> u32,
+    elevated: bool,
+    wait: Duration,
+    now: &mut dyn FnMut() -> u128,
+) -> PasteOutcome {
     let cb = match clip {
         Ok(cb) => cb,
-        Err(e) => return vec![format!("paste failed: clipboard {e}")],
+        Err(e) => return PasteOutcome::ClipboardFailed(e),
     };
     let previous = cb.get();
     if let Err(e) = cb.set(text) {
-        return vec![format!("paste failed: clipboard {e}")];
+        return PasteOutcome::ClipboardFailed(e);
     }
     if elevated {
         // the text stays on the clipboard for the user to paste by hand
-        return vec!["paste skipped: elevated target".to_owned()];
+        return PasteOutcome::SkippedElevated;
     }
     let injected = inject();
     if injected < 4 {
-        return vec![format!("paste failed: injected {injected} of 4")];
+        return PasteOutcome::InjectFailed(injected);
     }
+    let injected_ms = now();
     std::thread::sleep(wait);
     if let Some(p) = previous {
         let _ = cb.set(&p);
     }
-    Vec::new()
+    PasteOutcome::Pasted { injected_ms, restored_ms: now() }
 }
 
-fn paste(text: &str) {
+/// `paste_outcome_with`, reduced to its log lines.
+#[cfg(test)]
+fn paste_with(clip: Result<&mut dyn Clip, String>, text: &str, inject: &mut dyn FnMut() -> u32, elevated: bool, wait: Duration) -> Vec<String> {
+    paste_outcome_with(clip, text, inject, elevated, wait, &mut unix_ms).log_lines()
+}
+
+fn paste(text: &str) -> PasteOutcome {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string());
     let clip: Result<&mut dyn Clip, String> = match cb.as_mut() {
         Ok(c) => Ok(c),
         Err(e) => Err(e.clone()),
     };
-    for line in paste_with(clip, text, &mut ctrl_v, foreground_elevated(), Duration::from_millis(250)) {
+    let outcome = paste_outcome_with(clip, text, &mut ctrl_v, foreground_elevated(), Duration::from_millis(250), &mut unix_ms);
+    for line in outcome.log_lines() {
         log_line(&line);
     }
+    outcome
+}
+
+/// Whether the orb goes back to hidden after a paste. A clipboard failure
+/// hides it in both modes (AC 42); otherwise only a push-to-talk utterance
+/// with nothing else being captured does.
+fn hide_orb_after(outcome: &PasteOutcome, hands_free: bool, idle: bool) -> bool {
+    matches!(outcome, PasteOutcome::ClipboardFailed(_)) || (!hands_free && idle)
 }
 
 /// The log line of one transcribed utterance.
@@ -501,6 +553,26 @@ fn utterance_log(mode: &str, audio_s: f64, proc_s: f64, text: &str, release_ms: 
         "{mode} {audio_s:.1} s -> {proc_s:.2} s, {} chars, release_ms={release_ms} paste_ms={paste_ms}",
         text.chars().count()
     )
+}
+
+/// The log line of an utterance with its paste outcome: `paste_ms` is when
+/// Ctrl+V was sent and `restore_ms` when the clipboard came back, both only
+/// for a paste that happened; otherwise `paste=<why not>`.
+fn utterance_line(mode: &str, audio_s: f64, proc_s: f64, text: &str, release_ms: u128, outcome: &PasteOutcome) -> String {
+    match outcome {
+        PasteOutcome::Pasted { injected_ms, restored_ms } => {
+            format!("{} restore_ms={restored_ms}", utterance_log(mode, audio_s, proc_s, text, release_ms, *injected_ms))
+        }
+        other => {
+            let why = match other {
+                PasteOutcome::Empty => "empty",
+                PasteOutcome::ClipboardFailed(_) => "clipboard_failed",
+                PasteOutcome::InjectFailed(_) => "inject_failed",
+                _ => "skipped_elevated",
+            };
+            format!("{mode} {audio_s:.1} s -> {proc_s:.2} s, {} chars, release_ms={release_ms} paste={why}", text.chars().count())
+        }
+    }
 }
 
 fn unix_ms() -> u128 {
@@ -590,6 +662,28 @@ fn paste_text(text: &str) -> Option<String> {
 /// respawn it.
 pub const EXIT_DEVICE_LOST: i32 = 3;
 
+/// The log line and exit code of an input device that cannot be used when
+/// dictate starts (none, or it went away before it opened): the same as one
+/// lost while running, so the tray shows the click-to-restart row and does
+/// not respawn it.
+fn mic_start_failure(e: &str) -> (String, i32) {
+    (format!("microfone desconectado: {e}"), EXIT_DEVICE_LOST)
+}
+
+/// Load the model, make its state and run the warm-up pass; any step that
+/// fails is `modelo não carregou: <path>: <error>` (AC 45), never a panic.
+fn prepare_model<C, S, E1: std::fmt::Display, E2: std::fmt::Display, E3: std::fmt::Display>(
+    path: &std::path::Path,
+    load: impl FnOnce() -> Result<C, E1>,
+    make_state: impl FnOnce(&C) -> Result<S, E2>,
+    warm: impl FnOnce(&mut S) -> Result<(), E3>,
+) -> Result<(C, S), String> {
+    let ctx = load_model(path, load)?;
+    let mut state = load_model(path, || make_state(&ctx))?;
+    load_model(path, || warm(&mut state))?;
+    Ok((ctx, state))
+}
+
 /// The log line and exit code for an input stream error.
 fn stream_lost(e: &str) -> (String, Option<i32>) {
     (format!("microfone desconectado: {e}"), Some(EXIT_DEVICE_LOST))
@@ -625,10 +719,88 @@ fn gpu_note(devices: &[Device]) -> Option<&'static str> {
     (!devices.contains(&Device::Gpu)).then_some("sem GPU: usando CPU")
 }
 
+/// What whisper.cpp itself said about the backend it chose, read from its
+/// own `whisper_backend_init_gpu` log lines (criterion 46, 47).
+#[derive(Debug, Clone, PartialEq)]
+enum BackendResult {
+    /// `using <name> backend`: CUDA0, Vulkan0, or CPU
+    Named(String),
+    /// `no GPU found`, or a backend that failed to initialize
+    CpuFallback,
+}
+
+fn observe_backend(line: &str) -> Option<BackendResult> {
+    if let Some(rest) = line.split("using ").nth(1) {
+        if let Some(name) = rest.strip_suffix(" backend").or_else(|| rest.trim_end().strip_suffix(" backend")) {
+            if !name.is_empty() && !name.contains(' ') {
+                return Some(BackendResult::Named(name.to_owned()));
+            }
+        }
+    }
+    let lower = line.to_lowercase();
+    let failed_init = lower.find("failed to initialize").is_some_and(|i| lower[i..].contains("backend"));
+    (lower.contains("no gpu found") || failed_init).then_some(BackendResult::CpuFallback)
+}
+
+/// The log line `sem GPU: usando CPU` when the GPU did not come up. The
+/// backend whisper.cpp reported decides; with no report, the devices ggml
+/// registered do.
+fn backend_note(devices: &[Device], observed: Option<&BackendResult>) -> Option<&'static str> {
+    match observed {
+        Some(BackendResult::CpuFallback) => Some("sem GPU: usando CPU"),
+        Some(BackendResult::Named(name)) if name.to_uppercase().starts_with("CPU") => Some("sem GPU: usando CPU"),
+        Some(BackendResult::Named(_)) => None,
+        None => gpu_note(devices),
+    }
+}
+
+static BACKEND: Mutex<Option<BackendResult>> = Mutex::new(None);
+static LOG_TAIL: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+/// One line of whisper.cpp's own log: remembered when it names the backend,
+/// and kept in a short tail.
+fn note_whisper_log(line: &str) {
+    if let Some(found) = observe_backend(line) {
+        if let Ok(mut b) = BACKEND.lock() {
+            *b = Some(found);
+        }
+    }
+    if let Ok(mut tail) = LOG_TAIL.lock() {
+        if tail.len() >= 64 {
+            tail.pop_front();
+        }
+        tail.push_back(line.trim_end().to_owned());
+    }
+}
+
+fn observed_backend() -> Option<BackendResult> {
+    BACKEND.lock().ok().and_then(|b| b.clone())
+}
+
+/// whisper.cpp's log callback: the line goes to stderr as before (it reaches
+/// laris.log there) and through `note_whisper_log`.
+unsafe extern "C" fn whisper_log(_level: std::ffi::c_int, text: *const std::ffi::c_char, _user: *mut std::ffi::c_void) {
+    if text.is_null() {
+        return;
+    }
+    let line = std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned();
+    eprint!("{line}");
+    note_whisper_log(&line);
+}
+
+fn install_whisper_log() {
+    // SAFETY: the callback is a plain function that never unwinds and keeps no pointer to `text`
+    unsafe { whisper_log_set(Some(whisper_log), std::ptr::null_mut()) }
+}
+
 // ggml's device registry, linked from whisper-rs-sys's static ggml; declared
 // here instead of enabling whisper-rs `raw-api`, which would change the
 // engine's features (plan criterion 84)
 extern "C" {
+    fn whisper_log_set(
+        callback: Option<unsafe extern "C" fn(std::ffi::c_int, *const std::ffi::c_char, *mut std::ffi::c_void)>,
+        user_data: *mut std::ffi::c_void,
+    );
     fn ggml_backend_dev_count() -> usize;
     fn ggml_backend_dev_get(index: usize) -> *mut std::ffi::c_void;
     fn ggml_backend_dev_type(device: *mut std::ffi::c_void) -> std::ffi::c_int;
@@ -919,16 +1091,9 @@ pub fn run() {
     });
 
     let t = Instant::now();
+    install_whisper_log();
     let mut cp = WhisperContextParameters::default();
     cp.use_gpu(true);
-    let ctx = load_model(&model, || WhisperContext::new_with_params(&model, cp)).unwrap_or_else(|e| {
-        log_line(&e);
-        std::process::exit(1)
-    });
-    if let Some(note) = gpu_note(&ggml_devices()) {
-        log_line(note);
-    }
-    let mut state = ctx.create_state().unwrap();
     let vad = vad.to_string_lossy().into_owned();
     let params = |prompt: &str, vad: &str| {
         let mut p = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
@@ -948,14 +1113,30 @@ pub fn run() {
         p.set_vad_params(WhisperVadParams::new());
         p
     };
-    state.full(params(&prompt, &vad), &vec![0.0f32; RATE as usize]).expect("warm");
-
-    let mic = super::pick_input_with(super::session::configured_mic().as_deref(), &mut |w| log_line(w)).unwrap_or_else(|e| {
+    let (_ctx, mut state) = prepare_model(
+        &model,
+        || WhisperContext::new_with_params(&model, cp),
+        |ctx| ctx.create_state(),
+        |state| state.full(params(&prompt, &vad), &vec![0.0f32; RATE as usize]).map(|_| ()),
+    )
+    .unwrap_or_else(|e| {
         log_line(&e);
         std::process::exit(1)
     });
+    if let Some(note) = backend_note(&ggml_devices(), observed_backend().as_ref()) {
+        log_line(note);
+    }
+
+    // no input device, or one that went away before it opened, is a lost microphone: exit 3
+    let mic_lost = |e: &str| -> ! {
+        let (line, code) = mic_start_failure(e);
+        log_line(&line);
+        std::process::exit(code)
+    };
+    let mic = super::pick_input_with(super::session::configured_mic().as_deref(), &mut |w| log_line(w))
+        .unwrap_or_else(|e| mic_lost(&e));
     log_line(&format!("microfone: {}", mic.name().unwrap_or_default()));
-    let cfg = mic.default_input_config().unwrap();
+    let cfg = mic.default_input_config().unwrap_or_else(|e| mic_lost(&e.to_string()));
     if let Err(e) = sample_format_ok(cfg.sample_format()) {
         log_line(&e);
         std::process::exit(1);
@@ -1019,8 +1200,8 @@ pub fn run() {
         ),
         f => unreachable!("checked by sample_format_ok: {f:?}"),
     }
-    .expect("open mic");
-    stream.play().unwrap();
+    .unwrap_or_else(|e| mic_lost(&e.to_string()));
+    stream.play().unwrap_or_else(|e| mic_lost(&e.to_string()));
 
     // transcription + paste, off the hook thread
     let cap_t = cap.clone();
@@ -1034,11 +1215,13 @@ pub fn run() {
             let text: String = state.as_iter().map(|s| s.to_string()).collect::<String>().trim().to_owned();
             let proc_s = t.elapsed().as_secs_f64();
             // trailing space: consecutive dictations must not glue together
-            if let Some(typed) = paste_text(&text) {
-                paste(&typed);
-            }
-            log_line(&utterance_log(if hands_free { "hf" } else { "ptt" }, secs, proc_s, &text, released, unix_ms()));
-            if !hands_free && cap_t.lock().unwrap().mode == Mode::Idle {
+            let outcome = match paste_text(&text) {
+                Some(typed) => paste(&typed),
+                None => PasteOutcome::Empty,
+            };
+            log_line(&utterance_line(if hands_free { "hf" } else { "ptt" }, secs, proc_s, &text, released, &outcome));
+            let idle = cap_t.lock().unwrap().mode == Mode::Idle;
+            if hide_orb_after(&outcome, hands_free, idle) {
                 show(Show::Hidden);
             }
         }

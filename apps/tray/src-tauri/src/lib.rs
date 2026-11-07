@@ -179,6 +179,28 @@ fn respawn_after_exit(mic_lost: bool, owns: bool, alive: bool, attempts: u32, ca
     !mic_lost && should_respawn(owns, alive, attempts, cap)
 }
 
+/// What one supervisor poll decides once the child's exit (if any) has been
+/// classified: the dictation flags after it, and whether to respawn. The
+/// decision reads the flags the exit just set, never the snapshot taken
+/// before it was read, so exit 3 and a model failure are not respawned.
+#[derive(Debug, PartialEq)]
+struct Tick {
+    mic_lost: bool,
+    models: models::ModelState,
+    respawn: bool,
+}
+
+fn supervise_tick(exit: Option<DictationExit>, mic_lost: bool, models: models::ModelState, owns: bool, alive: bool, attempts: u32, cap: u32) -> Tick {
+    let (mic_lost, models) = match exit {
+        Some(DictationExit::DeviceLost) => (true, models),
+        Some(DictationExit::ModelNotLoaded) => (mic_lost, models::ModelState::LoadFailed),
+        _ => (mic_lost, models),
+    };
+    // a first run still fetching its models has nothing to respawn
+    let respawn = models == models::ModelState::Ready && respawn_after_exit(mic_lost, owns, alive, attempts, cap);
+    Tick { mic_lost, models, respawn }
+}
+
 /// The dictation row: (menu id, label, clickable). After a lost microphone
 /// it is the one way back: a click starts dictate once.
 fn dictation_row(mic_lost: bool, models: models::ModelState, alive: bool, ready: bool) -> (&'static str, String, bool) {
@@ -738,21 +760,22 @@ pub fn run() {
                         let mut daemon = state.daemon.lock().unwrap();
                         (daemon.owns_running(), daemon.take_exit())
                     };
-                    if let Some(code) = exited {
+                    let exit = exited.map(|code| {
                         let tail = std::fs::read_to_string(settings::config_dir().join("laris.log")).unwrap_or_default();
-                        match dictation_exit(code, &tail, cfg!(windows)) {
-                            DictationExit::DeviceLost => state.daemon.lock().unwrap().set_mic_lost(true),
-                            DictationExit::ModelNotLoaded => *state.models.lock().unwrap() = models::ModelState::LoadFailed,
-                            DictationExit::Other => {}
+                        dictation_exit(code, &tail, cfg!(windows))
+                    });
+                    let tick = supervise_tick(exit, current.mic_lost, current.models, owns, current.laris_alive, respawn_attempts, RESPAWN_CAP);
+                    if exit.is_some() {
+                        match exit {
+                            Some(DictationExit::DeviceLost) => state.daemon.lock().unwrap().set_mic_lost(true),
+                            Some(DictationExit::ModelNotLoaded) => *state.models.lock().unwrap() = tick.models,
+                            _ => {}
                         }
                         state.menu_dirty.store(true, Ordering::SeqCst);
                     }
-                    // a first run still fetching its models has nothing to respawn
-                    if current.models == models::ModelState::Ready
-                        && respawn_after_exit(current.mic_lost, owns, current.laris_alive, respawn_attempts, RESPAWN_CAP)
-                    {
+                    if tick.respawn {
                         respawn_attempts += 1;
-                        if let Err(e) = models::spawn_dictation(current.models, &mut state.daemon.lock().unwrap()) {
+                        if let Err(e) = models::spawn_dictation(tick.models, &mut state.daemon.lock().unwrap()) {
                             notify(&handle, &format!("Falha ao reiniciar ditado: {e}"));
                         }
                     }
@@ -948,6 +971,32 @@ mod tests {
         assert_eq!(dictation_exit(Some(1), "carregando\nmodelo não carregou: C:\\m\\x.bin: bad\n", true), DictationExit::ModelNotLoaded);
         assert_eq!(dictation_exit(Some(1), "other failure\n", true), DictationExit::Other);
         assert_eq!(dictation_exit(Some(3), "", false), DictationExit::Other, "macOS and Linux unchanged");
+    }
+
+    #[test]
+    fn a_poll_that_sees_exit_3_or_a_model_failure_does_not_respawn_in_the_same_tick() {
+        let ready = models::ModelState::Ready;
+
+        let lost = supervise_tick(Some(DictationExit::DeviceLost), false, ready, false, false, 0, 3);
+        let not_loaded = supervise_tick(Some(DictationExit::ModelNotLoaded), false, ready, false, false, 0, 3);
+
+        assert_eq!(lost, Tick { mic_lost: true, models: ready, respawn: false });
+        assert_eq!(not_loaded, Tick { mic_lost: false, models: models::ModelState::LoadFailed, respawn: false });
+    }
+
+    #[test]
+    fn a_poll_after_another_exit_keeps_the_three_attempt_respawn() {
+        let ready = models::ModelState::Ready;
+
+        let other = supervise_tick(Some(DictationExit::Other), false, ready, false, false, 0, 3);
+        let quiet = supervise_tick(None, false, ready, false, false, 2, 3);
+        let capped = supervise_tick(Some(DictationExit::Other), false, ready, false, false, 3, 3);
+        let still_downloading = supervise_tick(Some(DictationExit::Other), false, models::ModelState::Downloading(40), false, false, 0, 3);
+        let mic_still_lost = supervise_tick(None, true, ready, false, false, 0, 3);
+        let external_daemon = supervise_tick(None, false, ready, false, true, 0, 3);
+
+        assert!(other.respawn && quiet.respawn);
+        assert!(!capped.respawn && !still_downloading.respawn && !mic_still_lost.respawn && !external_daemon.respawn);
     }
 
     #[test]

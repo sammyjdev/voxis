@@ -413,10 +413,18 @@ fn stop_with(
     // the recorder flips the manifest to captured once both WAVs are final
     for _ in 0..tries {
         std::thread::sleep(every);
-        if read(dir)?["state"] == "captured" {
+        let state = read(dir)?["state"].clone();
+        if state == "captured" {
             let _ = writeln!(out, "stopped {}", unix_ms());
             let _ = out.flush();
             return pipeline(dir);
+        }
+        // the recorder ended on its own with a failure (disk_write_error, recorder_error): its
+        // manifest already carries the cause and both files stay; waiting out the 60 s would
+        // replace that cause with recorder_timeout
+        if state == "failed" || state == "interrupted" {
+            let _ = writeln!(out, "recording interrupted: {}", dir.display());
+            return Ok(());
         }
     }
     if let Some(p) = pid.filter(|_| owners.live(pid, "miris.recorder", dir)) {
@@ -428,6 +436,31 @@ fn stop_with(
     fail(dir, "interrupted", "recorder_timeout", "recorder did not finish within 60 s; stop ended it");
     let _ = writeln!(out, "recording interrupted: {}", dir.display());
     Ok(())
+}
+
+/// The header sizes of a WAV whose writer could not finalize it (a failed
+/// flush on a full disk): they follow from the bytes that did reach the
+/// file, cut to whole f32 samples. Only existing bytes are overwritten, so
+/// it works on a disk with no free space left.
+pub(crate) fn repair_wav_in<F: std::io::Read + std::io::Write + std::io::Seek>(f: &mut F) -> Result<(), String> {
+    use std::io::{Read, SeekFrom};
+    let len = f.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
+    if len < 44 {
+        return Err(format!("only {len} bytes reached the file, too short to repair"));
+    }
+    f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let mut head = Vec::new();
+    f.take(4096).read_to_end(&mut head).map_err(|e| e.to_string())?;
+    let data_offset = head.windows(4).position(|w| w == b"data").ok_or("no data chunk")? as u64 + 8;
+    if len < data_offset {
+        return Err(format!("only {len} bytes reached the file, the data chunk was never started"));
+    }
+    let data_len = (len - data_offset) & !3;
+    f.seek(SeekFrom::Start(4)).map_err(|e| e.to_string())?;
+    f.write_all(&((len - 8) as u32).to_le_bytes()).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(data_offset - 4)).map_err(|e| e.to_string())?;
+    f.write_all(&(data_len as u32).to_le_bytes()).map_err(|e| e.to_string())?;
+    f.flush().map_err(|e| e.to_string())
 }
 
 /// A killed recorder leaves WAV headers with zero sizes; hound writes the
@@ -821,6 +854,33 @@ mod tests {
         assert_eq!(m["error"]["code"], "recorder_timeout");
         assert!(!owners.live.get(), "stop ended the recorder");
         assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), b"audio");
+        assert!(String::from_utf8_lossy(&out).contains("recording interrupted:"));
+    }
+
+    #[test]
+    fn stop_keeps_the_terminal_failure_the_recorder_wrote_after_the_stop_request() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-143400", "recording", Some(4242), None);
+        let flip = dir.clone();
+        let recorder = std::thread::spawn(move || {
+            while !flip.join("stop").exists() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            recorder_failed(&flip, "disk_write_error: mic.wav: no space left on device");
+        });
+        let owners = alive();
+        let mut out = Vec::new();
+        let started = std::time::Instant::now();
+
+        let r = stop_with(&dir, &owners, 300, std::time::Duration::from_millis(10), &mut out, |_| panic!("no capture, no pipeline"));
+
+        recorder.join().unwrap();
+        assert_eq!(r, Ok(()));
+        assert!(started.elapsed() < std::time::Duration::from_millis(1500), "stop waited out its timeout");
+        let m = read(&dir).unwrap();
+        assert_eq!(m["state"], "failed");
+        assert_eq!(m["error"]["code"], "disk_write_error");
+        assert!(owners.live.get(), "a recorder that already reported its failure is not killed as a timeout");
         assert!(String::from_utf8_lossy(&out).contains("recording interrupted:"));
     }
 

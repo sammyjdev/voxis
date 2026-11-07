@@ -291,15 +291,38 @@ fn writer(
     failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::thread::JoinHandle<Result<(u64, f32), String>> {
     std::thread::spawn(move || {
-        let result = hound::WavWriter::create(&path, track_spec(rate))
+        let result = std::fs::File::create(&path)
             .map_err(|e| format!("disk_write_error: {}: {e}", path.display()))
-            .and_then(|w| write_track(w, rate, rx));
+            .and_then(|file| {
+                let reopen = || std::fs::OpenOptions::new().read(true).write(true).open(&path);
+                write_wav(file, rate, rx, reopen)
+            });
         if result.is_err() {
             // ends the recording loop: there is no point waiting for a stop
             failed.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         result
     })
+}
+
+/// The track on `inner` through the buffered writer production uses
+/// (`hound::WavWriter::create` is this over a `File`). A failed flush stops
+/// the writer before it can update the header, so a failure is followed by a
+/// repair of the sizes from the bytes on disk, through `reopen`, which needs
+/// no free space.
+fn write_wav<W, R>(inner: W, rate: u32, rx: mpsc::Receiver<Chunk>, reopen: impl FnOnce() -> std::io::Result<R>) -> Result<(u64, f32), String>
+where
+    W: std::io::Write + std::io::Seek,
+    R: std::io::Read + std::io::Write + std::io::Seek,
+{
+    let w = hound::WavWriter::new(std::io::BufWriter::new(inner), track_spec(rate)).map_err(|e| format!("disk_write_error: {e}"))?;
+    let result = write_track(w, rate, rx);
+    if result.is_err() {
+        if let Err(repair) = reopen().map_err(|e| e.to_string()).and_then(|mut f| session::repair_wav_in(&mut f)) {
+            return result.map_err(|e| format!("{e}; header repair failed: {repair}"));
+        }
+    }
+    result
 }
 
 fn track_spec(rate: u32) -> hound::WavSpec {
@@ -791,5 +814,85 @@ mod tests {
         let bytes = disk.data.borrow().get_ref().clone();
         let r = hound::WavReader::new(std::io::Cursor::new(bytes)).unwrap();
         assert_eq!(r.len(), 100, "the header counts the 100 samples that reached the disk");
+    }
+
+    /// Like a full disk: takes bytes up to `cap` (a write that crosses it is
+    /// partial), then fails; bytes already on it can be read and rewritten.
+    #[derive(Clone)]
+    struct PartialDisk {
+        data: std::rc::Rc<std::cell::RefCell<std::io::Cursor<Vec<u8>>>>,
+        cap: u64,
+    }
+
+    impl std::io::Write for PartialDisk {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut d = self.data.borrow_mut();
+            let room = self.cap.saturating_sub(d.position()) as usize;
+            if room == 0 {
+                return Err(std::io::Error::other("disk full"));
+            }
+            std::io::Write::write(&mut *d, &buf[..buf.len().min(room)])
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Seek for PartialDisk {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            std::io::Seek::seek(&mut *self.data.borrow_mut(), pos)
+        }
+    }
+
+    impl std::io::Read for PartialDisk {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut *self.data.borrow_mut(), buf)
+        }
+    }
+
+    fn recorded_samples_after_a_full_disk(cap_after_header: u64) -> (String, usize) {
+        let mut header = std::io::Cursor::new(Vec::new());
+        hound::WavWriter::new(&mut header, track_spec(16_000)).unwrap().finalize().unwrap();
+        let disk = PartialDisk { data: Default::default(), cap: header.get_ref().len() as u64 + cap_after_header };
+        let (tx, rx) = mpsc::channel();
+        tx.send(Chunk { at: 0.0, mono: vec![0.5; 400] }).unwrap();
+        drop(tx);
+
+        let again = disk.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write_wav(disk.clone(), 16_000, rx, || Ok::<_, std::io::Error>(again))));
+
+        let e = result.expect("a write failure must not panic").unwrap_err();
+        let bytes = disk.data.borrow().get_ref().clone();
+        let samples = hound::WavReader::new(std::io::Cursor::new(bytes)).expect("a header that can be read").len() as usize;
+        (e, samples)
+    }
+
+    #[test]
+    fn a_full_disk_under_the_buffered_writer_leaves_a_wav_that_counts_the_samples_on_disk() {
+        let (e, samples) = recorded_samples_after_a_full_disk(100 * 4);
+
+        assert!(e.starts_with("disk_write_error"), "{e}");
+        assert!(!e.contains("header repair failed"), "{e}");
+        assert_eq!(samples, 100, "the header counts the 100 whole samples that reached the disk");
+    }
+
+    #[test]
+    fn a_half_written_sample_at_the_end_is_left_out_of_the_header() {
+        let (_, samples) = recorded_samples_after_a_full_disk(100 * 4 + 2);
+
+        assert_eq!(samples, 100);
+    }
+
+    #[test]
+    fn a_disk_that_took_less_than_a_header_reports_the_repair_failure_with_the_write_error() {
+        let disk = PartialDisk { data: Default::default(), cap: 10 };
+        let (tx, rx) = mpsc::channel();
+        tx.send(Chunk { at: 0.0, mono: vec![0.5; 4] }).unwrap();
+        drop(tx);
+        let again = disk.clone();
+
+        let e = write_wav(disk, 16_000, rx, || Ok::<_, std::io::Error>(again)).unwrap_err();
+
+        assert!(e.starts_with("disk_write_error") && e.contains("header repair failed"), "{e}");
     }
 }

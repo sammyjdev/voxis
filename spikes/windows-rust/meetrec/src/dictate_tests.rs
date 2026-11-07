@@ -442,3 +442,144 @@ fn a_cpu_fallback_is_logged_as_sem_gpu() {
 fn dictation_recognizes_portuguese_only() {
     assert_eq!(crate::LANGUAGE, "pt");
 }
+
+// ------------------------------------------------------------ review round 1: paste outcomes, startup (P5-2, P5-4, P5-21, AC 45)
+
+/// A clock that returns `start`, then `start + step`, and so on.
+fn clock(start: u128, step: u128) -> impl FnMut() -> u128 {
+    let mut next = start;
+    move || {
+        let t = next;
+        next += step;
+        t
+    }
+}
+
+#[test]
+fn a_completed_paste_reports_when_ctrl_v_was_sent_and_when_the_clipboard_came_back() {
+    let mut cb = clip("previous");
+
+    let outcome = paste_outcome_with(Ok(&mut cb), "ditado ", &mut || 4, false, Duration::from_millis(1), &mut clock(1_000, 260));
+
+    assert_eq!(outcome, PasteOutcome::Pasted { injected_ms: 1_000, restored_ms: 1_260 });
+    assert_eq!(cb.sets, ["ditado ", "previous"]);
+}
+
+#[test]
+fn a_paste_that_did_not_happen_has_no_completion_timestamp() {
+    let mut partial = clip("previous");
+    let mut elevated = clip("previous");
+    let mut busy = FakeClip { text: None, sets: Vec::new(), fail: true };
+    let wait = Duration::from_millis(1);
+
+    let injected_2 = paste_outcome_with(Ok(&mut partial), "x ", &mut || 2, false, wait, &mut clock(1, 1));
+    let skipped = paste_outcome_with(Ok(&mut elevated), "x ", &mut || 4, true, wait, &mut clock(1, 1));
+    let unopened = paste_outcome_with(Err("OpenClipboard failed".into()), "x ", &mut || 4, false, wait, &mut clock(1, 1));
+    let unset = paste_outcome_with(Ok(&mut busy), "x ", &mut || 4, false, wait, &mut clock(1, 1));
+
+    assert_eq!(injected_2, PasteOutcome::InjectFailed(2));
+    assert_eq!(skipped, PasteOutcome::SkippedElevated);
+    assert_eq!(unopened, PasteOutcome::ClipboardFailed("OpenClipboard failed".into()));
+    assert_eq!(unset, PasteOutcome::ClipboardFailed("clipboard busy".into()));
+    for (outcome, text) in [(&injected_2, "paste failed: injected 2 of 4"), (&skipped, "paste skipped: elevated target"),
+                            (&unopened, "paste failed: clipboard OpenClipboard failed")] {
+        assert_eq!(outcome.log_lines(), [text]);
+    }
+}
+
+#[test]
+fn the_utterance_line_names_paste_and_restore_times_only_for_a_paste_that_happened() {
+    let pasted = utterance_line("ptt", 1.0, 0.2, "x", 5_000, &PasteOutcome::Pasted { injected_ms: 5_400, restored_ms: 5_650 });
+    let failed = utterance_line("ptt", 1.0, 0.2, "x", 5_000, &PasteOutcome::ClipboardFailed("busy".into()));
+    let empty = utterance_line("hf", 1.0, 0.2, "", 5_000, &PasteOutcome::Empty);
+    let partial = utterance_line("hf", 1.0, 0.2, "x", 5_000, &PasteOutcome::InjectFailed(1));
+    let elevated = utterance_line("hf", 1.0, 0.2, "x", 5_000, &PasteOutcome::SkippedElevated);
+
+    assert!(pasted.contains("release_ms=5000 paste_ms=5400") && pasted.ends_with("restore_ms=5650"), "{pasted}");
+    for (line, why) in [(&failed, "clipboard_failed"), (&empty, "empty"), (&partial, "inject_failed"), (&elevated, "skipped_elevated")] {
+        assert!(line.contains("release_ms=5000") && line.ends_with(&format!("paste={why}")), "{line}");
+        assert!(!line.contains("paste_ms=") && !line.contains("restore_ms="), "{line}");
+    }
+    assert!(!failed.contains("busy"), "{failed}");
+}
+
+#[test]
+fn a_clipboard_failure_hides_the_orb_in_both_modes() {
+    let failed = PasteOutcome::ClipboardFailed("clipboard busy".into());
+    let pasted = PasteOutcome::Pasted { injected_ms: 1, restored_ms: 2 };
+
+    assert!(hide_orb_after(&failed, true, false), "hands-free, still listening");
+    assert!(hide_orb_after(&failed, false, true), "push-to-talk, idle");
+    assert!(hide_orb_after(&failed, false, false), "push-to-talk, key held again");
+    assert!(!hide_orb_after(&pasted, true, false), "hands-free keeps its orb after a good paste");
+    assert!(hide_orb_after(&pasted, false, true));
+    assert!(!hide_orb_after(&pasted, false, false));
+    assert!(!hide_orb_after(&PasteOutcome::InjectFailed(2), true, false));
+}
+
+#[test]
+fn a_dictate_that_starts_with_no_microphone_exits_3_like_a_lost_one() {
+    let (line, code) = mic_start_failure("nenhum microfone disponível");
+
+    assert_eq!(line, "microfone desconectado: nenhum microfone disponível");
+    assert_eq!(code, EXIT_DEVICE_LOST);
+    assert_eq!(code, 3);
+}
+
+#[test]
+fn a_model_that_fails_to_make_its_state_or_to_warm_up_is_logged_not_a_panic() {
+    let path = std::path::Path::new(r"C:\m\ggml-large-v3-turbo.bin");
+    let ok_ctx = || Ok::<_, String>("ctx");
+
+    let no_state = std::panic::catch_unwind(|| prepare_model(path, ok_ctx, |_| Err::<(), _>("out of memory"), |_: &mut ()| Ok::<(), String>(())));
+    let no_warm = std::panic::catch_unwind(|| prepare_model(path, ok_ctx, |_| Ok::<_, String>(1u8), |_| Err::<(), _>("cuda error")));
+    let no_ctx = std::panic::catch_unwind(|| prepare_model::<&str, (), _, String, String>(path, || Err("invalid model data"), |_| Ok(()), |_| Ok(())));
+    let good = prepare_model(path, ok_ctx, |c| Ok::<_, String>(c.len()), |_| Ok::<(), String>(()));
+
+    assert_eq!(no_state.expect("no panic").err(), Some(r"modelo não carregou: C:\m\ggml-large-v3-turbo.bin: out of memory".to_owned()));
+    assert_eq!(no_warm.expect("no panic").err(), Some(r"modelo não carregou: C:\m\ggml-large-v3-turbo.bin: cuda error".to_owned()));
+    assert_eq!(no_ctx.expect("no panic").err(), Some(r"modelo não carregou: C:\m\ggml-large-v3-turbo.bin: invalid model data".to_owned()));
+    assert_eq!(good, Ok(("ctx", 3)));
+}
+
+// ------------------------------------------------------------ review round 1: the backend whisper.cpp reports (AC 46, 47)
+
+#[test]
+fn the_backend_whisper_cpp_names_is_read_from_its_own_log_line() {
+    assert_eq!(observe_backend("whisper_backend_init_gpu: using CUDA0 backend\n"), Some(BackendResult::Named("CUDA0".into())));
+    assert_eq!(observe_backend("whisper_backend_init_gpu: using Vulkan0 backend"), Some(BackendResult::Named("Vulkan0".into())));
+    assert_eq!(observe_backend("whisper_init_with_params_no_state: using CPU backend\n"), Some(BackendResult::Named("CPU".into())));
+    assert_eq!(observe_backend("whisper_backend_init_gpu: no GPU found\n"), Some(BackendResult::CpuFallback));
+    assert_eq!(observe_backend("ggml_cuda_init: failed to initialize CUDA backend: out of memory"), Some(BackendResult::CpuFallback));
+    assert_eq!(observe_backend("whisper_model_load: CPU total size = 1623.92 MB"), None);
+    assert_eq!(observe_backend("using the default prompt"), None);
+}
+
+#[test]
+fn a_gpu_that_whisper_cpp_did_not_use_is_logged_as_sem_gpu_whatever_ggml_registered() {
+    let gpu_registered = [Device::Cpu, Device::Gpu];
+    let cpu_only = [Device::Cpu];
+
+    assert_eq!(backend_note(&gpu_registered, Some(&BackendResult::CpuFallback)), Some("sem GPU: usando CPU"));
+    assert_eq!(backend_note(&gpu_registered, Some(&BackendResult::Named("CPU".into()))), Some("sem GPU: usando CPU"));
+    assert_eq!(backend_note(&cpu_only, Some(&BackendResult::Named("CUDA0".into()))), None);
+    assert_eq!(backend_note(&gpu_registered, Some(&BackendResult::Named("Vulkan0".into()))), None);
+}
+
+#[test]
+fn without_a_backend_report_the_registered_devices_decide() {
+    assert_eq!(backend_note(&[Device::Cpu], None), Some("sem GPU: usando CPU"));
+    assert_eq!(backend_note(&[Device::Cpu, Device::Gpu], None), None);
+}
+
+#[test]
+fn the_log_hook_is_wired_to_whisper_cpp_itself() {
+    let _one_at_a_time = crate::test_lock();
+    install_whisper_log();
+
+    let loaded = WhisperContext::new_with_params("no-such-model-for-the-log-hook.bin", WhisperContextParameters::default());
+
+    assert!(loaded.is_err(), "a missing model does not load");
+    let tail: Vec<String> = LOG_TAIL.lock().unwrap().iter().cloned().collect();
+    assert!(tail.iter().any(|l| l.contains("no-such-model-for-the-log-hook.bin")), "whisper.cpp's own lines reach the hook: {tail:?}");
+}
