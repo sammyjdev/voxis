@@ -35,7 +35,10 @@ fn main() {
         Some("devices") => devices(a.get(2).map(String::as_str) == Some("--json")),
         Some("record") if a.len() >= 3 => {
             let stop = a.get(4).map(|s| Stop::After(s.parse().expect("secs"))).unwrap_or(Stop::Enter);
-            record(Path::new(&a[2]), a.get(3).map(String::as_str).filter(|s| !s.is_empty()), stop, || {});
+            if let Err(e) = record(Path::new(&a[2]), a.get(3).map(String::as_str).filter(|s| !s.is_empty()), stop, || {}) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
         }
         Some("transcribe") if a.len() >= 5 => {
             transcribe(Path::new(&a[2]), &a[3], &a[4], a.get(5).map(String::as_str).unwrap_or("pt"))
@@ -89,14 +92,39 @@ fn models_fetch() -> i32 {
     models::fetch(&places, &target, &models::PINS, &mut out, &mut err)
 }
 
+/// The folder of a `meetrec meeting` run: `meetings/<YYYY-MM-DD_HHMM>`, or
+/// `_2` to `_99` when a run in the same minute holds it. Created with a call
+/// that fails on an existing path, so a second run never writes into the
+/// first one's folder.
+fn reserve_meeting_dir(base: &Path, stamp: &str) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(base).map_err(|e| format!("{}: {e}", base.display()))?;
+    for n in 1..=99 {
+        let dir = if n == 1 { base.join(stamp) } else { base.join(format!("{stamp}_{n}")) };
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err(format!("no free session folder for {} in {}", stamp, base.display()))
+}
+
 fn meeting(mic: Option<&str>) {
-    let dir = home().join(".voxis").join("meetings").join(chrono::Local::now().format("%Y-%m-%d_%H%M").to_string());
+    let base = home().join(".voxis").join("meetings");
     let (model, vad) = models().unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1)
     });
+    let stamp = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
+    let dir = reserve_meeting_dir(&base, &stamp).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
     println!("sessão: {}", dir.display());
-    record(&dir, mic, Stop::Enter, || {});
+    if let Err(e) = record(&dir, mic, Stop::Enter, || {}) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     transcribe(&dir, &model.to_string_lossy(), &vad.to_string_lossy(), "pt");
     if let Err(e) = minutes::run(&dir) {
         // the transcript is already on disk; summarize can be retried alone
@@ -216,28 +244,53 @@ fn open_track(
 
 /// Writes a track at the device rate as f32 mono, padding silence whenever
 /// the clock says samples are missing. Returns the peak level for a sanity print.
-fn writer(path: std::path::PathBuf, rate: u32, rx: mpsc::Receiver<Chunk>) -> std::thread::JoinHandle<(u64, f32)> {
+fn writer(
+    path: std::path::PathBuf,
+    rate: u32,
+    rx: mpsc::Receiver<Chunk>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<Result<(u64, f32), String>> {
     std::thread::spawn(move || {
-        let spec = hound::WavSpec { channels: 1, sample_rate: rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
-        let mut w = hound::WavWriter::create(&path, spec).expect("create wav");
-        let (mut written, mut peak) = (0u64, 0f32);
-        for c in rx {
-            // where this chunk should start on the shared clock
-            let due = ((c.at * rate as f64) as u64).saturating_sub(c.mono.len() as u64);
-            if due > written + rate as u64 / 10 {
-                for _ in written..due {
-                    w.write_sample(0.0f32).unwrap();
-                }
-            }
-            for s in c.mono {
-                peak = peak.max(s.abs());
-                w.write_sample(s).unwrap();
-            }
-            written = w.len() as u64;
+        let result = hound::WavWriter::create(&path, track_spec(rate))
+            .map_err(|e| format!("disk_write_error: {}: {e}", path.display()))
+            .and_then(|w| write_track(w, rate, rx));
+        if result.is_err() {
+            // ends the recording loop: there is no point waiting for a stop
+            failed.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        w.finalize().unwrap();
-        (written, peak)
+        result
     })
+}
+
+fn track_spec(rate: u32) -> hound::WavSpec {
+    hound::WavSpec { channels: 1, sample_rate: rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float }
+}
+
+/// The track's samples into `w`, padded on the shared clock. A failed
+/// write (a full disk) stops the track: the header is finalized over the
+/// samples already on disk, so the file stays playable and recoverable.
+fn write_track<W: std::io::Write + std::io::Seek>(mut w: hound::WavWriter<W>, rate: u32, rx: mpsc::Receiver<Chunk>) -> Result<(u64, f32), String> {
+    let (mut written, mut peak) = (0u64, 0f32);
+    let mut failure = None;
+    'chunks: for c in rx {
+        // where this chunk should start on the shared clock
+        let due = ((c.at * rate as f64) as u64).saturating_sub(c.mono.len() as u64);
+        let pad = if due > written + rate as u64 / 10 { due - written } else { 0 };
+        for s in std::iter::repeat_n(0.0f32, pad as usize).chain(c.mono) {
+            peak = peak.max(s.abs());
+            if let Err(e) = w.write_sample(s) {
+                failure = Some(e);
+                break 'chunks;
+            }
+        }
+        written = w.len() as u64;
+    }
+    let finalized = w.finalize();
+    match (failure, finalized) {
+        (Some(e), _) => Err(format!("disk_write_error: {e}")),
+        (None, Err(e)) => Err(format!("disk_write_error: {e}")),
+        (None, Ok(())) => Ok((written, peak)),
+    }
 }
 
 pub enum Stop {
@@ -252,8 +305,21 @@ pub struct Track {
     pub rate: u32,
 }
 
-pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl FnOnce()) -> (Track, Track) {
-    std::fs::create_dir_all(dir).unwrap();
+/// The folder a recording writes into: created when missing, refused when
+/// it already holds a track, before any writer opens (a writer would
+/// truncate it).
+fn prepare_record_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for track in ["mic.wav", "system.wav"] {
+        if dir.join(track).exists() {
+            return Err(format!("{} already holds {track}; refusing to overwrite a recording", dir.display()));
+        }
+    }
+    Ok(())
+}
+
+pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl FnOnce()) -> Result<(Track, Track), String> {
+    prepare_record_dir(dir)?;
     let mic = pick_input(mic_want).unwrap_or_else(|e| panic!("{e}"));
     let out = pick_output(config_value("speaker").as_deref()).unwrap_or_else(|e| panic!("{e}"));
     let mic_cfg = mic.default_input_config().unwrap();
@@ -265,8 +331,10 @@ pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl F
     let t0 = Instant::now();
     let (mtx, mrx) = mpsc::channel();
     let (stx, srx) = mpsc::channel();
-    let mw = writer(dir.join("mic.wav"), mic_cfg.sample_rate().0, mrx);
-    let sw = writer(dir.join("system.wav"), out_cfg.sample_rate().0, srx);
+    let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mw = writer(dir.join("mic.wav"), mic_cfg.sample_rate().0, mrx, failed.clone());
+    let sw = writer(dir.join("system.wav"), out_cfg.sample_rate().0, srx, failed.clone());
+    let failing = || failed.load(std::sync::atomic::Ordering::SeqCst);
     let ms = open_track(&mic, mic_cfg.clone(), t0, mtx.clone());
     let ss = open_track(&out, out_cfg.clone(), t0, stx.clone());
     ms.play().unwrap();
@@ -275,14 +343,16 @@ pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl F
     match stop {
         Stop::After(s) => {
             println!("gravando por {s} s...");
-            std::thread::sleep(std::time::Duration::from_secs_f64(s));
+            while t0.elapsed().as_secs_f64() < s && !failing() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
         }
         Stop::Enter => {
             println!("gravando... Enter para parar");
             let _ = std::io::stdin().lock().lines().next();
         }
         Stop::File(f) => {
-            while !f.exists() {
+            while !f.exists() && !failing() {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
@@ -295,11 +365,13 @@ pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl F
     let _ = stx.send(Chunk { at: secs, mono: vec![] });
     drop(mtx);
     drop(stx);
-    let (mn, mp) = mw.join().unwrap();
-    let (sn, sp) = sw.join().unwrap();
+    // both writers finish (and finalize) before either error is returned
+    let (mic_done, sys_done) = (mw.join().unwrap(), sw.join().unwrap());
+    let (mn, mp) = mic_done?;
+    let (sn, sp) = sys_done?;
     println!("{secs:.1} s  mic {:.1} s peak {mp:.3}  system {:.1} s peak {sp:.3}",
              mn as f64 / mic_cfg.sample_rate().0 as f64, sn as f64 / out_cfg.sample_rate().0 as f64);
-    (Track { frames: mn, rate: mic_cfg.sample_rate().0 }, Track { frames: sn, rate: out_cfg.sample_rate().0 })
+    Ok((Track { frames: mn, rate: mic_cfg.sample_rate().0 }, Track { frames: sn, rate: out_cfg.sample_rate().0 }))
 }
 
 /// Mono f32 at RATE. Box-filter average then linear interpolation: good
@@ -506,5 +578,125 @@ mod tests {
         let (md, _) = transcript_md(lines);
 
         assert_eq!(md.matches("vamos marcar sexta então").count(), 2);
+    }
+
+    fn sha(path: &Path) -> Vec<u8> {
+        use sha2::Digest;
+        sha2::Sha256::digest(std::fs::read(path).unwrap()).to_vec()
+    }
+
+    // ------------------------------------------------------------ S2 meeting folders (F18)
+
+    #[test]
+    fn the_meeting_folder_is_reserved_with_a_create_new_call() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(base.path().join("2026-11-07_1432")).unwrap();
+
+        let dir = reserve_meeting_dir(base.path(), "2026-11-07_1432").unwrap();
+
+        assert_ne!(dir, base.path().join("2026-11-07_1432"), "an existing folder must never be reused");
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn a_second_meeting_in_the_same_minute_gets_its_own_folder_and_keeps_the_first() {
+        let base = tempfile::tempdir().unwrap();
+        let first = reserve_meeting_dir(base.path(), "2026-11-07_1432").unwrap();
+        std::fs::write(first.join("mic.wav"), b"first meeting").unwrap();
+        let before = sha(&first.join("mic.wav"));
+
+        let second = reserve_meeting_dir(base.path(), "2026-11-07_1432").unwrap();
+
+        assert_eq!(first, base.path().join("2026-11-07_1432"));
+        assert_eq!(second, base.path().join("2026-11-07_1432_2"));
+        assert_eq!(sha(&first.join("mic.wav")), before);
+    }
+
+    #[test]
+    fn after_99_folders_in_one_minute_the_meeting_refuses_with_no_free_session_folder() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(base.path().join("2026-11-07_1432")).unwrap();
+        for n in 2..=99 {
+            std::fs::create_dir_all(base.path().join(format!("2026-11-07_1432_{n}"))).unwrap();
+        }
+
+        let e = reserve_meeting_dir(base.path(), "2026-11-07_1432").unwrap_err();
+
+        assert!(e.contains("no free session folder"), "{e}");
+        assert!(!base.path().join("2026-11-07_1432_100").exists());
+    }
+
+    #[test]
+    fn recording_into_a_folder_that_already_holds_a_track_is_refused_and_leaves_it_unchanged() {
+        for track in ["mic.wav", "system.wav"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(track), b"an earlier recording").unwrap();
+
+            let refused = prepare_record_dir(dir.path());
+
+            assert!(refused.is_err(), "{track} must be refused");
+            assert_eq!(std::fs::read(dir.path().join(track)).unwrap(), b"an earlier recording");
+        }
+    }
+
+    #[test]
+    fn recording_into_a_missing_or_empty_folder_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("new");
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        assert_eq!(prepare_record_dir(&missing), Ok(()));
+        assert_eq!(prepare_record_dir(&empty), Ok(()));
+        assert!(missing.is_dir());
+    }
+
+    /// A file that accepts `cap` bytes, then fails like a full disk; bytes
+    /// already written can still be rewritten (the WAV header). The bytes
+    /// are shared so the test reads what reached the "disk".
+    #[derive(Clone)]
+    struct FullDisk {
+        data: std::rc::Rc<std::cell::RefCell<std::io::Cursor<Vec<u8>>>>,
+        cap: u64,
+    }
+
+    impl std::io::Write for FullDisk {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut d = self.data.borrow_mut();
+            if d.position() + buf.len() as u64 > self.cap {
+                return Err(std::io::Error::other("disk full"));
+            }
+            std::io::Write::write(&mut *d, buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Seek for FullDisk {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            std::io::Seek::seek(&mut *self.data.borrow_mut(), pos)
+        }
+    }
+
+    #[test]
+    fn a_failed_wav_write_finalizes_the_header_of_the_samples_written() {
+        let mut header = std::io::Cursor::new(Vec::new());
+        hound::WavWriter::new(&mut header, track_spec(16_000)).unwrap().finalize().unwrap();
+        let header_len = header.get_ref().len() as u64;
+        let disk = FullDisk { data: Default::default(), cap: header_len + 100 * 4 };
+        let w = hound::WavWriter::new(disk.clone(), track_spec(16_000)).unwrap();
+        let (tx, rx) = mpsc::channel();
+        tx.send(Chunk { at: 0.0, mono: vec![0.5; 400] }).unwrap();
+        drop(tx);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write_track(w, 16_000, rx)));
+
+        let result = result.expect("a write failure must not panic");
+        let e = result.unwrap_err();
+        assert!(e.starts_with("disk_write_error"), "{e}");
+        let bytes = disk.data.borrow().get_ref().clone();
+        let r = hound::WavReader::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(r.len(), 100, "the header counts the 100 samples that reached the disk");
     }
 }

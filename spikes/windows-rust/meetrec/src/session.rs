@@ -109,8 +109,7 @@ fn start() -> Result<(), String> {
         return Err(format!("a session is already active: {}", dir.display()));
     }
     let id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let dir = sessions_dir().join(&id);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir = create_session_dir(&sessions_dir(), &id)?;
     let t = now();
     write(&dir, &json!({
         "schema_version": 1, "session_id": id, "state": "starting", "created_at": t, "updated_at": t,
@@ -135,13 +134,30 @@ fn start() -> Result<(), String> {
     Err(format!("recorder did not start: {}", log.lines().last().unwrap_or("no output")))
 }
 
+/// A recorder that failed: `failed`, with `disk_write_error` when a track
+/// could not be written (both WAV headers are already finalized), else
+/// `recorder_error`. Every file stays.
+fn recorder_failed(dir: &Path, e: &str) {
+    let code = if e.starts_with("disk_write_error") { "disk_write_error" } else { "recorder_error" };
+    fail(dir, "failed", code, e);
+}
+
+/// `sessions/<id>` for a new session, created with a call that fails when
+/// the folder exists: a session folder is never reused.
+fn create_session_dir(sessions: &Path, id: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(sessions).map_err(|e| format!("{}: {e}", sessions.display()))?;
+    let dir = sessions.join(id);
+    std::fs::create_dir(&dir).map_err(|e| format!("session folder {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
 fn recorder(dir: &Path) -> Result<(), String> {
     let stop_file = dir.join("stop");
     let mic = configured_mic();
     let started = || {
         let _ = update(dir, |m| m["state"] = json!("recording"));
     };
-    let (mic_t, sys_t) = super::record(dir, mic.as_deref(), super::Stop::File(stop_file.clone()), started);
+    let (mic_t, sys_t) = super::record(dir, mic.as_deref(), super::Stop::File(stop_file.clone()), started)?;
     let _ = std::fs::remove_file(&stop_file);
     let channel = |name: &str, t: &super::Track| {
         json!({"path": dir.join(name).to_string_lossy(), "frames": t.frames, "sample_rate": t.rate, "channels": 1})
@@ -270,9 +286,7 @@ pub fn cli(cmd: &str, args: &[String]) -> i32 {
                 m["error"] = Value::Null;
             })
         }),
-        "miris.recorder" => arg(0).map(PathBuf::from).and_then(|d| {
-            recorder(&d).inspect_err(|e| fail(&d, "failed", "recorder_error", e))
-        }),
+        "miris.recorder" => arg(0).map(PathBuf::from).and_then(|d| recorder(&d).inspect_err(|e| recorder_failed(&d, e))),
         "miris.pipeline" => arg(0).map(PathBuf::from).and_then(|d| match pipeline(&d) {
             Ok(note) => {
                 println!("note: {}", note.display());
@@ -336,5 +350,86 @@ mod tests {
         assert_eq!(note, session.path().join("transcript.md"));
         assert!(!session.path().join("ata.md").exists());
         assert_eq!(read(session.path()).unwrap()["state"], "completed");
+    }
+
+    // ------------------------------------------------------------ S2 session folders and recover
+
+    #[test]
+    fn start_refuses_a_session_folder_that_already_exists() {
+        let sessions = tempfile::tempdir().unwrap();
+        let taken = sessions.path().join("20261107-143200");
+        std::fs::create_dir_all(&taken).unwrap();
+        std::fs::write(taken.join("mic.wav"), b"earlier").unwrap();
+
+        let refused = create_session_dir(sessions.path(), "20261107-143200");
+        let fresh = create_session_dir(sessions.path(), "20261107-143201");
+
+        assert!(refused.is_err());
+        assert_eq!(std::fs::read(taken.join("mic.wav")).unwrap(), b"earlier");
+        assert_eq!(fresh, Ok(sessions.path().join("20261107-143201")));
+    }
+
+    /// A WAV as the recorder writes it, `n` samples.
+    fn wav(path: &Path, n: usize) {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 16_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..n {
+            w.write_sample((i as f32 / n as f32) - 0.5).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn data_offset(bytes: &[u8]) -> usize {
+        bytes.windows(4).position(|w| w == b"data").unwrap() + 8
+    }
+
+    #[test]
+    fn recover_fixes_only_the_header_sizes_and_keeps_every_sample_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mic.wav");
+        wav(&path, 1000);
+        let mut killed = std::fs::read(&path).unwrap();
+        let off = data_offset(&killed);
+        // a killed recorder never rewrote the sizes: both still say zero
+        killed[4..8].copy_from_slice(&0u32.to_le_bytes());
+        killed[off - 4..off].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&path, &killed).unwrap();
+
+        repair_wav(&path).unwrap();
+
+        let fixed = std::fs::read(&path).unwrap();
+        assert_eq!(fixed.len(), killed.len());
+        assert_eq!(fixed[off..], killed[off..], "sample bytes unchanged");
+        assert_eq!(fixed[8..off - 4], killed[8..off - 4], "only the size fields change");
+        assert_eq!(hound::WavReader::open(&path).unwrap().len(), 1000);
+    }
+
+    #[test]
+    fn a_disk_write_error_fails_the_session_and_keeps_both_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("session.json"), r#"{"schema_version": 1, "state": "recording"}"#).unwrap();
+        wav(&dir.path().join("mic.wav"), 100);
+        wav(&dir.path().join("system.wav"), 100);
+        let (mic, sys) = (std::fs::read(dir.path().join("mic.wav")).unwrap(), std::fs::read(dir.path().join("system.wav")).unwrap());
+
+        recorder_failed(dir.path(), "disk_write_error: disk full");
+
+        let m = read(dir.path()).unwrap();
+        assert_eq!(m["state"], "failed");
+        assert_eq!(m["error"]["code"], "disk_write_error");
+        assert_eq!(std::fs::read(dir.path().join("mic.wav")).unwrap(), mic);
+        assert_eq!(std::fs::read(dir.path().join("system.wav")).unwrap(), sys);
+    }
+
+    #[test]
+    fn recover_leaves_a_valid_wav_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system.wav");
+        wav(&path, 500);
+        let before = std::fs::read(&path).unwrap();
+
+        repair_wav(&path).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
