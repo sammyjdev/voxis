@@ -137,6 +137,7 @@ Proof: `TRAY_TEST only_a_failed_download_offers_to_download_again`
 Proof: `TRAY_TEST quitting_stops_a_download_still_running`
 Proof: `TRAY_TEST quitting_the_tray_stops_its_model_download`
 Proof: `TRAY_TEST a_download_asked_for_after_quit_never_starts`
+Proof: `TRAY_TEST a_download_refused_after_quit_runs_no_process`
 
 ## Coverage
 
@@ -169,6 +170,7 @@ Evidence:
 - `meetrec` model lookup: 3 places plus the none case, 1 skip rule -> decides
 - `models fetch`: 3 exits, a `.part` -> rename step, and a skip-when-present rule -> decides
 - tray fetch handling: 4 outcomes -> decides; `settings.rs` path default: 2 branches -> decides
+- tray menu click handlers (`handle_menu` in `lib.rs`: Quit -> `models::quit`, retry -> `models::retry`, autostart -> `autostart::toggle`) -> wiring, one call each into a function that is proven at its own layer. No automated proof: a Tauri runtime in tests failed here with STATUS_ENTRYPOINT_NOT_FOUND. Owner's choice, 2026-11-06, after verification round 5 (mutant F18)
 - closest analogue: `apps/tray/src-tauri/src/settings.rs` `laris_dir_default` (checkout vs fallback), already proven per branch at its own layer by `a_source_build_defaults_to_the_laris_venv_of_its_own_checkout` and `a_build_whose_checkout_has_no_venv_falls_back_to_code_voxis`
 
 Cost: 16 unit proofs across 6 files plus 3 scripts. Without them, the fetch exits and the lookup order would be proven only by one smoke path.

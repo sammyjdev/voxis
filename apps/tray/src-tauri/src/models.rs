@@ -273,6 +273,25 @@ mod tests {
     }
 
     #[test]
+    fn a_download_refused_after_quit_runs_no_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("ran.txt");
+        let run = FetchRun::default();
+        run.stop();
+        let script = if cfg!(windows) {
+            format!("echo ran> \"{}\"", marker.display())
+        } else {
+            format!("touch '{}'", marker.display())
+        };
+        let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+
+        let _ = run.start(program, &[flag, &script]);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        assert!(!marker.exists());
+    }
+
+    #[test]
     fn quitting_stops_a_download_still_running() {
         let run = FetchRun::default();
         #[cfg(windows)]
