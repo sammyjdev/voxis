@@ -161,10 +161,18 @@ def across_runs(values: list[float | None]) -> dict:
     return {"n": len(v), "min": min(v), "median": statistics.median(v), "max": max(v)}
 
 
-def claim(first: list[float | None], second: list[float | None]) -> str:
+PROTOCOL_BLOCKS = 6
+
+
+def claim(first: list[float | None], second: list[float | None], blocks: list[int] | None = None) -> str:
     """Criterion 77: a difference only when the per-block sign is the same in
-    every block; a tie or a missing block is no consistent difference."""
-    if not first or len(first) != len(second) or any(x is None for x in first + second):
+    all 6 distinct protocol blocks; a tie, a missing block or any other count
+    of blocks is no consistent difference."""
+    if len(first) != PROTOCOL_BLOCKS or len(second) != PROTOCOL_BLOCKS:
+        return "no consistent difference"
+    if blocks is not None and len(set(blocks)) != PROTOCOL_BLOCKS:
+        return "no consistent difference"
+    if any(x is None for x in first + second):
         return "no consistent difference"
     diffs = [a - b for a, b in zip(first, second)]
     if all(d < 0 for d in diffs):
@@ -296,7 +304,7 @@ def variant_command(variant: dict, wav: str, spans: str, out_json: str, sweeps: 
 
 def run_variant(variant: dict, run_dir: str, sweeps: int, extra_env: dict, host: dict, source_sha: str | None,
                 sample_interval_s: float = SAMPLE_INTERVAL_S, wav: str = "", spans: str = "", table: str = "prompt",
-                repo: str | None = None) -> dict:
+                repo: str | None = None, source_sha_reason: str | None = None) -> dict:
     """One process: spawn, sample until exit, keep stdout/stderr/exit code,
     then complete the engine's schema 2 JSON with the driver's records."""
     os.makedirs(run_dir, exist_ok=True)
@@ -307,8 +315,21 @@ def run_variant(variant: dict, run_dir: str, sweeps: int, extra_env: dict, host:
     ready = {"ms": None}
     stdout_lines: list[str] = []
     spawn_ms = int(time.time() * 1000)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=open(os.path.join(run_dir, "stderr.log"), "wb"),
-                            env=env, text=True, encoding="utf-8", errors="replace")
+    stderr_path = os.path.join(run_dir, "stderr.log")
+    try:
+        with open(stderr_path, "wb") as stderr_file:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_file,
+                                    env=env, text=True, encoding="utf-8", errors="replace")
+    except OSError as e:  # missing executable, access denied: the variant is unavailable, the run goes on
+        rec = {"variant": variant["id"], "cmd": cmd, "exit_code": None, "spawn_ms": spawn_ms, "ready_ms": None,
+               "samples": [], "unavailable": f"unavailable: {e} ({cmd[0]})"}
+        with open(stderr_path, "w", encoding="utf-8") as f:
+            f.write(f"launch failed: {e}\n")
+        with open(os.path.join(run_dir, "stdout.log"), "w", encoding="utf-8"):
+            pass
+        with open(os.path.join(run_dir, "run.json"), "w") as f:
+            json.dump(rec, f, indent=1)
+        return rec
 
     def read_stdout() -> None:
         for line in proc.stdout:
@@ -363,10 +384,30 @@ def run_variant(variant: dict, run_dir: str, sweeps: int, extra_env: dict, host:
         backend, reason = raw.get("backend"), raw.get("backend_unavailable")
     _field(raw, "backend", backend, reason)
     raw["host"] = host
-    raw["source_sha"] = source_sha
+    _field(raw, "source_sha", source_sha, source_sha_reason or "git did not report a commit")
     binary = variant.get("binary") or variant.get("exe") or variant.get("python")
     _field(raw, "binary_sha256", sha256_file(binary) if binary and os.path.isfile(binary) else None,
            f"{binary} not found")
+    prompt_file = env.get("STT_PROMPT_FILE")
+    _field(raw, "prompt_sha256", sha256_file(prompt_file) if prompt_file and os.path.isfile(prompt_file) else None,
+           "no prompt file for this table" if not prompt_file else f"{prompt_file} not found")
+    if variant.get("kind") == "native":
+        model = variant.get("model")
+        raw["model"] = {"path": model, "sha256": sha256_file(model) if model and os.path.isfile(model) else None}
+        if raw["model"]["sha256"] is None:
+            raw["model"]["sha256_unavailable"] = f"{model} not found"
+    elif variant.get("kind") == "python":
+        py = variant.get("python")
+        version, reason = _run_text([py, "-c", "import sys; print(sys.version)"]) if py else (None, "no python")
+        raw["python"] = {"executable": py, "version": version}
+        if version is None:
+            raw["python"]["version_unavailable"] = reason
+        if not raw.get("engine_package"):
+            raw["engine_package"] = None
+            raw["engine_package_unavailable"] = "the engine script did not report its package versions"
+        if not raw.get("model"):
+            raw["model"] = None
+            raw["model_unavailable"] = "the engine script did not report the model identity"
     raw["build"] = build_record(variant, repo)
     raw["exit_code"] = code
     raw["cold_s"] = process_stats(raw, spawn_ms, ready["ms"])["cold_s"]
@@ -384,9 +425,12 @@ def run_variant(variant: dict, run_dir: str, sweeps: int, extra_env: dict, host:
 
 # ------------------------------------------------------------------ commands
 
+def git_head_with_reason(repo: str) -> tuple[str | None, str | None]:
+    return _run_text(["git", "-C", repo, "rev-parse", "HEAD"])
+
+
 def git_head(repo: str) -> str | None:
-    out, _ = _run_text(["git", "-C", repo, "rev-parse", "HEAD"])
-    return out
+    return git_head_with_reason(repo)[0]
 
 
 def cmd_prepare(a) -> None:
@@ -426,14 +470,21 @@ def cmd_run(a) -> None:
     by_id = {v["id"]: v for v in variants}
     orders = block_orders([v["id"] for v in variants])[: a.blocks]
     host = host_record()
+    source_sha, source_reason = git_head_with_reason(a.repo)
     manifest = {"protocol_sha256": sha256_file(a.protocol), "corpus": corpus, "table": a.table, "orders": orders,
-                "sweeps": a.sweeps, "source_sha": git_head(a.repo), "host": host, "started": time.time(), "runs": []}
+                "sweeps": a.sweeps, "source_sha": source_sha, "host": host, "started": time.time(), "runs": [],
+                "blocks_run": len(orders), "protocol_blocks": PROTOCOL_BLOCKS,
+                "claims_allowed": len(orders) == PROTOCOL_BLOCKS}
+    if source_sha is None:
+        manifest["source_sha_unavailable"] = source_reason or "git did not report a commit"
+    if not manifest["claims_allowed"]:
+        print(f"smoke run: {len(orders)} of {PROTOCOL_BLOCKS} blocks, no protocol claim", file=sys.stderr)
     env = _prompt_env(a.out, a.table)
     for b, order in enumerate(orders, 1):
         for v in order:
             run_dir = os.path.join(a.out, a.table, f"block{b}", v)
             rec = run_variant(by_id[v], run_dir, a.sweeps, env, host, manifest["source_sha"], wav=a.wav,
-                              spans=a.spans, table=a.table, repo=a.repo)
+                              spans=a.spans, table=a.table, repo=a.repo, source_sha_reason=source_reason)
             manifest["runs"].append({"block": b, "variant": v, "dir": run_dir, "exit_code": rec["exit_code"],
                                      "unavailable": rec.get("unavailable")})
             print(f"block {b} {v}: exit {rec['exit_code']} {rec.get('unavailable', '')}", flush=True)
@@ -452,8 +503,9 @@ def cmd_controls(a) -> None:
             with open(spans, "w") as f:
                 json.dump([[0, 10 * RATE]], f)
             run_dir = os.path.join(a.out, "controls", name, v["id"])
-            rec = run_variant(v, run_dir, 1, _prompt_env(a.out, "prompt"), {}, git_head(a.repo), wav=clip["path"],
-                              spans=spans, table="prompt", repo=a.repo)
+            sha, sha_reason = git_head_with_reason(a.repo)
+            rec = run_variant(v, run_dir, 1, _prompt_env(a.out, "prompt"), {}, sha, wav=clip["path"],
+                              spans=spans, table="prompt", repo=a.repo, source_sha_reason=sha_reason)
             text = ""
             if rec["exit_code"] == 0:
                 text = " ".join(x["hyp"] for x in json.load(open(os.path.join(run_dir, "result.json")))["sweeps"][0])
@@ -473,7 +525,14 @@ def cmd_report(a) -> None:
         if not os.path.isfile(mpath):
             continue
         m = json.load(open(mpath))
-        lines += [f"## Table: {table}", "", f"protocol sha256 `{m['protocol_sha256']}`, source `{m['source_sha']}`, "
+        blocks_run = len(m["orders"])
+        if blocks_run != PROTOCOL_BLOCKS:
+            lines += [f"## Table: {table}", "",
+                      f"**smoke run: {blocks_run} of {PROTOCOL_BLOCKS} protocol blocks. No protocol claim is made from it.**",
+                      ""]
+        else:
+            lines += [f"## Table: {table}", ""]
+        lines += [f"protocol sha256 `{m['protocol_sha256']}`, source `{m['source_sha']}`, "
                   f"{len(m['orders'])} blocks, {m['sweeps']} sweeps per process", ""]
         per: dict = {}
         for r in m["runs"]:
@@ -502,7 +561,7 @@ def cmd_report(a) -> None:
             for k in ("warm_p50", "rtf", "cold_s"):
                 a_ = [(per[x][b].get("stats") or {}).get(k) for b in blocks]
                 b_ = [(per[y][b].get("stats") or {}).get(k) for b in blocks]
-                lines.append(f"- {x} vs {y}, {k}: {claim(a_, b_)}")
+                lines.append(f"- {x} vs {y}, {k}: {claim(a_, b_, blocks)}")
         lines += ["", "| variant | WER | CER | terms right | empty | repeated 3-grams | omitted words |",
                   "|---|---|---|---|---|---|---|"]
         for v, blocks in sorted(per.items()):
