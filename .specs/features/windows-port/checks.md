@@ -71,6 +71,7 @@ Proof: run native | session::tests::start_refuses_while_the_newest_active_sessio
 **C13** - A dead recorder in `starting`, `recording` or `stopping` becomes `interrupted` with `owner_died`, files kept, and the new session starts; a pid reused by another program is dead (AC 13)
 Proof: run native | session::tests::a_dead_recorder_is_marked_interrupted_with_owner_died_and_a_new_session_starts ... ok
 Proof: run native | session::tests::a_pid_reused_by_another_program_is_not_a_live_owner ... ok
+Proof: run native | session::tests::a_session_whose_recorder_exited_does_not_block_a_new_start_under_the_system_owner_check ... ok
 Proof: walk - matrix M7
 
 **C14** - A dead pipeline in `processing` becomes `captured`, files kept, and `process <id>` is offered (AC 14)
@@ -88,13 +89,21 @@ Proof: run native | session::tests::a_recorder_that_exits_before_recording_fails
 **C17** - `stop` without `captured` within 60 s ends the verified recorder and writes `interrupted` with `recorder_timeout`, files recoverable; a recorder that cannot be ended keeps `stopping` and exits 1 `recorder did not stop; owner still live` (AC 17)
 Proof: run native | session::tests::stop_ends_a_recorder_that_never_finishes_and_marks_it_interrupted ... ok
 Proof: run native | session::tests::stop_keeps_stopping_when_the_recorder_cannot_be_ended ... ok
+Proof: run native | session::tests::stop_keeps_the_terminal_failure_the_recorder_wrote_after_the_stop_request ... ok
 
 **C18** - A WAV write failure finalizes the headers of the data written, sets `failed` with `disk_write_error`, and keeps both files (AC 18, unit-proven)
 Proof: run native | tests::a_failed_wav_write_finalizes_the_header_of_the_samples_written ... ok
 Proof: run native | session::tests::a_disk_write_error_fails_the_session_and_keeps_both_files ... ok
+Proof: run native | tests::a_full_disk_under_the_buffered_writer_leaves_a_wav_that_counts_the_samples_on_disk ... ok
+Proof: run native | tests::a_half_written_sample_at_the_end_is_left_out_of_the_header ... ok
+Proof: run native | tests::a_disk_that_took_less_than_a_header_reports_the_repair_failure_with_the_write_error ... ok
+Proof: run native | tests::a_track_that_cannot_be_created_ends_in_an_error_not_a_panic ... ok
 
 **C19** - Nothing deletes, moves or compresses a file in a session, `meetings/` or log folder on its own (AC 19)
 Proof: run contract | PASS: no_automatic_retention
+Proof: run tray | laris::tests::a_windows_run_is_appended_to_the_log_and_nothing_is_moved_or_replaced ... ok
+Proof: run tray | tests::an_exit_is_classified_from_the_latest_run_not_from_an_older_one_in_the_appended_log ... ok
+Proof: run tray | laris::tests::macos_and_linux_keep_one_generation_of_the_log ... ok
 
 ### S4 - Settings and configuration tell the truth (F20, F22, legacy controls)
 
@@ -185,9 +194,11 @@ Proof: run native | dictate::tests::a_paste_puts_the_text_sends_ctrl_v_and_resto
 
 **C41** - Fewer than 4 injected events leave the text on the clipboard, skip the restore and log `paste failed: injected <n> of 4` (AC 41, unit-proven)
 Proof: run native | dictate::tests::a_partial_injection_leaves_the_text_on_the_clipboard ... ok
+Proof: run native | dictate::tests::a_paste_that_did_not_happen_has_no_completion_timestamp ... ok
 
 **C42** - A clipboard that cannot be opened or set logs `paste failed: clipboard <error>` without the text and hides the orb (AC 42)
 Proof: run native | dictate::tests::a_clipboard_failure_is_logged_without_the_text ... ok
+Proof: run native | dictate::tests::a_clipboard_failure_hides_the_orb_in_both_modes ... ok
 
 **C43** - An orb window or WebView2 that cannot be created leaves dictation running and logs `overlay unavailable: <error>` (AC 43, unit-proven)
 Proof: run native | dictate::tests::an_orb_that_cannot_be_created_leaves_dictation_running ... ok
@@ -196,10 +207,14 @@ Proof: run native | dictate::tests::an_orb_that_cannot_be_created_leaves_dictati
 Proof: run native | dictate::tests::a_lost_microphone_logs_and_exits_with_code_3 ... ok
 Proof: run tray | tests::a_dictation_that_lost_its_microphone_is_not_respawned ... ok
 Proof: run tray | tests::the_dictation_row_offers_one_restart_after_a_lost_microphone ... ok
+Proof: run native | dictate::tests::a_dictate_that_starts_with_no_microphone_exits_3_like_a_lost_one ... ok
+Proof: run tray | tests::a_poll_that_sees_exit_3_or_a_model_failure_does_not_respawn_in_the_same_tick ... ok
+Proof: run tray | tests::a_poll_after_another_exit_keeps_the_three_attempt_respawn ... ok
 Proof: walk - matrix M11
 
 **C45** - An input format other than `f32`/`i16`, or a model that fails to load, logs `formato de áudio não suportado: <format>` or `modelo não carregou: <path>: <error>` and exits 1 (AC 45, unit-proven)
 Proof: run native | dictate::tests::an_unsupported_sample_format_or_model_failure_is_logged_with_exit_1 ... ok
+Proof: run native | dictate::tests::a_model_that_fails_to_make_its_state_or_to_warm_up_is_logged_not_a_panic ... ok
 
 ### S7 - Hardware, backend and model recovery
 
@@ -210,6 +225,10 @@ Proof: walk - matrix M3, the backend line in `laris.log`
 **C47** - A GPU init failure falling back to CPU logs `sem GPU: usando CPU` in dictate and `backend: "CPU"` in the benchmark JSON (AC 47, unit-proven)
 Proof: run native | dictate::tests::a_cpu_fallback_is_logged_as_sem_gpu ... ok
 Proof: run bench | test_a_gpu_init_failure_is_recorded_as_the_cpu_backend PASSED
+Proof: run native | dictate::tests::the_backend_whisper_cpp_names_is_read_from_its_own_log_line ... ok
+Proof: run native | dictate::tests::a_gpu_that_whisper_cpp_did_not_use_is_logged_as_sem_gpu_whatever_ggml_registered ... ok
+Proof: run native | dictate::tests::without_a_backend_report_the_registered_devices_decide ... ok
+Proof: run native | dictate::tests::the_log_hook_is_wired_to_whisper_cpp_itself ... ok
 
 **C48** - `models fetch --verify` hashes each present file against its pin and replaces a differing one only after a verified download through `<name>.part`; plain `fetch` keeps the name-based `ready`; the tray's retry row after `modelo não carregou` runs `--verify` (AC 48)
 Proof: run native | models::tests::verify_replaces_a_file_whose_hash_differs_after_a_verified_download ... ok
@@ -306,10 +325,16 @@ Proof: walk - Vera's prompt and noprompt tables
 
 **C72** - CUDA, Vulkan and Python on the same host; a variant that cannot run reports `unavailable: <exact error>` (AC 72)
 Proof: run bench | test_a_variant_that_fails_is_recorded_with_its_exit_code_and_error PASSED
+Proof: run bench | test_a_variant_that_cannot_launch_is_recorded_as_unavailable_with_its_launch_error PASSED
+Proof: run bench | test_a_run_with_an_unlaunchable_variant_still_writes_the_manifest PASSED
 Proof: walk - Vera's runs
 
 **C73** - Each variant run writes schema 2 raw JSON with exit code, stderr, binary hash, source SHA, backend, build record and host record; an unreadable field is null with a reason (AC 73)
 Proof: run bench | test_a_fake_variant_run_writes_raw_json_with_exit_code_backend_and_hashes PASSED
+Proof: run bench | test_a_missing_source_sha_keeps_the_reason_it_could_not_be_read PASSED
+Proof: run bench | test_a_python_variant_record_names_the_engine_package_the_model_and_the_prompt PASSED
+Proof: run bench | test_a_native_variant_record_carries_the_model_file_hash PASSED
+Proof: run bench | test_voice_py_reports_the_python_package_versions_and_the_model_identity PASSED
 
 **C74** - The report gives warm p50 and p95, RTF per sweep and cold time per variant, with run counts and min, median, max (AC 74)
 Proof: run bench | test_process_stats_give_warm_percentiles_over_all_sweeps_and_rtf_per_sweep PASSED
@@ -326,6 +351,8 @@ Proof: walk - Vera's run manifest
 **C77** - A difference is claimed only when the per-block sign is the same in all 6 blocks, else `no consistent difference` (AC 77)
 Proof: run bench | test_a_difference_is_claimed_only_when_every_block_has_the_same_sign PASSED
 Proof: run bench | test_one_block_with_the_other_sign_means_no_consistent_difference PASSED
+Proof: run bench | test_a_difference_needs_all_six_distinct_protocol_blocks PASSED
+Proof: run bench | test_a_report_from_fewer_than_six_blocks_makes_no_difference_claim PASSED
 
 **C78** - `voice_score.py` reports WER, CER, term recall, empty outputs, repeated n-grams and omitted words over one normalization and reference, schema 1 and 2, and states the 19-against-20 mismatch (AC 78)
 Proof: run bench | test_scoring_reports_wer_cer_terms_empty_outputs_repeats_and_omissions PASSED
@@ -337,6 +364,8 @@ Proof: run bench | test_a_control_run_reports_every_non_empty_output PASSED
 
 **C80** - The dictation log carries key-release and paste-complete timestamps (no text) for release-to-paste p50 and p95 on the candidate bytes (AC 80)
 Proof: run native | dictate::tests::the_utterance_log_carries_release_and_paste_timestamps ... ok
+Proof: run native | dictate::tests::a_completed_paste_reports_when_ctrl_v_was_sent_and_when_the_clipboard_came_back ... ok
+Proof: run native | dictate::tests::the_utterance_line_names_paste_and_restore_times_only_for_a_paste_that_happened ... ok
 Proof: walk - layer 2 on the candidate installer
 
 **C81** - Stop-to-`transcript_ready` time of a stored two-track fixture is measured with the candidate's shipped `meetrec`, apart from provider time, with loopback fakes (AC 81)
@@ -362,6 +391,7 @@ Proof: run native | session::tests::sysinfo_reads_the_argv_elements_of_a_spawned
 **C86** - `process <id>` and `recover <id>` on a session with a live owner exit 1 `session is active: <dir>` and change nothing; `stop` writes its stop file only after verifying the recorder (AC 86)
 Proof: run native | session::tests::process_and_recover_refuse_a_session_whose_owner_is_live ... ok
 Proof: run native | session::tests::stop_writes_the_stop_file_only_after_checking_the_recorder ... ok
+Proof: run native | session::tests::stop_settles_a_session_whose_recorder_exited_at_once_under_the_system_owner_check ... ok
 
 **C87** - The harness commit changes exactly `stt-bench/src/main.rs`, `voice.py`, `bench.py`, `voice_score.py` and the new `perf_driver.py` on top of `889d48c` (AC 87)
 Proof: run contract | PASS: harness_commit_changes_exactly_the_listed_files

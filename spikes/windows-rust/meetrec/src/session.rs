@@ -884,6 +884,41 @@ mod tests {
         assert!(String::from_utf8_lossy(&out).contains("recording interrupted:"));
     }
 
+    /// The pid of a process that has exited: a real child of this test, waited for.
+    fn exited_pid() -> u64 {
+        let mut child = Command::new("cmd").args(["/C", "exit", "0"]).spawn().unwrap();
+        let pid = child.id() as u64;
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn a_session_whose_recorder_exited_does_not_block_a_new_start_under_the_system_owner_check() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-100000", "recording", Some(exited_pid()), None);
+
+        let admitted = admit(sessions.path(), &SysOwners);
+
+        assert_eq!(admitted, Ok(()));
+        let m = read(&dir).unwrap();
+        assert_eq!(m["state"], "interrupted");
+        assert_eq!(m["error"]["code"], "owner_died");
+    }
+
+    #[test]
+    fn stop_settles_a_session_whose_recorder_exited_at_once_under_the_system_owner_check() {
+        let sessions = tempfile::tempdir().unwrap();
+        let dir = session_in(sessions.path(), "20261107-100001", "recording", Some(exited_pid()), None);
+        let started = std::time::Instant::now();
+
+        let r = stop_with(&dir, &SysOwners, 600, std::time::Duration::from_millis(100), &mut Vec::new(), |_| panic!("no capture, no pipeline"));
+
+        assert_eq!(r, Ok(()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "stop waited for a recorder that is gone");
+        let m = read(&dir).unwrap();
+        assert_eq!((m["state"].as_str(), m["error"]["code"].as_str()), (Some("interrupted"), Some("owner_died")));
+    }
+
     #[test]
     fn stop_keeps_stopping_when_the_recorder_cannot_be_ended() {
         let sessions = tempfile::tempdir().unwrap();

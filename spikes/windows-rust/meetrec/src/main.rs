@@ -877,6 +877,22 @@ mod tests {
     }
 
     #[test]
+    fn a_track_that_cannot_be_created_ends_in_an_error_not_a_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("no-such-folder").join("mic.wav");
+        let (tx, rx) = mpsc::channel();
+        tx.send(Chunk { at: 0.0, mono: vec![0.25; 160] }).unwrap();
+        drop(tx);
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let ended = writer(path, 16_000, rx, failed.clone()).join();
+
+        let result = ended.expect("the writer thread must not panic");
+        assert!(result.unwrap_err().starts_with("disk_write_error"));
+        assert!(failed.load(std::sync::atomic::Ordering::SeqCst), "the recording loop is told to end");
+    }
+
+    #[test]
     fn a_half_written_sample_at_the_end_is_left_out_of_the_header() {
         let (_, samples) = recorded_samples_after_a_full_disk(100 * 4 + 2);
 
