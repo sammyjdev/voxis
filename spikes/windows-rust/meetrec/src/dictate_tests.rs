@@ -19,14 +19,9 @@ fn frontend() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (tmp, root, sentinel)
 }
 
-/// The HTTP tests and the junction test's `mklink` child run one at a time:
-/// a child spawned while another test's socket is open inherits it, and its
-/// exit resets that connection.
-static NET: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// One request through serve_http over loopback: (status line, body).
 fn http(root: &Path, theme: &Path, request: &str) -> (String, Vec<u8>) {
-    let _one_at_a_time = NET.lock().unwrap_or_else(|e| e.into_inner());
+    let _one_at_a_time = crate::test_lock();
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap();
     let (root, theme) = (root.to_path_buf(), theme.to_path_buf());
@@ -50,6 +45,29 @@ fn get(root: &Path, theme: &Path, target: &str) -> (String, Vec<u8>) {
 
 fn post_theme(root: &Path, theme: &Path, query: &str, body: &str) -> String {
     http(root, theme, &format!("POST /theme{query} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len())).0
+}
+
+// ------------------------------------------------------------ S4 settings the daemon applies
+
+#[test]
+fn the_next_dictate_start_applies_assistant_mode_and_initial_prompt() {
+    let on = dictate_settings(&json!({"DICTATE_KEY": "f9", "ASSISTANT_MODE": "always_on", "INITIAL_PROMPT": "AXON"}));
+    let off = dictate_settings(&json!({"ASSISTANT_MODE": "ptt", "INITIAL_PROMPT": ""}));
+    let unset = dictate_settings(&json!({}));
+
+    assert_eq!((on.key_name.as_str(), on.hands_free, on.prompt.as_str()), ("f9", true, "AXON"));
+    assert_eq!((off.hands_free, off.prompt.as_str()), (false, ""), "an empty prompt disables priming");
+    assert_eq!(unset.prompt, DEFAULT_PROMPT);
+}
+
+#[test]
+fn the_daemon_uses_f13_when_the_saved_key_is_unsupported() {
+    for saved in ["cmd_r", "shift_r", "f4", "f16"] {
+        let s = dictate_settings(&json!({ "DICTATE_KEY": saved }));
+
+        assert_eq!((s.key_name.as_str(), s.vk), ("f13", 0x7C), "{saved}");
+    }
+    assert_eq!(dictate_settings(&json!({})).key_name, "f13");
 }
 
 // ------------------------------------------------------------ S1 overlay boundary
@@ -117,7 +135,7 @@ fn a_junction_inside_the_root_pointing_outside_answers_404() {
     std::fs::write(outside.join("sentinel.txt"), b"SECRET").unwrap();
     // mklink /J needs no privilege, unlike a symbolic link
     let made = {
-        let _one_at_a_time = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let _one_at_a_time = crate::test_lock();
         std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(root.join("link")).arg(&outside).output().unwrap()
     };
     assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));

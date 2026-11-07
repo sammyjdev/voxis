@@ -705,6 +705,7 @@ mod tests {
             exe: Some(PathBuf::from(r"C:\Windows\System32\notepad.exe")),
             args: vec!["notepad.exe".into(), "miris.recorder".into(), dir.to_string_lossy().into_owned()],
         };
+        let _one_at_a_time = crate::test_lock();
         let mut child = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", "Start-Sleep 20;#", "miris.recorder"])
             .arg(&dir)
@@ -714,6 +715,7 @@ mod tests {
         let live = SysOwners.live(Some(child.id() as u64), "miris.recorder", &dir);
 
         let _ = child.kill();
+        let _ = child.wait();
         assert!(!is_owner(&notepad, &me, "miris.recorder", &dir));
         assert!(!live, "a process that is not this meetrec never owns a session");
     }
@@ -800,6 +802,7 @@ mod tests {
     fn sysinfo_reads_the_argv_elements_of_a_spawned_process() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("Sam Doe").join("20261107-143200");
+        let _one_at_a_time = crate::test_lock();
         let mut child = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", "Start-Sleep 20;#", "miris.recorder"])
             .arg(&dir)
@@ -809,6 +812,7 @@ mod tests {
         let info = process_identity(child.id());
 
         let _ = child.kill();
+        let _ = child.wait();
         let info = info.expect("a live process is readable");
         assert!(info.exe.unwrap().to_string_lossy().to_lowercase().ends_with("powershell.exe"));
         assert_eq!(info.args[info.args.len() - 2], "miris.recorder");

@@ -170,37 +170,67 @@ pub fn config_text() -> Option<String> {
 
 /// `key` in a config.toml text; empty or missing is None.
 pub fn config_value_in(raw: &str, key: &str) -> Option<String> {
-    raw.lines()
-        .filter_map(|l| l.split_once('='))
-        .filter(|(k, _)| k.trim() == key)
-        .map(|(_, v)| v.trim().trim_matches('"').to_owned())
-        .find(|v| !v.is_empty())
+    config_value_logged(raw, key, &mut std::io::stderr())
+}
+
+/// `config_value_in`: the file parsed as TOML, as the tray's reader parses
+/// it (a top-level string; comments, quoting and escapes per the spec). A
+/// file that is not TOML is reported to `err` and every key is unset, so
+/// the defaults apply and nothing exits.
+fn config_value_logged(raw: &str, key: &str, err: &mut dyn std::io::Write) -> Option<String> {
+    match raw.parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(str::to_owned),
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = writeln!(err, "config.toml invalid: {}", msg.split_whitespace().collect::<Vec<_>>().join(" "));
+            None
+        }
+    }
 }
 
 /// The device named `want` (exact name first, then a substring such as
 /// "fifine"), or the system default when nothing is chosen. A chosen device
 /// that is unplugged falls back to the default with a warning instead of
 /// failing the meeting.
-fn pick(all: Vec<cpal::Device>, default: Option<cpal::Device>, want: Option<&str>, what: &str) -> Result<cpal::Device, String> {
-    if let Some(w) = want {
-        let name = |d: &cpal::Device| d.name().unwrap_or_default();
-        let lower = w.to_lowercase();
-        if let Some(d) = all.iter().position(|d| name(d) == w).or_else(|| all.iter().position(|d| name(d).to_lowercase().contains(&lower))) {
-            return Ok(all.into_iter().nth(d).unwrap());
-        }
-        eprintln!("{what} '{w}' não encontrado, usando o padrão do sistema");
+fn pick(all: Vec<cpal::Device>, default: Option<cpal::Device>, want: Option<&str>, what: &str, warn: &mut dyn FnMut(&str)) -> Result<cpal::Device, String> {
+    let names: Vec<String> = all.iter().map(|d| d.name().unwrap_or_default()).collect();
+    let (index, warning) = choose_device(&names, want, what);
+    if let Some(w) = warning {
+        warn(&w);
     }
-    default.ok_or_else(|| format!("nenhum {what} disponível"))
+    match index {
+        Some(i) => Ok(all.into_iter().nth(i).unwrap()),
+        None => default.ok_or_else(|| format!("nenhum {what} disponível")),
+    }
 }
 
+/// Which of `names` the user chose (exact name first, then a substring such
+/// as "fifine"); None is the system default, with the warning to log when a
+/// chosen device is absent.
+fn choose_device(names: &[String], want: Option<&str>, what: &str) -> (Option<usize>, Option<String>) {
+    let Some(w) = want else { return (None, None) };
+    let lower = w.to_lowercase();
+    match names.iter().position(|n| n == w).or_else(|| names.iter().position(|n| n.to_lowercase().contains(&lower))) {
+        Some(i) => (Some(i), None),
+        None => (None, Some(format!("{what} '{w}' não encontrado, usando o padrão do sistema"))),
+    }
+}
+
+/// The input device; a chosen one that is absent is warned on stderr (the
+/// recorder's recorder.log).
 pub fn pick_input(want: Option<&str>) -> Result<cpal::Device, String> {
+    pick_input_with(want, &mut |w| eprintln!("{w}"))
+}
+
+/// `pick_input` with the warning going to `warn` (dictation's own log).
+pub fn pick_input_with(want: Option<&str>, warn: &mut dyn FnMut(&str)) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
-    pick(host.input_devices().map(|d| d.collect()).unwrap_or_default(), host.default_input_device(), want, "microfone")
+    pick(host.input_devices().map(|d| d.collect()).unwrap_or_default(), host.default_input_device(), want, "microfone", warn)
 }
 
 pub fn pick_output(want: Option<&str>) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
-    pick(host.output_devices().map(|d| d.collect()).unwrap_or_default(), host.default_output_device(), want, "dispositivo de saída")
+    pick(host.output_devices().map(|d| d.collect()).unwrap_or_default(), host.default_output_device(), want, "dispositivo de saída", &mut |w| eprintln!("{w}"))
 }
 
 /// Mono samples tagged with the moment the callback ran, so the writer can
@@ -491,6 +521,15 @@ fn transcript_md(mut lines: Vec<Line>) -> (String, usize) {
     (md, dropped)
 }
 
+/// Tests that open loopback sockets or start processes run one at a time:
+/// a process started while another test's socket is open resets that
+/// connection when it exits.
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +622,50 @@ mod tests {
     fn sha(path: &Path) -> Vec<u8> {
         use sha2::Digest;
         sha2::Sha256::digest(std::fs::read(path).unwrap()).to_vec()
+    }
+
+    // ------------------------------------------------------------ S4 config and devices (F20)
+
+    #[test]
+    fn config_toml_values_are_read_as_toml_like_the_tray() {
+        let cases = [
+            ("mic = \"USB Microphone\" # desk\n", Some("USB Microphone")),
+            ("mic = 'USB Mic'\n", Some("USB Mic")),
+            ("mic = \"A \\\"B\\\"\"\n", Some("A \"B\"")),
+            ("[audio]\nmic = \"nested\"\n", None),
+            ("mic = \"\"\n", None),
+        ];
+
+        for (raw, want) in cases {
+            assert_eq!(config_value_logged(raw, "mic", &mut Vec::new()).as_deref(), want, "{raw}");
+        }
+        let all = "mic = \"fifine\" # mesa\nspeaker = 'Alto-falantes'\nminutes_model = \"claude-haiku-5-5\" # mais barato\n";
+        assert_eq!(config_value_logged(all, "speaker", &mut Vec::new()).as_deref(), Some("Alto-falantes"));
+        assert_eq!(config_value_logged(all, "minutes_model", &mut Vec::new()).as_deref(), Some("claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn an_invalid_config_toml_is_reported_and_the_defaults_are_used() {
+        let mut err = Vec::new();
+
+        let mic = config_value_logged("mic = \"USB\nspeaker = 3 =\n", "mic", &mut err);
+
+        let err = String::from_utf8(err).unwrap();
+        assert_eq!(mic, None, "the default device");
+        assert!(err.starts_with("config.toml invalid: "), "{err}");
+    }
+
+    #[test]
+    fn a_chosen_device_is_used_and_an_absent_one_falls_back_with_a_warning() {
+        let names: Vec<String> = ["Microfone (Realtek)", "Microfone (2- fifine Microphone)"].iter().map(|s| s.to_string()).collect();
+
+        assert_eq!(choose_device(&names, Some("Microfone (Realtek)"), "microfone"), (Some(0), None));
+        assert_eq!(choose_device(&names, Some("fifine"), "microfone"), (Some(1), None));
+        assert_eq!(choose_device(&names, None, "microfone"), (None, None));
+        assert_eq!(
+            choose_device(&names, Some("Anker PowerConf"), "microfone"),
+            (None, Some("microfone 'Anker PowerConf' não encontrado, usando o padrão do sistema".to_owned()))
+        );
     }
 
     // ------------------------------------------------------------ S2 meeting folders (F18)

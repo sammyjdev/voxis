@@ -14,6 +14,8 @@
         <label>Tecla de ativação
           <select id="dictate-key"></select>
         </label>
+        <p class="hint" id="dictate-key-notice" hidden></p>
+        <p class="hint" id="language" hidden></p>
         <label>Hands-free por padrão
           <input type="checkbox" id="hands-free" />
         </label>
@@ -55,12 +57,14 @@
           <textarea id="llm-command" rows="4" spellcheck="false"></textarea>
         </label>
         <h3>Categorias</h3>
-        <table id="categories">
-          <thead><tr><th>Categoria</th><th>Pasta no vault</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
-        <button id="add-category" type="button">Adicionar categoria</button>
-        <button id="save-miris">Salvar reuniões</button>
+        <div id="categories-box">
+          <table id="categories">
+            <thead><tr><th>Categoria</th><th>Pasta no vault</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <button id="add-category" type="button">Adicionar categoria</button>
+          <button id="save-miris">Salvar reuniões</button>
+        </div>
       </section>
 
       <section id="orb">

@@ -640,6 +640,27 @@ fn place(window: &Window, theme: &Value) {
 
 // ---------------------------------------------------------------- run
 
+/// What laris-settings.json asks of the next dictate start.
+#[derive(Debug, PartialEq)]
+struct DictateSettings {
+    /// f5..f15; anything else (cmd_r, shift_r) runs f13
+    key_name: String,
+    vk: u32,
+    /// empty disables priming; unset is the dictation vocabulary
+    prompt: String,
+    hands_free: bool,
+}
+
+fn dictate_settings(settings: &Value) -> DictateSettings {
+    let key_name = settings["DICTATE_KEY"].as_str().filter(|k| key_vk(k).is_some()).unwrap_or("f13").to_owned();
+    DictateSettings {
+        vk: key_vk(&key_name).unwrap(),
+        key_name,
+        prompt: settings["INITIAL_PROMPT"].as_str().map(str::to_owned).unwrap_or_else(|| DEFAULT_PROMPT.to_owned()),
+        hands_free: settings["ASSISTANT_MODE"] == "always_on",
+    }
+}
+
 pub fn run() {
     watch_parent();
     let home = super::home();
@@ -647,10 +668,7 @@ pub fn run() {
         .ok()
         .and_then(|r| serde_json::from_str(&r).ok())
         .unwrap_or_default();
-    let key_name = settings["DICTATE_KEY"].as_str().filter(|k| key_vk(k).is_some()).unwrap_or("f13").to_owned();
-    let vk = key_vk(&key_name).unwrap();
-    let prompt = settings["INITIAL_PROMPT"].as_str().map(str::to_owned).unwrap_or_else(|| DEFAULT_PROMPT.to_owned());
-    let start_hands_free = settings["ASSISTANT_MODE"] == "always_on";
+    let DictateSettings { key_name, vk, prompt, hands_free: start_hands_free } = dictate_settings(&settings);
     let (url, token) = serve(); // the tray shows "Carregando modelo..." until READY
     let (model, vad) = super::models().unwrap_or_else(|e| {
         log_line(&e);
@@ -683,7 +701,7 @@ pub fn run() {
     };
     state.full(params(&prompt, &vad), &vec![0.0f32; RATE as usize]).expect("warm");
 
-    let mic = super::pick_input(super::session::configured_mic().as_deref()).unwrap_or_else(|e| {
+    let mic = super::pick_input_with(super::session::configured_mic().as_deref(), &mut |w| log_line(w)).unwrap_or_else(|e| {
         log_line(&e);
         std::process::exit(1)
     });
