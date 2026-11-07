@@ -408,6 +408,7 @@ pub fn run(dir: &Path) -> Result<Ata, String> {
 
 /// `run` with the setup and the summarizer passed in, and no Drive. Without
 /// a key nothing is asked for; without Google the minutes stay in ata.md.
+#[cfg(test)]
 pub fn run_with(dir: &Path, creds: &Credentials, summarize: &dyn Fn(&str) -> Result<Value, String>) -> Result<Ata, String> {
     run_with_drive(dir, creds, summarize, &|_, _| Err("no Drive in this run".into()))
 }
