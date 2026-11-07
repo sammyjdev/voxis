@@ -1,7 +1,7 @@
 # Windows port completion checks
 
-Build: `cmd /c scripts\windows\meetrec-test.cmd --no-run`; `cargo build --release --manifest-path apps/tray/src-tauri/Cargo.toml`; `npm --prefix apps/tray run build`
-Run native: `cmd /c scripts\windows\meetrec-test.cmd`
+Build: `MSYS2_ARG_CONV_EXCL='*' cmd /c 'scripts\windows\meetrec-test.cmd --no-run'`; `cargo build --release --manifest-path apps/tray/src-tauri/Cargo.toml`; `npm --prefix apps/tray run build`
+Run native: `MSYS2_ARG_CONV_EXCL='*' cmd /c 'scripts\windows\meetrec-test.cmd'`
 Run tray: `cargo test --release --manifest-path apps/tray/src-tauri/Cargo.toml`
 Run frontend: `node --test apps/tray/tests/settings.test.ts`
 Run bench: `uv run --no-project --with jiwer==4.0.0 --with num2words==0.5.14 --with numpy==2.3.4 --with soundfile==0.13.1 --with psutil==7.1.3 --with pytest==8.4.2 python -m pytest scripts/stt_bench -v`
