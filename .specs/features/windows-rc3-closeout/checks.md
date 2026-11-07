@@ -2,7 +2,7 @@
 
 Profile: standard
 Plan: `plans/sammyjdev/voxis/windows-rc3-closeout/plan.md`
-Build: `cmd /c scripts\windows\meetrec-test.cmd`; `cargo test --release --manifest-path apps\tray\src-tauri\Cargo.toml`
+Build: `bash scripts/windows/rc3-baseline.sh`
 
 Draft only. No proof below was run by the planner. Dani must finalize executable selectors after
 Sammy approves; no tests or test harness are authored in this planning session. RC numbers are
@@ -45,9 +45,9 @@ Proof: `powershell -File scripts\windows\installer-smoke.ps1 -Edition vulkan -Ch
 Proof: walk - compare before/after SHA-256 for both real pinned models, not just the script marker; restore any pre-existing smoke-marker.bin.
 
 **C9** - A reverse-switch proof rejects a missing DLL or nonzero installed runtime, exit 1 (AC 9).
-Proof: `powershell -File scripts\windows\installer-smoke-test.ps1`
+Proof: `bash scripts/windows/check-replacement-test.sh`
 
-That focused regression command is proposed, not present or run yet. Dani authors it after approval.
+The focused native Bash regression command was implemented under the execution amendment.
 It runs only the replacement assertion path with temporary files and controlled command exits,
 without a real installer, registry mutation or real installation. Named cases:
 `reverse_replacement_rejects_missing_cublas`, `reverse_replacement_rejects_missing_cublaslt`,
@@ -112,11 +112,23 @@ These are proof assignments, not observed coverage results. All observations awa
 
 ## Handoff
 
-- **Settled mid-build:** none; planning phase only. Repo access/coverage authorization is recorded in plan.md.
+- **Settled mid-build:** native Bash execution authorized by Sammy in message 11fa12c4-3882-464f-9b22-ffd425097c73; exact words are in the plan amendment.
 - **Dispatched:** none. No builder, release job, reviewer or QA was started.
-- **Boundary:** baseline 55260fe4d019ae53e7d7895417539d9e0f124322; release SHA not frozen.
+- **Boundary:** baseline native tests passed (meetrec 25, tray 61); Bash README and replacement development fixtures pass. Installed rc3 artifacts and independent verification are pending; release SHA not frozen.
 - **Abandoned:** none.
 - **Walked:** none; every walk proof above is a future acceptance procedure.
 - Approval must resolve existing-PR route. Exact R/tag approval occurs at execution freeze.
-- Draft lacks plan approval intentionally. Dani alone records Sammy's exact approval words.
+- Approval is recorded in plan.md with its source message.
 - Original clone and user checkout are inspection sources; no reset, cleanup or execution occurred.
+
+## Native Bash execution amendment
+
+User authorization: Engineering message `11fa12c4-3882-464f-9b22-ffd425097c73`.
+
+**C11** - The Bash baseline SHALL retain meetrec/tray commands and all original C19 README checks, exit nonzero on any failure, and call no PowerShell script.
+Proof: `bash scripts/windows/check-readme-test.sh`
+Proof: `bash scripts/windows/rc3-baseline-test.sh`
+Proof: `bash scripts/windows/rc3-baseline.sh`
+
+The new Bash route replaces the blocked development baseline invocation only;
+All C1-C10 remain pending their required installed-artifact and independent proofs.

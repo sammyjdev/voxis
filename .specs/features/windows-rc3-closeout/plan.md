@@ -3,7 +3,7 @@
 **Approved**: 2026-11-06 - user: "mas no caso o otto nao precisa comunicar aqui, apenas receber a info e eu fico acompanhado pelo chat privado com ele. Acima disso pode seguir e avancar para finalizar a implementacao"
 Approval source: Engineering message ad171789-64a9-4e9f-8aa8-1f9166ce14bd. Existing PR route approved; exact-SHA tag authorization remains pending.
 
-Status: proposed, awaiting Sammy's approval. Profile: standard, inherited from the installer.
+Status: approved for implementation; reviewed exact-SHA tag authorization remains pending. Profile: standard, inherited from the installer.
 Repository: sammyjdev/voxis. Existing PR: https://github.com/sammyjdev/voxis/pull/4.
 Baseline: `55260fe4d019ae53e7d7895417539d9e0f124322`, branch `spike/windows-rust-stt`, base `master`.
 This is an additive closeout of `.specs/features/windows-installer`, not a replacement feature plan.
@@ -235,3 +235,26 @@ Read-only inspection also confirmed the only post-review diff is deletion of two
 The owner's checkout marks `apps/tray/src-tauri/Cargo.toml` modified with no textual numstat diff;
 preserve it. A fresh read-only planning clone is at
 `C:\Users\samde\OpenBot\Shared\voxis-rc3-planning-b8c4fb69`.
+
+## Execution amendment - 2026-11-07
+
+Sammy authorized a native Bash execution script in Engineering message
+`11fa12c4-3882-464f-9b22-ffd425097c73`: "o otto nao ta retornando nada no privado, entao precisamos ver como resolver isso. e vamos mudar a execucao para ser um script bash".
+
+Use `bash scripts/windows/rc3-baseline.sh <evidence-directory>` for the baseline:
+unchanged meetrec and tray test commands, followed by `check-readme.sh`, which
+preserves the original C19 README requirements. This execution route does not call
+PowerShell or change its policy. README parity regression fixtures must reject
+missing requirements and misplaced NVIDIA/section content and accept LF and CRLF.
+Installed-artifact criteria RC1-RC10 remain binding. Native Bash replacement proof
+is added in this execution slice; historical PowerShell smoke procedures are not
+reported as executed. Tag creation still needs the reviewed exact-SHA decision.
+### Bash execution commands
+
+- `bash scripts/windows/rc3-baseline.sh <evidence-directory>` runs meetrec, tray and README gates and records each command output and exit code; it stops on the first failure.
+- `bash scripts/windows/check-readme-test.sh` preserves all original C19 predicates with isolated README fixtures.
+- `bash scripts/windows/rc3-baseline-test.sh` checks failure propagation and the unchanged native test commands using controlled command exits.
+- `bash scripts/windows/check-replacement-test.sh` exercises the actual replacement assertion function against temporary files and controlled installed-command exits. It changes no installation or registry entry.
+- After the release preflight and an actual edition replacement, `bash scripts/windows/check-replacement.sh cuda <original-install-directory>` independently reads the current VOXIS registry entry, requires the same install folder and both CUDA DLLs, then executes installed `meetrec.exe devices --json` with only Windows system directories on PATH. `vulkan` checks the same folder, single entry and absent cuBLAS; the separate installed transcription witness remains required.
+
+The new read-only replacement witness supersedes the planned PowerShell reverse-switch assertion change in this slice. It never performs an installation, uninstall, configuration move or release. Original RC1-RC10 and recovery obligations remain unchanged. The remaining historical installed-smoke recipes have not been run through this Bash route and must be adapted or explicitly accounted for before final acceptance; this slice is not installer acceptance.
