@@ -45,7 +45,41 @@ function categoryRow(name = "", folder = ""): HTMLTableRowElement {
   return tr;
 }
 
+type AudioDevices = {
+  inputs: string[]; outputs: string[];
+  default_input: string; default_output: string;
+  mic: string; speaker: string;
+};
+
+function fillDevices(sel: HTMLSelectElement, names: string[], fallback: string, chosen: string) {
+  sel.innerHTML = "";
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = `Padrão do sistema${fallback ? ` (${fallback})` : ""}`;
+  sel.appendChild(def);
+  // a chosen device that is unplugged stays listed, so saving doesn't drop it
+  const all = chosen && !names.includes(chosen) ? [...names, chosen] : names;
+  for (const n of all) {
+    const o = document.createElement("option");
+    o.value = n;
+    o.textContent = names.includes(n) ? n : `${n} (desconectado)`;
+    sel.appendChild(o);
+  }
+  sel.value = chosen;
+}
+
+async function loadAudio() {
+  try {
+    const d = await invoke<AudioDevices>("get_audio_devices");
+    fillDevices($<HTMLSelectElement>("#audio-mic"), d.inputs, d.default_input, d.mic);
+    fillDevices($<HTMLSelectElement>("#audio-speaker"), d.outputs, d.default_output, d.speaker);
+  } catch (e) {
+    feedback(`Dispositivos de áudio: ${e}`, true);
+  }
+}
+
 async function load() {
+  loadAudio();
   const s = await invoke<Settings>("get_settings");
 
   const keySelect = $<HTMLSelectElement>("#dictate-key");
@@ -88,6 +122,18 @@ async function load() {
 }
 
 function bind() {
+  $<HTMLButtonElement>("#save-audio").onclick = async () => {
+    try {
+      await invoke("save_audio_devices", {
+        mic: $<HTMLSelectElement>("#audio-mic").value,
+        speaker: $<HTMLSelectElement>("#audio-speaker").value,
+      });
+      feedback("Áudio salvo.");
+    } catch (e) {
+      feedback(String(e), true);
+    }
+  };
+
   $<HTMLButtonElement>("#add-category").onclick = () =>
     $<HTMLTableSectionElement>("#categories tbody").appendChild(categoryRow());
 

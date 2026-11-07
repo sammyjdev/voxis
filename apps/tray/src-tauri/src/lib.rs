@@ -1,7 +1,11 @@
+mod autostart;
 mod commands;
 mod laris;
 mod miris;
+mod models;
 mod settings;
+#[cfg(windows)]
+mod toast;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +15,7 @@ use std::time::Duration;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Manager, Wry};
+#[cfg(not(windows))]
 use tauri_plugin_notification::NotificationExt;
 
 const ARCHETYPES: [&str; 3] = ["waveform", "reactor", "faceted"];
@@ -27,6 +32,11 @@ pub struct AppState {
     /// when the action fails, so the next poll tick must rebuild regardless
     /// of whether the snapshot changed.
     pub menu_dirty: AtomicBool,
+    /// Windows installs fetch the whisper models on first run; dictation
+    /// waits for them.
+    pub models: Mutex<models::ModelState>,
+    /// the `meetrec models fetch` child, stopped on quit
+    pub fetch: models::FetchRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -42,6 +52,7 @@ struct Snapshot {
     dictating: bool, // the daemon's toggle left the mic listening (Linux)
     has_last_note: bool,
     theme: Option<(String, String, String)>, // (archetype, palette, position)
+    models: models::ModelState,
 }
 
 /// One primary action represents only the active session; a second item
@@ -196,6 +207,31 @@ fn take_snapshot(state: &AppState) -> Snapshot {
         dictating,
         has_last_note: snap.last_note.is_some(),
         theme,
+        models: *state.models.lock().unwrap(),
+    }
+}
+
+/// Hover text of the tray icon: how long the meeting has been recording.
+fn tray_tooltip(recording_session: Option<&str>, now: chrono::DateTime<chrono::Local>) -> String {
+    match recording_session.and_then(|id| recording_clock(id, now)) {
+        Some((_, elapsed)) => format!("VOXIS - gravando reunião há {elapsed}"),
+        None => "VOXIS".to_owned(),
+    }
+}
+
+/// ~/.voxis/logs/tray-<date>.log: the tray has no console on Windows.
+fn tray_log(msg: &str) {
+    let Some(home) = dirs::home_dir() else { return };
+    let dir = home.join(".voxis").join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let now = chrono::Local::now();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("tray-{}.log", now.format("%Y-%m-%d"))))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{} {msg}", now.format("%H:%M:%S"));
     }
 }
 
@@ -235,11 +271,15 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
     let dictation = MenuItem::with_id(
         app,
         "dictation_status",
-        dictation_status_label(snap.laris_alive, snap.laris_ready),
+        models::dictation_label(snap.models)
+            .unwrap_or_else(|| dictation_status_label(snap.laris_alive, snap.laris_ready).to_owned()),
         false, // disabled: nothing to click
         None::<&str>,
     )?;
     items.push(Box::new(dictation));
+    if let Some(label) = models::retry_label(snap.models) {
+        items.push(Box::new(MenuItem::with_id(app, "retry_models", label, true, None::<&str>)?));
+    }
     let hands_free = CheckMenuItem::with_id(
         app, "hands_free", "Hands-free",
         hands_free_enabled(snap.laris_alive, snap.laris_ready),
@@ -276,6 +316,14 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
 
     let sep2 = PredefinedMenuItem::separator(app)?;
     items.push(Box::new(sep2));
+    #[cfg(windows)]
+    {
+        let autostart = CheckMenuItem::with_id(
+            app, "autostart", "Iniciar com o Windows", true,
+            autostart::menu_checked(&run_key()), None::<&str>,
+        )?;
+        items.push(Box::new(autostart));
+    }
     let settings_item =
         MenuItem::with_id(app, "settings", "Configurações...", true, None::<&str>)?;
     items.push(Box::new(settings_item));
@@ -306,7 +354,23 @@ fn set_tray_icon(tray: &TrayIcon, recording: bool) {
 }
 
 fn notify(app: &AppHandle, body: &str) {
+    #[cfg(windows)]
+    {
+        let _ = app;
+        toast::notify(body);
+    }
+    #[cfg(not(windows))]
     let _ = app.notification().builder().title("VOXIS").body(body).show();
+}
+
+/// (start "HH:MM", elapsed "HH:MM:SS") of a recording session id.
+fn recording_clock(session_id: &str, now: chrono::DateTime<chrono::Local>) -> Option<(String, String)> {
+    let started = chrono::NaiveDateTime::parse_from_str(session_id, "%Y%m%d-%H%M%S")
+        .ok()?
+        .and_local_timezone(chrono::Local)
+        .single()?;
+    let s = (now - started).num_seconds().max(0);
+    Some((started.format("%H:%M").to_string(), format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)))
 }
 
 /// Raise the macOS microphone prompt when it hasn't been decided yet. laris
@@ -359,19 +423,33 @@ fn ensure_mic_access() {
     }
 }
 
+/// The HKCU Run value that starts this VOXIS.exe at logon.
+#[cfg(windows)]
+fn run_key() -> autostart::RunKey {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("VOXIS.exe"));
+    autostart::RunKey::new("VOXIS", &exe)
+}
+
 fn handle_menu(app: &AppHandle, id: &str) {
     let state = app.state::<AppState>();
     state.menu_dirty.store(true, Ordering::SeqCst);
     match id {
+        #[cfg(windows)]
+        "autostart" => {
+            if let Err(e) = autostart::toggle(&run_key()) {
+                notify(app, &format!("Falha ao configurar o início com o Windows: {e}"));
+            }
+        }
         "quit" => {
             // the menu item is disabled during active work, but a click can
             // race a session that started since the last 2s poll - re-check
             if miris::snapshot(&sessions_dir(&state)).active.is_some() {
                 return;
             }
-            state.daemon.lock().unwrap().stop();
+            models::quit(&state);
             app.exit(0);
         }
+        "retry_models" => models::retry(app),
         "settings" => commands::show_settings_window(app),
         "miris_start" => {
             // off the menu thread: the miris CLI takes seconds just to import
@@ -397,10 +475,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
             let bin = state.config.miris_bin.clone();
             std::thread::spawn(move || {
                 let msg = match miris::stop(&bin) {
-                    Ok(miris::StopOutcome::Note(note)) => format!(
-                        "Nota salva: {}",
-                        note.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                    ),
+                    Ok(miris::StopOutcome::Note(note)) => miris::note_message(&note),
                     Ok(miris::StopOutcome::Interrupted) => {
                         "Gravação interrompida: recupere pelo menu".to_owned()
                     }
@@ -437,10 +512,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
                     }
                 } else {
                     match result {
-                        Ok(Some(note)) => format!(
-                            "Nota salva: {}",
-                            note.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                        ),
+                        Ok(Some(note)) => miris::note_message(&note),
                         Ok(None) => unreachable!("process maps to Some"),
                         Err(e) => format!("Falha ao processar reunião: {e}"),
                     }
@@ -505,6 +577,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::save_laris_settings,
+            commands::get_audio_devices,
+            commands::save_audio_devices,
             commands::save_miris_config,
             commands::save_theme,
         ])
@@ -518,12 +592,32 @@ pub fn run() {
             let daemon = laris::LarisDaemon::new(
                 PathBuf::from(&config.laris_dir),
                 Some(settings::config_dir().join("laris.log")),
+            )
+            .with_bin(&config.laris_bin)
+            // the installer ships the orb page as a resource; a dev build
+            // without it lets meetrec fall back to its checkout copy
+            .with_frontend(
+                app.path()
+                    .resource_dir()
+                    .ok()
+                    .map(|d| d.join("frontend"))
+                    .filter(|d| d.join("overlay.html").is_file()),
             );
+            // the native binary looks for its models and fetches them when
+            // missing; the Python daemon manages its own
+            let fetch_with = (cfg!(windows) && !config.laris_bin.is_empty()).then(|| config.laris_bin.clone());
+            let model_state = if fetch_with.is_some() {
+                models::ModelState::Downloading(0)
+            } else {
+                models::ModelState::Ready
+            };
             app.manage(AppState {
                 config,
                 daemon: Mutex::new(daemon),
                 processing: AtomicBool::new(false),
                 menu_dirty: AtomicBool::new(false),
+                models: Mutex::new(model_state),
+                fetch: models::FetchRun::default(),
             });
 
             // The model costs ~3.6s and 276MB to load. Loading it once per
@@ -536,11 +630,16 @@ pub fn run() {
                     // peers.json with a token the first server rejects, and
                     // still starts its own keyboard listener alongside it
                     notify(app.handle(), "Ditado foi iniciado fora do VOXIS - encerre-o por lá");
-                } else if let Err(e) = daemon.spawn() {
+                } else if let Err(e) = models::spawn_dictation(*state.models.lock().unwrap(), &mut daemon) {
                     // a bad laris_dir would otherwise fail silently at boot -
                     // the old code path surfaced this from the menu handler
                     notify(app.handle(), &format!("Falha ao iniciar ditado: {e}"));
                 }
+            }
+
+            if let Some(bin) = fetch_with {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || models::fetch_models(&handle, &bin));
             }
 
             let snap = take_snapshot(&app.state::<AppState>());
@@ -554,6 +653,21 @@ pub fn run() {
                 .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
                 .build(app)?;
             set_tray_icon(&tray, shows_live_icon(&snap));
+            // a tray (re)started mid-meeting sees no start transition: show it now
+            tray_log(&format!("tray started, meeting={:?}", snap.meeting));
+            #[cfg(windows)]
+            toast::register();
+            if is_recording(&snap) {
+                if let Some((id, _, _)) = &snap.meeting {
+                    let _ = tray.set_tooltip(Some(tray_tooltip(Some(id), chrono::Local::now())));
+                    // a tray restarted mid-meeting puts the live toast back
+                    #[cfg(windows)]
+                    if let Some((started, elapsed)) = recording_clock(id, chrono::Local::now()) {
+                        toast::recording_ended();
+                        toast::recording_started(&started, &elapsed);
+                    }
+                }
+            }
 
             // poll loop: snapshot off the main thread, menu mutations on it
             // (macOS requires menu construction on the main thread)
@@ -576,13 +690,56 @@ pub fn run() {
                     // restart path is gated on owns_running() and stays a
                     // permanent no-op once the child has exited
                     let owns = state.daemon.lock().unwrap().owns_running();
-                    if should_respawn(owns, current.laris_alive, respawn_attempts, RESPAWN_CAP) {
+                    // a first run still fetching its models has nothing to respawn
+                    if current.models == models::ModelState::Ready
+                        && should_respawn(owns, current.laris_alive, respawn_attempts, RESPAWN_CAP)
+                    {
                         respawn_attempts += 1;
-                        if let Err(e) = state.daemon.lock().unwrap().spawn() {
+                        if let Err(e) = models::spawn_dictation(current.models, &mut state.daemon.lock().unwrap()) {
                             notify(&handle, &format!("Falha ao reiniciar ditado: {e}"));
                         }
                     }
 
+                    // the tooltip clock moves every tick, even when nothing else does
+                    let recording_id = current
+                        .meeting
+                        .as_ref()
+                        .filter(|_| is_recording(&current))
+                        .map(|(id, _, _)| id.clone());
+                    let tip = match current.models {
+                        models::ModelState::Downloading(p) if recording_id.is_none() => models::download_tooltip(p),
+                        _ => tray_tooltip(recording_id.as_deref(), chrono::Local::now()),
+                    };
+                    let h3 = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        if let Some(tray) = h3.tray_by_id("voxis") {
+                            let _ = tray.set_tooltip(Some(tip));
+                        }
+                    });
+                    // status lives in the notification area only: red icon,
+                    // tooltip clock, and a live toast in the notification center
+                    let clock = recording_id.as_deref().and_then(|id| recording_clock(id, chrono::Local::now()));
+                    if is_recording(&current) != is_recording(&last) {
+                        let ended = last.meeting.as_ref().map(|(id, _, _)| id.clone());
+                        match (&clock, &ended) {
+                            (Some((started, elapsed)), _) => {
+                                #[cfg(windows)]
+                                toast::recording_started(started, elapsed);
+                                #[cfg(not(windows))]
+                                notify(&handle, &format!("Gravando reunião desde {started} ({elapsed})"));
+                            }
+                            (None, Some(id)) => {
+                                #[cfg(windows)]
+                                toast::recording_ended();
+                                let dur = recording_clock(id, chrono::Local::now()).map(|c| c.1).unwrap_or_default();
+                                notify(&handle, &format!("Gravação encerrada ({dur}) - gerando a ata"));
+                            }
+                            _ => {}
+                        }
+                    } else if let Some((_started, _elapsed)) = &clock {
+                        #[cfg(windows)]
+                        toast::recording_tick(_started, _elapsed);
+                    }
                     if current == last && !dirty {
                         continue;
                     }
@@ -642,6 +799,23 @@ fn should_prevent_exit(code: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tray_tooltip_shows_how_long_the_meeting_has_been_recording() {
+        let now = chrono::NaiveDateTime::parse_from_str("20261105-221502", "%Y%m%d-%H%M%S")
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+
+        let tip = tray_tooltip(Some("20261105-210228"), now);
+
+        assert_eq!(tip, "VOXIS - gravando reunião há 01:12:34");
+    }
+
+    #[test]
+    fn the_tray_tooltip_is_just_the_name_when_nothing_records() {
+        assert_eq!(tray_tooltip(None, chrono::Local::now()), "VOXIS");
+    }
 
     #[test]
     fn closing_the_settings_window_must_not_exit_the_tray() {

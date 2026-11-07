@@ -110,6 +110,41 @@ pub async fn save_miris_config(
     settings::update_miris_config(&path, &vault_root, &llm_command, &categories)
 }
 
+/// Recording and playback devices as the native binary sees them
+/// (`<miris_bin> devices --json`), plus the current choice from config.toml.
+#[tauri::command]
+pub async fn get_audio_devices(app: AppHandle) -> Result<serde_json::Value, String> {
+    let bin = app.state::<AppState>().config.miris_bin.clone();
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(["devices", "--json"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().map_err(|e| format!("{bin}: {e}"))?;
+    let mut list: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("lista de dispositivos: {e}"))?;
+    let (mic, speaker) = settings::read_audio_devices(&settings::voxis_config_path());
+    list["mic"] = mic.into();
+    list["speaker"] = speaker.into();
+    Ok(list)
+}
+
+/// Empty = system default. The dictation daemon opens the mic at boot, so a
+/// running one is restarted; a meeting reads the choice when it starts.
+#[tauri::command]
+pub async fn save_audio_devices(app: AppHandle, mic: String, speaker: String) -> Result<(), String> {
+    settings::write_audio_devices(&settings::voxis_config_path(), &mic, &speaker)?;
+    let state = app.state::<AppState>();
+    let mut daemon = state.daemon.lock().unwrap();
+    if daemon.owns_running() {
+        daemon.stop();
+        daemon.spawn()?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn save_theme(updates: serde_json::Value) -> Result<serde_json::Value, String> {
     let peer = peer().ok_or("laris offline")?;

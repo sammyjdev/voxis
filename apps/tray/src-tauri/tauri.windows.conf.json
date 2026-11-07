@@ -1,0 +1,23 @@
+{
+  "mainBinaryName": "VOXIS",
+  "build": {
+    "beforeBuildCommand": "npm run build"
+  },
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/meetrec"
+    ],
+    "resources": {
+      "../../../packages/laris/frontend/": "frontend/"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    }
+  }
+}

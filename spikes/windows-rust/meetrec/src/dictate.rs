@@ -1,0 +1,848 @@
+//! Dictation (LARIS on Windows): hold the dictate key to talk, release to
+//! paste; double-tap for hands-free (each utterance pasted as it ends), any
+//! press turns hands-free off. LARIS's orb shows the state.
+//!
+//!   meetrec dictate
+//!
+//! Settings (~/.config/voice-at/laris-settings.json, written by the tray):
+//!   DICTATE_KEY     f5..f15, default f13 (the Keychron mic key)
+//!   INITIAL_PROMPT  vocabulary prompt; unset = the dictation vocabulary
+//!   ASSISTANT_MODE  "always_on" starts in hands-free
+//! Mic: `mic` in %APPDATA%\voxis\config.toml, else the default input.
+//! Orb theme: ~/.config/voice-at/orb-theme.json (the tray's Orb settings).
+//!
+//! The orb is LARIS's own web page (packages/laris/frontend/overlay.html,
+//! three.js themes) in a transparent, click-through WebView2 window; this
+//! process serves it, its /theme and the /ws/voice phase + amplitude stream,
+//! like laris/overlay_server.py. The tray finds it through
+//! ~/.config/voice-at/peers.json and exits it with VOXIS_PARENT_PID.
+//! Log: ~/.voxis/logs/dictate-<date>.log.
+
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use cpal::traits::{DeviceTrait, StreamTrait};
+use serde_json::{json, Value};
+use tao::dpi::{LogicalPosition, LogicalSize};
+use tao::event::Event;
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+use tao::platform::windows::WindowBuilderExtWindows;
+use tao::window::{Window, WindowBuilder};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadParams};
+use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, SetWindowsHookExW, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP,
+};
+
+const RATE: u32 = 16_000;
+const PREROLL_MS: u32 = 200; // LARIS PREROLL_MS
+const TAP: Duration = Duration::from_millis(250);
+const DOUBLE_TAP: Duration = Duration::from_millis(450);
+/// hands-free: this much silence closes an utterance (LARIS uses 400 ms with
+/// Silero; an energy gate needs more slack)
+const END_SILENCE_MS: u32 = 700;
+const MIN_SPEECH_MS: u32 = 400;
+const MAX_UTTERANCE_S: u32 = 30;
+/// bench.py VOCABULARY_PROMPT, the list that scored best on the owner's voice
+const DEFAULT_PROMPT: &str = "LARIS, VOXIS, MIRIS, tray, hands-free, orb, sink, diff, commit, push, pull request, \
+master, README, BACKLOG, REST, JSON, venv, pytest, cargo test, Codex, Claude, faster-whisper, Obsidian, vault.";
+
+// ---------------------------------------------------------------- logging
+
+fn log_line(msg: &str) {
+    let dir = super::home().join(".voxis").join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let now = chrono::Local::now();
+    let path = dir.join(format!("dictate-{}.log", now.format("%Y-%m-%d")));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{} {msg}", now.format("%H:%M:%S%.3f"));
+    }
+    println!("{msg}");
+}
+
+// ---------------------------------------------------------------- orb state
+
+#[derive(Clone, Copy, PartialEq)]
+#[repr(u8)]
+enum Show {
+    Hidden = 0,
+    Recording = 1,
+    Transcribing = 2,
+    Listening = 3, // hands-free, waiting for speech
+    Hearing = 4,   // hands-free, speech in progress
+}
+
+enum Ui {
+    Visible(bool),
+    Theme,
+}
+
+static SHOWING: AtomicU8 = AtomicU8::new(0);
+static PROXY: OnceLock<Mutex<EventLoopProxy<Ui>>> = OnceLock::new();
+static CLIENTS: Mutex<Vec<Sender<String>>> = Mutex::new(Vec::new());
+
+fn ui(event: Ui) {
+    if let Some(p) = PROXY.get() {
+        let _ = p.lock().unwrap().send_event(event);
+    }
+}
+
+/// One VoiceEvent {phase, amplitude} to every connected orb page.
+fn emit(phase: &str, amplitude: f32) {
+    let msg = json!({"phase": phase, "amplitude": amplitude}).to_string();
+    CLIENTS.lock().unwrap().retain(|tx| tx.send(msg.clone()).is_ok());
+}
+
+fn show(s: Show) {
+    if SHOWING.swap(s as u8, Ordering::SeqCst) == s as u8 {
+        return;
+    }
+    match s {
+        Show::Hidden => emit("idle", 0.0),
+        Show::Transcribing => emit("transcribing", 0.3),
+        // LARIS sends hands-free listening as "recording" at 0.15
+        Show::Listening => emit("recording", 0.15),
+        Show::Recording | Show::Hearing => emit("recording", 0.2),
+    }
+    ui(Ui::Visible(s != Show::Hidden));
+}
+
+/// laris/amplitude.py: sqrt lifts conversational RMS so the orb tracks speech
+fn amplitude(chunk: &[f32]) -> f32 {
+    let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
+    (rms * 4.0).sqrt().min(1.0)
+}
+
+// ------------------------------------------------- orb theme (laris/orb_theme.py)
+
+const ARCHETYPES: [&str; 3] = ["waveform", "reactor", "faceted"];
+const POSITIONS: [&str; 7] = ["top-left", "top-center", "top-right", "bottom-left", "bottom-right", "center", "custom"];
+
+fn palettes() -> Value {
+    json!({
+        "blade": {"accent": "#3fb6c4", "hot": "#d8f4f7"},
+        "noir": {"accent": "#c94f92", "hot": "#f7d8ea"},
+        "acid": {"accent": "#79c94f", "hot": "#e9f7d8"},
+        "ember": {"accent": "#cf9b3a", "hot": "#f7ecd8"},
+    })
+}
+
+fn theme_path() -> std::path::PathBuf {
+    super::home().join(".config").join("voice-at").join("orb-theme.json")
+}
+
+fn theme_defaults() -> Value {
+    json!({"archetype": "waveform", "palette": "blade", "position": "center", "custom": [0, 0], "size": 190})
+}
+
+fn theme_valid(t: &Value) -> Result<(), String> {
+    let s = |k: &str| t[k].as_str().unwrap_or("");
+    if !ARCHETYPES.contains(&s("archetype")) {
+        return Err(format!("archetype must be one of {ARCHETYPES:?}"));
+    }
+    if palettes().get(s("palette")).is_none() {
+        return Err("palette must be one of blade, noir, acid, ember".into());
+    }
+    if !POSITIONS.contains(&s("position")) {
+        return Err(format!("position must be one of {POSITIONS:?}"));
+    }
+    if !matches!(t["size"].as_u64(), Some(80..=400)) {
+        return Err("size must be an int in (80, 400)".into());
+    }
+    match t["custom"].as_array() {
+        Some(a) if a.len() == 2 && a.iter().all(Value::is_number) => Ok(()),
+        _ => Err("custom must be [x, y]".into()),
+    }
+}
+
+fn merge(base: &mut Value, over: &Value) {
+    if let (Some(b), Some(o)) = (base.as_object_mut(), over.as_object()) {
+        for (k, v) in o {
+            b.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+fn load_theme() -> Value {
+    let mut theme = theme_defaults();
+    if let Some(stored) = std::fs::read_to_string(theme_path()).ok().and_then(|r| serde_json::from_str::<Value>(&r).ok()) {
+        merge(&mut theme, &stored);
+    }
+    if theme_valid(&theme).is_ok() {
+        theme
+    } else {
+        theme_defaults()
+    }
+}
+
+fn save_theme(updates: &Value) -> Result<Value, String> {
+    let known = theme_defaults();
+    if let Some(bad) = updates.as_object().into_iter().flatten().map(|(k, _)| k).find(|k| known.get(k.as_str()).is_none()) {
+        return Err(format!("unknown key: {bad}"));
+    }
+    let mut theme = load_theme();
+    merge(&mut theme, updates);
+    theme_valid(&theme)?;
+    let path = theme_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&theme).unwrap()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(theme)
+}
+
+/// Top-left of the orb window inside a work area (x, y, w, h), logical px.
+fn orb_position(theme: &Value, area: (f64, f64, f64, f64)) -> (f64, f64) {
+    let (ax, ay, w, h) = area;
+    let size = theme["size"].as_f64().unwrap_or(190.0);
+    let pos = theme["position"].as_str().unwrap_or("center");
+    if pos == "custom" {
+        return (theme["custom"][0].as_f64().unwrap_or(0.0), theme["custom"][1].as_f64().unwrap_or(0.0));
+    }
+    let x = if pos.ends_with("left") {
+        16.0
+    } else if pos.ends_with("right") {
+        w - size - 16.0
+    } else {
+        (w - size) / 2.0
+    };
+    let y = if pos.starts_with("top") {
+        40.0
+    } else if pos.starts_with("bottom") {
+        h - size - 16.0
+    } else {
+        (h - size) / 2.0
+    };
+    (ax + x, ay + y)
+}
+
+// ---------------------------------------------------------------- keys
+
+enum Key {
+    Down(Instant),
+    Up(Instant),
+}
+
+static KEYS: OnceLock<(u32, Sender<Key>)> = OnceLock::new();
+
+unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
+        if let Some((vk, tx)) = KEYS.get() {
+            if kb.vkCode == *vk {
+                let now = Instant::now();
+                match wparam as u32 {
+                    WM_KEYDOWN | WM_SYSKEYDOWN => drop(tx.send(Key::Down(now))),
+                    WM_KEYUP | WM_SYSKEYUP => drop(tx.send(Key::Up(now))),
+                    _ => {}
+                }
+                return 1; // swallowed: no app needs to see the dictate key
+            }
+        }
+    }
+    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+}
+
+fn key_vk(name: &str) -> Option<u32> {
+    let n: u32 = name.strip_prefix('f')?.parse().ok()?;
+    (5..=15).contains(&n).then(|| 0x70 + n - 1) // VK_F1 = 0x70
+}
+
+// ---------------------------------------------------------------- audio
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Idle,
+    Ptt,
+    HandsFree,
+}
+
+struct Capture {
+    mode: Mode,
+    rate: u32,
+    buf: Vec<f32>,
+    pre: VecDeque<f32>,
+    // hands-free energy gate, in device samples
+    speaking: bool,
+    speech_len: usize,
+    silence_len: usize,
+    floor: f32,
+}
+
+impl Capture {
+    fn ms(&self, ms: u32) -> usize {
+        (self.rate * ms / 1000) as usize
+    }
+
+    fn keep_preroll(&mut self, chunk: &[f32]) {
+        self.pre.extend(chunk);
+        let excess = self.pre.len().saturating_sub(self.ms(PREROLL_MS));
+        self.pre.drain(..excess);
+    }
+
+    /// One mic callback. Returns a finished hands-free utterance.
+    fn push(&mut self, chunk: &[f32]) -> Option<Vec<f32>> {
+        match self.mode {
+            Mode::Idle => {
+                self.keep_preroll(chunk);
+                None
+            }
+            Mode::Ptt => {
+                self.buf.extend(chunk);
+                None
+            }
+            Mode::HandsFree => {
+                let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
+                let gate = (self.floor * 4.0).max(0.012);
+                if !self.speaking {
+                    self.keep_preroll(chunk);
+                    if rms > gate {
+                        self.speaking = true;
+                        self.speech_len = 0;
+                        self.silence_len = 0;
+                        self.buf = self.pre.drain(..).collect();
+                        show(Show::Hearing);
+                    } else {
+                        self.floor = self.floor * 0.97 + rms * 0.03;
+                    }
+                    return None;
+                }
+                self.buf.extend(chunk);
+                if rms > gate {
+                    self.speech_len += chunk.len() + self.silence_len;
+                    self.silence_len = 0;
+                } else {
+                    self.silence_len += chunk.len();
+                }
+                let ended = self.silence_len >= self.ms(END_SILENCE_MS);
+                let too_long = self.buf.len() >= self.rate as usize * MAX_UTTERANCE_S as usize;
+                if ended || too_long {
+                    self.speaking = false;
+                    show(Show::Listening);
+                    let utterance = std::mem::take(&mut self.buf);
+                    if self.speech_len >= self.ms(MIN_SPEECH_MS) {
+                        return Some(utterance);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn start(&mut self, mode: Mode) {
+        self.buf = if mode == Mode::Ptt { self.pre.drain(..).collect() } else { Vec::new() };
+        self.speaking = false;
+        self.mode = mode;
+    }
+
+    fn stop(&mut self) -> Vec<f32> {
+        self.mode = Mode::Idle;
+        self.speaking = false;
+        std::mem::take(&mut self.buf)
+    }
+}
+
+fn to_16k(mono: Vec<f32>, rate: u32) -> Vec<f32> {
+    if rate == RATE || mono.is_empty() {
+        return mono;
+    }
+    let ratio = rate as f64 / RATE as f64;
+    let k = ratio.floor().max(1.0) as usize;
+    let smooth: Vec<f32> = (0..mono.len())
+        .map(|i| {
+            let lo = i.saturating_sub(k / 2);
+            let hi = (lo + k).min(mono.len());
+            mono[lo..hi].iter().sum::<f32>() / (hi - lo) as f32
+        })
+        .collect();
+    let n = (mono.len() as f64 / ratio) as usize;
+    (0..n)
+        .map(|i| {
+            let x = i as f64 * ratio;
+            let j = x as usize;
+            let f = (x - j as f64) as f32;
+            smooth[j] * (1.0 - f) + smooth.get(j + 1).copied().unwrap_or(smooth[j]) * f
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------- paste
+
+fn ctrl_v() {
+    let key = |vk: u16, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: 0 },
+        },
+    };
+    let seq = [key(VK_CONTROL, false), key(0x56, false), key(0x56, true), key(VK_CONTROL, true)];
+    unsafe {
+        SendInput(seq.len() as u32, seq.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// Clipboard + Ctrl+V, then the user's clipboard text comes back.
+fn paste(text: &str) {
+    let Ok(mut cb) = arboard::Clipboard::new() else { return };
+    let previous = cb.get_text().ok();
+    if cb.set_text(text.to_owned()).is_err() {
+        return;
+    }
+    ctrl_v();
+    std::thread::sleep(Duration::from_millis(250));
+    if let Some(p) = previous {
+        let _ = cb.set_text(p);
+    }
+}
+
+// ---------------------------------------------------------------- server
+
+static READY: AtomicBool = AtomicBool::new(false);
+static DICTATING: AtomicBool = AtomicBool::new(false);
+
+/// packages/laris/frontend: VOXIS_FRONTEND, else this checkout's copy.
+fn frontend_dir() -> std::path::PathBuf {
+    std::env::var_os("VOXIS_FRONTEND")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../packages/laris/frontend").into())
+}
+
+fn content_type(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        _ => "application/octet-stream",
+    }
+}
+
+fn respond(stream: &mut std::net::TcpStream, status: &str, ctype: &str, body: &[u8]) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(body);
+}
+
+fn json_response(stream: &mut std::net::TcpStream, status: &str, v: &Value) {
+    respond(stream, status, "application/json", v.to_string().as_bytes());
+}
+
+/// /ws/voice: VoiceEvents until the page goes away (a ping every 5 s finds out).
+fn serve_ws(stream: std::net::TcpStream) {
+    let Ok(mut ws) = tungstenite::accept(stream) else { return };
+    let (tx, rx) = mpsc::channel::<String>();
+    // a page that (re)connects mid-dictation starts from the current state
+    let phase = if SHOWING.load(Ordering::SeqCst) == Show::Hidden as u8 { "idle" } else { "recording" };
+    let _ = tx.send(json!({"phase": phase, "amplitude": 0.15}).to_string());
+    CLIENTS.lock().unwrap().push(tx);
+    loop {
+        let sent = match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(msg) => ws.send(tungstenite::Message::Text(msg.into())),
+            Err(mpsc::RecvTimeoutError::Timeout) => ws.send(tungstenite::Message::Ping(Vec::new().into())),
+            Err(_) => break,
+        };
+        if sent.is_err() {
+            break;
+        }
+    }
+}
+
+fn serve_http(mut stream: std::net::TcpStream, token: &str) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return;
+    }
+    let mut length = 0usize;
+    loop {
+        let mut h = String::new();
+        if reader.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+            break;
+        }
+        if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0u8; length.min(64 * 1024)];
+    let _ = std::io::Read::read_exact(&mut reader, &mut body);
+    let mut parts = line.split_whitespace();
+    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let path = target.split('?').next().unwrap_or("");
+    let authorized = target.contains(&format!("token={token}"));
+    match (method, path) {
+        ("GET", "/overlay") => match std::fs::read(frontend_dir().join("overlay.html")) {
+            Ok(b) => respond(&mut stream, "200 OK", content_type("x.html"), &b),
+            Err(_) => respond(&mut stream, "404 Not Found", "text/plain", b"frontend not found"),
+        },
+        ("GET", p) if p.starts_with("/static/") => {
+            let rel = &p["/static/".len()..];
+            if rel.contains("..") {
+                return respond(&mut stream, "400 Bad Request", "text/plain", b"bad path");
+            }
+            match std::fs::read(frontend_dir().join(rel)) {
+                Ok(b) => respond(&mut stream, "200 OK", content_type(rel), &b),
+                Err(_) => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
+            }
+        }
+        (_, "/theme") if !authorized => json_response(&mut stream, "403 Forbidden", &json!({"detail": "invalid token"})),
+        ("GET", "/theme") => json_response(
+            &mut stream,
+            "200 OK",
+            &json!({
+                "theme": load_theme(), "palettes": palettes(), "ptt_trusted": true,
+                "ready": READY.load(Ordering::SeqCst), "dictating": DICTATING.load(Ordering::SeqCst),
+            }),
+        ),
+        ("POST", "/theme") => {
+            let updates: Value = serde_json::from_slice(&body).unwrap_or_default();
+            match save_theme(&updates) {
+                Ok(theme) => {
+                    ui(Ui::Theme);
+                    json_response(&mut stream, "200 OK", &json!({"theme": theme, "palettes": palettes()}))
+                }
+                Err(e) => json_response(&mut stream, "422 Unprocessable Entity", &json!({"detail": e})),
+            }
+        }
+        _ => json_response(&mut stream, "404 Not Found", &json!({"detail": "not found"})),
+    }
+}
+
+/// LARIS's overlay server: the orb page, its theme, the voice websocket.
+/// peers.json tells the tray where it is.
+fn serve() -> (String, String) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let token = format!(
+        "{:016x}{:016x}",
+        std::process::id() as u64 * 0x9E37_79B9,
+        chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+    let peers = super::home().join(".config").join("voice-at").join("peers.json");
+    let _ = std::fs::create_dir_all(peers.parent().unwrap());
+    let tmp = peers.with_extension("json.tmp");
+    if std::fs::write(&tmp, json!({"laris": {"url": url, "token": token}}).to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &peers);
+    }
+    let tok = token.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let tok = tok.clone();
+            std::thread::spawn(move || {
+                let mut head = [0u8; 512];
+                let n = stream.peek(&mut head).unwrap_or(0);
+                let first = String::from_utf8_lossy(&head[..n]).into_owned();
+                if first.starts_with("GET /ws/voice") {
+                    // reject before the handshake, as laris does (no onopen, so the page backs off)
+                    if first.lines().next().unwrap_or("").contains(&format!("token={tok}")) {
+                        serve_ws(stream);
+                    }
+                } else {
+                    serve_http(stream, &tok);
+                }
+            });
+        }
+    });
+    (url, token)
+}
+
+/// Exit with the tray: a crash or Force Quit must not leave the mic and the
+/// key hook behind (LARIS's VOXIS_PARENT_PID contract).
+fn watch_parent() {
+    let Some(pid) = std::env::var("VOXIS_PARENT_PID").ok().and_then(|p| p.parse::<u32>().ok()) else { return };
+    std::thread::spawn(move || unsafe {
+        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if !h.is_null() {
+            WaitForSingleObject(h, INFINITE);
+        }
+        log_line("tray saiu, encerrando o ditado");
+        std::process::exit(0);
+    });
+}
+
+fn place(window: &Window, theme: &Value) {
+    let Some(m) = window.primary_monitor() else { return };
+    let scale = m.scale_factor();
+    let p = m.position().to_logical::<f64>(scale);
+    let s = m.size().to_logical::<f64>(scale);
+    // 48 px: keep the bottom positions clear of the taskbar
+    let (x, y) = orb_position(theme, (p.x, p.y, s.width, s.height - 48.0));
+    let size = theme["size"].as_f64().unwrap_or(190.0);
+    window.set_inner_size(LogicalSize::new(size, size));
+    window.set_outer_position(LogicalPosition::new(x, y));
+}
+
+// ---------------------------------------------------------------- run
+
+pub fn run() {
+    watch_parent();
+    let home = super::home();
+    let settings: Value = std::fs::read_to_string(home.join(".config").join("voice-at").join("laris-settings.json"))
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default();
+    let key_name = settings["DICTATE_KEY"].as_str().filter(|k| key_vk(k).is_some()).unwrap_or("f13").to_owned();
+    let vk = key_vk(&key_name).unwrap();
+    let prompt = settings["INITIAL_PROMPT"].as_str().map(str::to_owned).unwrap_or_else(|| DEFAULT_PROMPT.to_owned());
+    let start_hands_free = settings["ASSISTANT_MODE"] == "always_on";
+    let (url, token) = serve(); // the tray shows "Carregando modelo..." until READY
+    let (model, vad) = super::models().unwrap_or_else(|e| {
+        log_line(&e);
+        std::process::exit(1)
+    });
+
+    let t = Instant::now();
+    let mut cp = WhisperContextParameters::default();
+    cp.use_gpu(true);
+    let ctx = WhisperContext::new_with_params(&model, cp).expect("load model");
+    let mut state = ctx.create_state().unwrap();
+    let vad = vad.to_string_lossy().into_owned();
+    let params = |prompt: &str, vad: &str| {
+        let mut p = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
+        p.set_language(Some("pt"));
+        p.set_no_context(true);
+        p.set_no_timestamps(true);
+        p.set_print_progress(false);
+        p.set_print_realtime(false);
+        p.set_print_special(false);
+        p.set_print_timestamps(false);
+        if !prompt.is_empty() {
+            p.set_initial_prompt(prompt);
+        }
+        // a silent clip with a prompt comes back as the prompt's words
+        p.set_vad_model_path(Some(vad));
+        p.enable_vad(true);
+        p.set_vad_params(WhisperVadParams::new());
+        p
+    };
+    state.full(params(&prompt, &vad), &vec![0.0f32; RATE as usize]).expect("warm");
+
+    let mic = super::pick_input(super::session::configured_mic().as_deref()).unwrap_or_else(|e| {
+        log_line(&e);
+        std::process::exit(1)
+    });
+    log_line(&format!("microfone: {}", mic.name().unwrap_or_default()));
+    let cfg = mic.default_input_config().unwrap();
+    let mic_rate = cfg.sample_rate().0;
+    let ch = cfg.channels() as usize;
+    let cap = Arc::new(Mutex::new(Capture {
+        mode: Mode::Idle,
+        rate: mic_rate,
+        buf: Vec::new(),
+        pre: VecDeque::new(),
+        speaking: false,
+        speech_len: 0,
+        silence_len: 0,
+        floor: 0.003,
+    }));
+    let (jobs_tx, jobs_rx) = mpsc::channel::<(Vec<f32>, bool)>();
+
+    let cap2 = cap.clone();
+    let jobs2 = jobs_tx.clone();
+    let mut since_emit = 0usize;
+    let mut push = move |mono: Vec<f32>| {
+        let mut c = cap2.lock().unwrap();
+        let finished = c.push(&mono);
+        let listening = c.mode != Mode::Idle;
+        drop(c);
+        if let Some(utterance) = finished {
+            let _ = jobs2.send((to_16k(utterance, mic_rate), true));
+        }
+        since_emit += mono.len();
+        // ~25 orb updates per second while the mic is open
+        if listening && since_emit >= mic_rate as usize / 25 {
+            since_emit = 0;
+            emit("recording", amplitude(&mono));
+        }
+    };
+    let scfg: cpal::StreamConfig = cfg.clone().into();
+    let err = |e| log_line(&format!("erro no microfone: {e}"));
+    let stream = match cfg.sample_format() {
+        cpal::SampleFormat::F32 => mic.build_input_stream(
+            &scfg,
+            move |d: &[f32], _: &_| push(d.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect()),
+            err,
+            None,
+        ),
+        cpal::SampleFormat::I16 => mic.build_input_stream(
+            &scfg,
+            move |d: &[i16], _: &_| {
+                push(d.chunks(ch).map(|f| f.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / ch as f32).collect())
+            },
+            err,
+            None,
+        ),
+        f => panic!("unsupported sample format {f:?}"),
+    }
+    .expect("open mic");
+    stream.play().unwrap();
+
+    // transcription + paste, off the hook thread
+    let cap_t = cap.clone();
+    std::thread::spawn(move || {
+        for (audio, hands_free) in jobs_rx {
+            let secs = audio.len() as f64 / RATE as f64;
+            let t = Instant::now();
+            if state.full(params(&prompt, &vad), &audio).is_err() {
+                continue;
+            }
+            let text: String = state.as_iter().map(|s| s.to_string()).collect::<String>().trim().to_owned();
+            log_line(&format!(
+                "{} {secs:.1} s -> {:.2} s: {text}",
+                if hands_free { "hf " } else { "ptt" },
+                t.elapsed().as_secs_f64()
+            ));
+            if !text.is_empty() {
+                // trailing space: consecutive dictations must not glue together
+                paste(&format!("{text} "));
+            }
+            if !hands_free && cap_t.lock().unwrap().mode == Mode::Idle {
+                show(Show::Hidden);
+            }
+        }
+    });
+
+    // gesture state machine
+    let (keys_tx, keys_rx) = mpsc::channel::<Key>();
+    KEYS.set((vk, keys_tx)).ok();
+    let cap3 = cap.clone();
+    let jobs4 = jobs_tx.clone();
+    let set_hands_free = move |on: bool| {
+        let mut c = cap3.lock().unwrap();
+        if on {
+            c.start(Mode::HandsFree);
+        } else {
+            let cut_speech = c.speaking && c.speech_len >= c.ms(MIN_SPEECH_MS);
+            let rest = c.stop();
+            // an utterance cut by the key press still gets pasted
+            if cut_speech {
+                let _ = jobs_tx.send((to_16k(rest, mic_rate), true));
+            }
+        }
+        drop(c);
+        DICTATING.store(on, Ordering::SeqCst);
+        show(if on { Show::Listening } else { Show::Hidden });
+        log_line(if on { "hands-free: ligado" } else { "hands-free: desligado" });
+    };
+    let cap4 = cap.clone();
+
+    // the orb window, before anything can show it
+    let event_loop = EventLoopBuilder::<Ui>::with_user_event().build();
+    PROXY.set(Mutex::new(event_loop.create_proxy())).ok();
+    let theme = load_theme();
+    let size = theme["size"].as_f64().unwrap_or(190.0);
+    let window = WindowBuilder::new()
+        .with_title("VOXIS orb")
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top(true)
+        .with_skip_taskbar(true)
+        .with_undecorated_shadow(false)
+        .with_focusable(false)
+        .with_visible(false)
+        .with_resizable(false)
+        .with_inner_size(LogicalSize::new(size, size))
+        .build(&event_loop)
+        .expect("orb window");
+    let _ = window.set_ignore_cursor_events(true); // clicks go through to the app below
+    place(&window, &theme);
+    let data = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.clone())
+        .join("voxis")
+        .join("webview");
+    let mut web_context = wry::WebContext::new(Some(data));
+    let _webview = wry::WebViewBuilder::new_with_web_context(&mut web_context)
+        .with_transparent(true)
+        .with_background_color((0, 0, 0, 0))
+        .with_url(format!("{url}/overlay?token={token}"))
+        .build(&window)
+        .expect("orb webview");
+
+    if start_hands_free {
+        set_hands_free(true);
+    }
+    std::thread::spawn(move || {
+        let (mut held, mut pressed_at, mut last_tap) = (false, Instant::now(), None::<Instant>);
+        let mut swallow_release = false;
+        for k in keys_rx {
+            match k {
+                Key::Down(_) if held => {} // autorepeat
+                Key::Down(at) => {
+                    held = true;
+                    pressed_at = at;
+                    if cap4.lock().unwrap().mode == Mode::HandsFree {
+                        set_hands_free(false);
+                        swallow_release = true;
+                        last_tap = None;
+                    } else {
+                        cap4.lock().unwrap().start(Mode::Ptt);
+                        DICTATING.store(true, Ordering::SeqCst);
+                        show(Show::Recording);
+                    }
+                }
+                Key::Up(at) => {
+                    held = false;
+                    if std::mem::take(&mut swallow_release) {
+                        continue;
+                    }
+                    let tap = at.duration_since(pressed_at) < TAP;
+                    let raw = cap4.lock().unwrap().stop();
+                    DICTATING.store(false, Ordering::SeqCst);
+                    if tap && last_tap.is_some_and(|t| at.duration_since(t) < DOUBLE_TAP) {
+                        last_tap = None;
+                        set_hands_free(true);
+                    } else if tap {
+                        last_tap = Some(at);
+                        show(Show::Hidden);
+                    } else if raw.len() > mic_rate as usize * 3 / 10 {
+                        show(Show::Transcribing);
+                        let _ = jobs4.send((to_16k(raw, mic_rate), false));
+                    } else {
+                        show(Show::Hidden);
+                    }
+                }
+            }
+        }
+    });
+
+    // the hook lives on this thread: tao's loop pumps the messages it needs
+    let hk = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), GetModuleHandleW(std::ptr::null()), 0) };
+    if hk.is_null() {
+        log_line("falha ao instalar o hook do teclado");
+        std::process::exit(1);
+    }
+    READY.store(true, Ordering::SeqCst);
+    log_line(&format!(
+        "ditado pronto em {:.1} s: segure {key_name} para falar, toque duas vezes para hands-free",
+        t.elapsed().as_secs_f64()
+    ));
+    let _mic = stream;
+    event_loop.run(move |event, _, flow| {
+        *flow = ControlFlow::Wait;
+        if let Event::UserEvent(e) = event {
+            match e {
+                Ui::Visible(true) => {
+                    window.set_always_on_top(true);
+                    window.set_visible(true);
+                }
+                Ui::Visible(false) => window.set_visible(false),
+                Ui::Theme => place(&window, &load_theme()),
+            }
+        }
+    });
+}

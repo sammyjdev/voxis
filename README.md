@@ -17,10 +17,32 @@ in the app you already have focused. MIRIS records meetings, transcribes them,
 and writes notes to an Obsidian vault. The tray app is the shared control
 surface.
 
-**macOS on Apple Silicon only.** Speech recognition runs on `mlx-whisper`,
-which requires Apple Silicon, and the tray drives macOS-specific menu bar and
-permission APIs. A Windows port lives in its own fork:
-[Allyhgf/voxis-windows](https://github.com/Allyhgf/voxis-windows).
+**macOS on Apple Silicon, and Windows.** On macOS speech recognition runs on
+`mlx-whisper`, which requires Apple Silicon. On Windows it runs on whisper.cpp
+in a native binary; see [Windows](#windows).
+
+## Windows
+
+Download one installer from the
+[latest release](https://github.com/sammyjdev/voxis/releases/latest):
+
+| Installer | Pick it when |
+|-----------|--------------|
+| `VOXIS_<version>_x64_cuda-setup.exe` | you have an NVIDIA GPU (GTX 16xx, RTX 20xx or newer). Fastest. About 500 MB, because it carries NVIDIA's cuBLAS, redistributed under the NVIDIA CUDA EULA. |
+| `VOXIS_<version>_x64_vulkan-setup.exe` | any other GPU (AMD, Intel) or an NVIDIA card without CUDA. About 9 MB. |
+
+- It installs for the current user, with no admin prompt, and adds VOXIS to
+  the Start menu. To switch editions, install the other one over it.
+- The first launch downloads the speech models (1.6 GB) into
+  `%LOCALAPPDATA%\voxis\models`. Dictation turns on when the download ends;
+  the tray tooltip shows the progress.
+- Builds are unsigned, so SmartScreen says "Windows protected your PC": choose
+  **More info**, then **Run anyway**.
+- **Iniciar com o Windows** in the tray menu starts VOXIS at logon.
+- Meeting minutes need `anthropic_api_key` in `%APPDATA%\voxis\secrets.toml`;
+  without it a meeting keeps only its transcript. Without Google credentials
+  in `%APPDATA%\voxis`, the minutes stay in `ata.md` in the session folder
+  instead of going to Google Drive.
 
 ## Family
 

@@ -32,6 +32,14 @@ dirs = "6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows has no `ps`: sysinfo reads another process's command line
+[target.'cfg(windows)'.dependencies]
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+# toasts under VOXIS's own AppUserModelID (the plugin falls back to
+# PowerShell's id outside an installed app) and the live "recording" toast
+tauri-winrt-notification = "0.7"
+windows = { version = "0.61", features = ["UI_Notifications", "Foundation_Collections", "Data_Xml_Dom", "Win32_System_Registry"] }
+
 # macOS mic prompt: only VOXIS.app's own signed bundle binary can present the
 # TCC dialog (a spawned bundle-less Python helper cannot), so the tray requests
 # it via AVFoundation. Versions match what tauri already pulls in transitively.

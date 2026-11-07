@@ -93,7 +93,8 @@ def vram_mib() -> int:
         capture_output=True, text=True).stdout
     for line in q.splitlines():
         pid, mem = [x.strip() for x in line.split(",")]
-        if int(pid) == os.getpid():
+        # Windows (WDDM) reports per-process memory as [N/A]
+        if int(pid) == os.getpid() and mem.isdigit():
             return int(mem)
     return 0
 
@@ -103,10 +104,17 @@ def load(engine: str, model: str, opts: dict):
         from faster_whisper import WhisperModel
         import nvidia.cublas, nvidia.cudnn  # noqa: E401 - same preload as stt_faster
         import ctypes
-        for pkg, names in ((nvidia.cublas, ("libcublasLt.so.12", "libcublas.so.12")),
-                           (nvidia.cudnn, ("libcudnn.so.9",))):
-            for name in names:
-                ctypes.CDLL(os.path.join(list(pkg.__path__)[0], "lib", name), mode=ctypes.RTLD_GLOBAL)
+        if sys.platform == "win32":
+            # the Windows wheels ship DLLs in bin/, found through the DLL search path
+            for pkg in (nvidia.cublas, nvidia.cudnn):
+                bin_dir = os.path.join(list(pkg.__path__)[0], "bin")
+                os.add_dll_directory(bin_dir)
+                os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
+        else:
+            for pkg, names in ((nvidia.cublas, ("libcublasLt.so.12", "libcublas.so.12")),
+                               (nvidia.cudnn, ("libcudnn.so.9",))):
+                for name in names:
+                    ctypes.CDLL(os.path.join(list(pkg.__path__)[0], "lib", name), mode=ctypes.RTLD_GLOBAL)
         local = os.path.join(BENCH_HOME, model)
         m = WhisperModel(local if os.path.isdir(local) else model, device="cuda", compute_type="float16")
 

@@ -5,16 +5,19 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# least privilege: tauri-action only needs to draft a release + upload assets
+# least privilege: read by default; only the jobs that draft a release or
+# upload to one get write
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     # macOS only: LARIS transcribes with mlx-whisper (Apple Silicon) and the
-    # tray drives macOS-specific TCC and menu-bar APIs. The Windows port has
-    # its own fork.
+    # tray drives macOS-specific TCC and menu-bar APIs. Windows is the
+    # `windows` job below.
     runs-on: macos-latest
+    permissions:
+      contents: write # tauri-action drafts the release and uploads the .dmg
     steps:
       # actions pinned by commit SHA (a moved tag can ship malicious code) -
       # comments track the human-readable version
@@ -62,3 +65,95 @@ jobs:
             apps/tray/src-tauri/target/release/bundle/dmg/*.dmg
             apps/tray/src-tauri/target/release/bundle/macos/*.app/**
           if-no-files-found: warn
+
+  # Windows: two installer editions, built from the native meetrec. CUDA for
+  # NVIDIA GPUs (carries cuBLAS), Vulkan for any GPU. Same identifier, so one
+  # replaces the other. See .specs/features/windows-installer/.
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [cuda, vulkan]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master @ 2026-07-17
+        with:
+          toolchain: stable
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # meetrec builds into C:\vxi<c|v> (MAX_PATH), outside what this caches
+          workspaces: apps/tray/src-tauri
+          key: ${{ matrix.edition }}
+
+      # whisper.cpp's Vulkan backend compiles its shaders with glslc, which
+      # ships in the LunarG SDK; both editions link ggml, only one uses it.
+      # Pinned version and SHA-256 (the one LunarG publishes for this file).
+      - name: Vulkan SDK
+        shell: pwsh
+        run: |
+          $version = '1.4.363.1'
+          $sha256 = 'c02932bd9a968b22d404536108adaacac908c081cd6b0113f5bfefc523dd0a6a'
+          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/vulkansdk-windows-X64-$version.exe" -OutFile $env:RUNNER_TEMP\vulkan-sdk.exe
+          $got = (Get-FileHash $env:RUNNER_TEMP\vulkan-sdk.exe -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $sha256) { throw "Vulkan SDK hash $got, expected $sha256" }
+          & $env:RUNNER_TEMP\vulkan-sdk.exe --root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install | Out-Host
+          "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
+          "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
+
+      # 13.3.1 is the newest CUDA the pinned action knows; the DLLs keep the
+      # cublas64_13 names the installer config lists
+      - uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        if: matrix.edition == 'cuda'
+        with:
+          cuda: '13.3.1'
+          method: local
+
+      - name: Install frontend deps
+        working-directory: apps/tray
+        run: npm install
+
+      - name: Build the ${{ matrix.edition }} installer
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { '' }
+          $buildArgs = @{ Edition = '${{ matrix.edition }}'; CudaArchs = '75;86;89;120' }
+          if ($version) { $buildArgs.Version = $version }
+          ./scripts/windows/build-installer.ps1 @buildArgs
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: voxis-windows-${{ matrix.edition }}
+          path: apps/tray/src-tauri/target/release/bundle/nsis/*_${{ matrix.edition }}-setup.exe
+          if-no-files-found: error
+
+  # On a tag, the two installers go to the tag's draft release, created here
+  # when missing. It does not wait for the macOS job: that one has failed
+  # since the mic helper started signing with a local-only identity.
+  windows-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creates the draft release and uploads the installers
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: voxis-windows-*
+          merge-multiple: true
+          path: installers
+
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --draft --title "VOXIS $GITHUB_REF_NAME" \
+              --notes "Windows installers: see the Windows section of the README." --repo "$GITHUB_REPOSITORY"
+          gh release upload "$GITHUB_REF_NAME" installers/*.exe --clobber --repo "$GITHUB_REPOSITORY"
