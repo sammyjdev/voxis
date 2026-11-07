@@ -198,3 +198,247 @@ fn a_theme_update_with_the_token_answers_200_and_an_invalid_one_422() {
     assert_eq!(refused, "HTTP/1.1 422 Unprocessable Entity");
     assert_eq!(load_theme(&theme)["palette"], "acid");
 }
+
+// ------------------------------------------------------------ S6 gestures (AC 35-38)
+
+fn capture(rate: u32) -> Capture {
+    Capture { mode: Mode::Idle, rate, buf: Vec::new(), pre: VecDeque::new(), speaking: false, speech_len: 0, silence_len: 0, floor: 0.003 }
+}
+
+#[test]
+fn a_hold_of_250_ms_with_audio_is_transcribed_and_pasted_with_a_space() {
+    let mut g = Gestures::new();
+    let t0 = Instant::now();
+
+    assert_eq!(g.down(t0, false), Gesture::StartPtt);
+    // held 250 ms with 400 ms of audio at 16 kHz
+    assert_eq!(g.up(t0 + Duration::from_millis(250), 6400, 16_000), Gesture::Transcribe);
+    assert_eq!(paste_text("abre um pull request"), Some("abre um pull request ".to_owned()));
+    assert_eq!(paste_text(""), None, "an empty transcript pastes nothing");
+    // 300 ms of audio is not more than 300 ms
+    g.down(t0 + Duration::from_secs(5), false);
+    assert_eq!(g.up(t0 + Duration::from_secs(6), 4800, 16_000), Gesture::Hide);
+}
+
+#[test]
+fn a_short_tap_pastes_nothing_and_two_taps_turn_on_hands_free() {
+    let mut g = Gestures::new();
+    let t0 = Instant::now();
+
+    g.down(t0, false);
+    let first = g.up(t0 + Duration::from_millis(100), 1600, 16_000);
+    g.down(t0 + Duration::from_millis(300), false);
+    let second = g.up(t0 + Duration::from_millis(400), 1600, 16_000);
+    // a third tap long after is a single tap again
+    g.down(t0 + Duration::from_secs(3), false);
+    let late = g.up(t0 + Duration::from_millis(3100), 1600, 16_000);
+
+    assert_eq!(first, Gesture::Hide);
+    assert_eq!(second, Gesture::HandsFreeOn);
+    assert_eq!(late, Gesture::Hide);
+}
+
+/// `ms` of audio at `level`, in 10 ms chunks pushed into the capture.
+fn feed(c: &mut Capture, ms: u32, level: f32) -> Option<Vec<f32>> {
+    let chunk = vec![level; (c.rate / 100) as usize];
+    let mut done = None;
+    for _ in 0..ms / 10 {
+        if let Some(u) = c.push(&chunk) {
+            done = Some(u);
+        }
+    }
+    done
+}
+
+#[test]
+fn hands_free_closes_an_utterance_after_700_ms_of_silence() {
+    let mut c = capture(16_000);
+    c.start(Mode::HandsFree);
+
+    assert_eq!(feed(&mut c, 500, 0.0), None, "silence never opens an utterance");
+    assert_eq!(feed(&mut c, 400, 0.2), None, "speech alone does not close it");
+    assert_eq!(feed(&mut c, 690, 0.0), None, "690 ms of silence is not enough");
+    let utterance = feed(&mut c, 10, 0.0).expect("700 ms of silence closes it");
+
+    assert!(utterance.len() >= 16_000 * 1100 / 1000, "speech and its silence: {}", utterance.len());
+}
+
+#[test]
+fn hands_free_closes_an_utterance_at_30_s() {
+    let mut c = capture(16_000);
+    c.start(Mode::HandsFree);
+
+    let utterance = feed(&mut c, 31_000, 0.2).expect("30 s closes a long utterance");
+
+    assert!(utterance.len() <= 16_000 * 30 + 160 * 2, "{}", utterance.len());
+}
+
+#[test]
+fn a_press_during_hands_free_ends_it_and_keeps_the_cut_speech() {
+    let mut c = capture(16_000);
+    c.start(Mode::HandsFree);
+    feed(&mut c, 450, 0.2);
+    let mut short = capture(16_000);
+    short.start(Mode::HandsFree);
+    feed(&mut short, 300, 0.2);
+    let mut g = Gestures::new();
+    let t0 = Instant::now();
+
+    let press = g.down(t0, true);
+    let cut = cut_utterance(&mut c);
+    let release = g.up(t0 + Duration::from_millis(80), 0, 16_000);
+
+    assert_eq!(press, Gesture::HandsFreeOff);
+    assert!(cut.is_some_and(|u| u.len() >= 16_000 * 400 / 1000), "450 ms of speech is pasted");
+    assert_eq!(cut_utterance(&mut short), None, "300 ms is under the 400 ms floor");
+    assert_eq!(release, Gesture::Ignore, "that press's release does nothing");
+    assert!(c.mode == Mode::Idle);
+}
+
+// ------------------------------------------------------------ S6 logs (AC 39, 80)
+
+#[test]
+fn the_utterance_log_holds_counts_and_timings_but_no_text() {
+    let text = "o contrato fecha sexta com a Acme";
+
+    let line = utterance_log("ptt", 2.14, 0.351, text, 1_762_530_000_000, 1_762_530_000_420);
+
+    assert!(line.starts_with("ptt 2.1 s -> 0.35 s, 33 chars"), "{line}");
+    assert!(!line.contains("contrato") && !line.contains(text), "{line}");
+}
+
+#[test]
+fn the_utterance_log_carries_release_and_paste_timestamps() {
+    let line = utterance_log("hf", 1.0, 0.2, "x", 1_762_530_000_000, 1_762_530_000_420);
+
+    assert!(line.contains("release_ms=1762530000000") && line.contains("paste_ms=1762530000420"), "{line}");
+}
+
+// ------------------------------------------------------------ S6 paste (AC 40-42, 90)
+
+/// A clipboard that records what it was given; `fail` makes every call fail.
+struct FakeClip {
+    text: Option<String>,
+    sets: Vec<String>,
+    fail: bool,
+}
+
+impl Clip for FakeClip {
+    fn get(&mut self) -> Option<String> {
+        self.text.clone()
+    }
+    fn set(&mut self, text: &str) -> Result<(), String> {
+        if self.fail {
+            return Err("clipboard busy".into());
+        }
+        self.sets.push(text.to_owned());
+        self.text = Some(text.to_owned());
+        Ok(())
+    }
+}
+
+fn clip(previous: &str) -> FakeClip {
+    FakeClip { text: Some(previous.to_owned()), sets: Vec::new(), fail: false }
+}
+
+#[test]
+fn a_paste_puts_the_text_sends_ctrl_v_and_restores_the_previous_text() {
+    let mut cb = clip("what the user had copied");
+    let mut injected = 0;
+
+    let log = paste_with(Ok(&mut cb), "ditado ", &mut || {
+        injected += 1;
+        4
+    }, false, Duration::from_millis(1));
+
+    assert_eq!(injected, 1);
+    assert_eq!(cb.sets, ["ditado ", "what the user had copied"]);
+    assert!(log.is_empty(), "{log:?}");
+}
+
+#[test]
+fn a_partial_injection_leaves_the_text_on_the_clipboard() {
+    let mut cb = clip("previous");
+
+    let log = paste_with(Ok(&mut cb), "ditado ", &mut || 2, false, Duration::from_millis(1));
+
+    assert_eq!(cb.text.as_deref(), Some("ditado "), "not restored: the user can still paste it");
+    assert_eq!(log, ["paste failed: injected 2 of 4"]);
+}
+
+#[test]
+fn a_clipboard_failure_is_logged_without_the_text() {
+    let mut busy = FakeClip { text: None, sets: Vec::new(), fail: true };
+    let mut injected = false;
+
+    let unopened = paste_with(Err("OpenClipboard failed".into()), "segredo ", &mut || 4, false, Duration::from_millis(1));
+    let unset = paste_with(Ok(&mut busy), "segredo ", &mut || {
+        injected = true;
+        4
+    }, false, Duration::from_millis(1));
+
+    assert_eq!(unopened, ["paste failed: clipboard OpenClipboard failed"]);
+    assert_eq!(unset, ["paste failed: clipboard clipboard busy"]);
+    assert!(!injected, "nothing is typed when the clipboard does not hold the text");
+}
+
+#[test]
+fn an_elevated_target_skips_the_paste_and_keeps_the_text() {
+    let mut cb = clip("previous");
+    let mut injected = false;
+
+    let log = paste_with(Ok(&mut cb), "ditado ", &mut || {
+        injected = true;
+        4
+    }, true, Duration::from_millis(1));
+
+    assert!(!injected, "no Ctrl+V into an elevated window");
+    assert_eq!(cb.text.as_deref(), Some("ditado "), "left on the clipboard, not restored");
+    assert_eq!(log, ["paste skipped: elevated target"]);
+}
+
+// ------------------------------------------------------------ S6 failures (AC 43-45, 47)
+
+#[test]
+fn an_orb_that_cannot_be_created_leaves_dictation_running() {
+    let mut log = Vec::new();
+
+    let none = orb_or_log::<(), _>(Err("WebView2 Runtime not found"), &mut |l| log.push(l.to_owned()));
+    let some = orb_or_log::<u8, String>(Ok(7), &mut |l| log.push(l.to_owned()));
+
+    assert_eq!(none, None);
+    assert_eq!(some, Some(7));
+    assert_eq!(log, ["overlay unavailable: WebView2 Runtime not found"]);
+}
+
+#[test]
+fn a_lost_microphone_logs_and_exits_with_code_3() {
+    let (line, code) = stream_lost("The requested device is no longer available.");
+
+    assert_eq!(line, "microfone desconectado: The requested device is no longer available.");
+    assert_eq!(code, Some(3));
+    assert_eq!(EXIT_DEVICE_LOST, 3);
+}
+
+#[test]
+fn an_unsupported_sample_format_or_model_failure_is_logged_with_exit_1() {
+    let u8_format = std::panic::catch_unwind(|| sample_format_ok(cpal::SampleFormat::U8));
+    let model = std::panic::catch_unwind(|| load_model::<(), _>(std::path::Path::new(r"C:\m\ggml-large-v3-turbo.bin"), || Err("invalid model data")));
+
+    assert_eq!(u8_format.expect("no panic"), Err("formato de áudio não suportado: u8".to_owned()));
+    assert_eq!(model.expect("no panic"), Err(r"modelo não carregou: C:\m\ggml-large-v3-turbo.bin: invalid model data".to_owned()));
+    assert_eq!(sample_format_ok(cpal::SampleFormat::F32), Ok(()));
+    assert_eq!(sample_format_ok(cpal::SampleFormat::I16), Ok(()));
+}
+
+#[test]
+fn a_cpu_fallback_is_logged_as_sem_gpu() {
+    assert_eq!(gpu_note(&[Device::Cpu]), Some("sem GPU: usando CPU"));
+    assert_eq!(gpu_note(&[]), Some("sem GPU: usando CPU"));
+    assert_eq!(gpu_note(&[Device::Cpu, Device::Gpu]), None);
+}
+
+#[test]
+fn dictation_recognizes_portuguese_only() {
+    assert_eq!(crate::LANGUAGE, "pt");
+}

@@ -53,6 +53,7 @@ struct Snapshot {
     has_last_note: bool,
     theme: Option<(String, String, String)>, // (archetype, palette, position)
     models: models::ModelState,
+    mic_lost: bool,
 }
 
 /// One primary action represents only the active session; a second item
@@ -148,6 +149,46 @@ fn should_respawn(owns: bool, alive: bool, attempts: u32, cap: u32) -> bool {
     !owns && !alive && attempts < cap
 }
 
+/// Why the tray's dictation child exited, from its exit code and the tail
+/// of laris.log (Windows meetrec dictate only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DictationExit {
+    /// exit 3: the microphone went away; not respawned
+    DeviceLost,
+    /// "modelo não carregou": the retry row verifies the model files
+    ModelNotLoaded,
+    Other,
+}
+
+fn dictation_exit(code: Option<i32>, log_tail: &str, windows: bool) -> DictationExit {
+    if !windows {
+        return DictationExit::Other;
+    }
+    if code == Some(3) {
+        DictationExit::DeviceLost
+    } else if log_tail.lines().rev().take(20).any(|l| l.contains("modelo não carregou")) {
+        DictationExit::ModelNotLoaded
+    } else {
+        DictationExit::Other
+    }
+}
+
+/// `should_respawn`, and never while the microphone is gone: respawning a
+/// dictate with no input device would only exit 3 again.
+fn respawn_after_exit(mic_lost: bool, owns: bool, alive: bool, attempts: u32, cap: u32) -> bool {
+    !mic_lost && should_respawn(owns, alive, attempts, cap)
+}
+
+/// The dictation row: (menu id, label, clickable). After a lost microphone
+/// it is the one way back: a click starts dictate once.
+fn dictation_row(mic_lost: bool, models: models::ModelState, alive: bool, ready: bool) -> (&'static str, String, bool) {
+    if mic_lost {
+        return ("dictation_restart", "Ditado: microfone desconectado".to_owned(), true);
+    }
+    let label = models::dictation_label(models).unwrap_or_else(|| dictation_status_label(alive, ready).to_owned());
+    ("dictation_status", label, false)
+}
+
 fn sessions_dir(state: &AppState) -> PathBuf {
     PathBuf::from(&state.config.miris_home).join("sessions")
 }
@@ -208,6 +249,7 @@ fn take_snapshot(state: &AppState) -> Snapshot {
         has_last_note: snap.last_note.is_some(),
         theme,
         models: *state.models.lock().unwrap(),
+        mic_lost: state.daemon.lock().unwrap().mic_lost(),
     }
 }
 
@@ -268,14 +310,9 @@ fn build_menu(app: &AppHandle, snap: &Snapshot) -> tauri::Result<Menu<Wry>> {
     // Own id, not "noop" - the meeting item already uses that one while
     // processing, and two items sharing an id in one menu is asking for a
     // handler to fire on the wrong row.
-    let dictation = MenuItem::with_id(
-        app,
-        "dictation_status",
-        models::dictation_label(snap.models)
-            .unwrap_or_else(|| dictation_status_label(snap.laris_alive, snap.laris_ready).to_owned()),
-        false, // disabled: nothing to click
-        None::<&str>,
-    )?;
+    // disabled unless the microphone was lost: then it restarts dictation
+    let (row_id, row_label, row_enabled) = dictation_row(snap.mic_lost, snap.models, snap.laris_alive, snap.laris_ready);
+    let dictation = MenuItem::with_id(app, row_id, row_label, row_enabled, None::<&str>)?;
     items.push(Box::new(dictation));
     if let Some(label) = models::retry_label(snap.models) {
         items.push(Box::new(MenuItem::with_id(app, "retry_models", label, true, None::<&str>)?));
@@ -450,6 +487,14 @@ fn handle_menu(app: &AppHandle, id: &str) {
             app.exit(0);
         }
         "retry_models" => models::retry(app),
+        "dictation_restart" => {
+            let models = *state.models.lock().unwrap();
+            let mut daemon = state.daemon.lock().unwrap();
+            daemon.set_mic_lost(false);
+            if let Err(e) = models::spawn_dictation(models, &mut daemon) {
+                notify(app, &format!("Falha ao iniciar ditado: {e}"));
+            }
+        }
         "settings" => commands::show_settings_window(app),
         "miris_start" => {
             // off the menu thread: the miris CLI takes seconds just to import
@@ -689,10 +734,22 @@ pub fn run() {
                     // model download that failed on first boot) - every other
                     // restart path is gated on owns_running() and stays a
                     // permanent no-op once the child has exited
-                    let owns = state.daemon.lock().unwrap().owns_running();
+                    let (owns, exited) = {
+                        let mut daemon = state.daemon.lock().unwrap();
+                        (daemon.owns_running(), daemon.take_exit())
+                    };
+                    if let Some(code) = exited {
+                        let tail = std::fs::read_to_string(settings::config_dir().join("laris.log")).unwrap_or_default();
+                        match dictation_exit(code, &tail, cfg!(windows)) {
+                            DictationExit::DeviceLost => state.daemon.lock().unwrap().set_mic_lost(true),
+                            DictationExit::ModelNotLoaded => *state.models.lock().unwrap() = models::ModelState::LoadFailed,
+                            DictationExit::Other => {}
+                        }
+                        state.menu_dirty.store(true, Ordering::SeqCst);
+                    }
                     // a first run still fetching its models has nothing to respawn
                     if current.models == models::ModelState::Ready
-                        && should_respawn(owns, current.laris_alive, respawn_attempts, RESPAWN_CAP)
+                        && respawn_after_exit(current.mic_lost, owns, current.laris_alive, respawn_attempts, RESPAWN_CAP)
                     {
                         respawn_attempts += 1;
                         if let Err(e) = models::spawn_dictation(current.models, &mut state.daemon.lock().unwrap()) {
@@ -881,6 +938,25 @@ mod tests {
         assert!(!hands_free_enabled(true, false));
         assert!(hands_free_enabled(true, true));
         assert!(!hands_free_enabled(false, true));
+    }
+
+    #[test]
+    fn a_dictation_that_lost_its_microphone_is_not_respawned() {
+        assert_eq!(dictation_exit(Some(3), "", true), DictationExit::DeviceLost);
+        assert!(!respawn_after_exit(true, false, false, 0, 3), "exit 3 is not respawned");
+        assert!(respawn_after_exit(false, false, false, 0, 3), "other exits keep the 3-attempt respawn");
+        assert_eq!(dictation_exit(Some(1), "carregando\nmodelo não carregou: C:\\m\\x.bin: bad\n", true), DictationExit::ModelNotLoaded);
+        assert_eq!(dictation_exit(Some(1), "other failure\n", true), DictationExit::Other);
+        assert_eq!(dictation_exit(Some(3), "", false), DictationExit::Other, "macOS and Linux unchanged");
+    }
+
+    #[test]
+    fn the_dictation_row_offers_one_restart_after_a_lost_microphone() {
+        let lost = dictation_row(true, models::ModelState::Ready, false, false);
+        let after_click = dictation_row(false, models::ModelState::Ready, false, false);
+
+        assert_eq!(lost, ("dictation_restart", "Ditado: microfone desconectado".to_owned(), true));
+        assert_eq!(after_click, ("dictation_status", "Ditado indisponível".to_owned(), false));
     }
 
     #[test]

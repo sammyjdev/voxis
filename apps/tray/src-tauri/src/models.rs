@@ -15,6 +15,8 @@ pub enum ModelState {
     Ready,
     Downloading(u8),
     Failed,
+    /// dictate exited with "modelo não carregou": the files need a hash check
+    LoadFailed,
 }
 
 /// What the tray does once `meetrec models fetch` exits.
@@ -56,6 +58,7 @@ pub fn dictation_label(state: ModelState) -> Option<String> {
         ModelState::Ready => None,
         ModelState::Downloading(p) => Some(format!("Ditado indisponível: baixando modelos ({p}%)")),
         ModelState::Failed => Some("Ditado indisponível: falha ao baixar modelos".to_owned()),
+        ModelState::LoadFailed => Some("Ditado indisponível: modelo não carregou".to_owned()),
     }
 }
 
@@ -71,9 +74,15 @@ pub fn spawn_dictation(state: ModelState, daemon: &mut LarisDaemon) -> Result<bo
 /// Runs `meetrec models fetch`, feeding its progress into the tray state, then
 /// starts dictation or shows why it could not.
 pub fn fetch_models(app: &AppHandle, bin: &str) {
+    fetch_models_with(app, bin, &["models", "fetch"]);
+}
+
+/// `fetch_models` with the `meetrec` arguments given (`--verify` after a
+/// model that would not load).
+pub fn fetch_models_with(app: &AppHandle, bin: &str, args: &[&str]) {
     use std::io::BufRead;
     let state = app.state::<AppState>();
-    let (stdout, stderr) = match state.fetch.start(bin, &["models", "fetch"]) {
+    let (stdout, stderr) = match state.fetch.start(bin, args) {
         Ok(pipes) => pipes,
         Err(e) => {
             crate::tray_log(&format!("models fetch: {bin}: {e}"));
@@ -125,22 +134,37 @@ pub fn fetch_models(app: &AppHandle, bin: &str) {
     state.menu_dirty.store(true, Ordering::SeqCst);
 }
 
+/// The `meetrec` arguments the retry row runs.
+pub fn fetch_args(state: ModelState) -> &'static [&'static str] {
+    match state {
+        // a model that would not load is hashed against its pin and
+        // replaced only by a verified download
+        ModelState::LoadFailed => &["models", "fetch", "--verify"],
+        _ => &["models", "fetch"],
+    }
+}
+
 /// The menu row that downloads the models again, shown only after a failure.
 pub fn retry_label(state: ModelState) -> Option<&'static str> {
-    (state == ModelState::Failed).then_some("Baixar modelos de novo")
+    match state {
+        ModelState::Failed => Some("Baixar modelos de novo"),
+        ModelState::LoadFailed => Some("Verificar modelos"),
+        _ => None,
+    }
 }
 
 /// The menu's "Baixar modelos de novo": fetches again unless one is running.
 pub fn retry(app: &AppHandle) {
     let state = app.state::<AppState>();
     let mut models = state.models.lock().unwrap();
-    if *models != ModelState::Failed || state.fetch.running() {
+    if !matches!(*models, ModelState::Failed | ModelState::LoadFailed) || state.fetch.running() {
         return;
     }
+    let args = fetch_args(*models);
     *models = ModelState::Downloading(0);
     drop(models);
     let (app, bin) = (app.clone(), state.config.laris_bin.clone());
-    std::thread::spawn(move || fetch_models(&app, &bin));
+    std::thread::spawn(move || fetch_models_with(&app, &bin, args));
 }
 
 /// What quitting the tray stops: a model download still running, and the
@@ -218,6 +242,14 @@ mod tests {
         assert_eq!(outcome(Some(0)), Outcome::StartDictation);
         assert_eq!(outcome(Some(1)), Outcome::Toast("Falha ao baixar modelos: sem conexão; tente de novo"));
         assert_eq!(outcome(Some(2)), Outcome::Toast("Falha ao baixar modelos: hash diferente; tente de novo"));
+    }
+
+    #[test]
+    fn a_model_load_failure_offers_verify_in_the_retry_row() {
+        assert_eq!(retry_label(ModelState::LoadFailed), Some("Verificar modelos"));
+        assert_eq!(dictation_label(ModelState::LoadFailed), Some("Ditado indisponível: modelo não carregou".to_owned()));
+        assert_eq!(fetch_args(ModelState::LoadFailed), ["models", "fetch", "--verify"]);
+        assert_eq!(fetch_args(ModelState::Failed), ["models", "fetch"], "a failed download keeps the plain fetch");
     }
 
     #[test]

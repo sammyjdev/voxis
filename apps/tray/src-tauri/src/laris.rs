@@ -72,6 +72,10 @@ pub struct LarisDaemon {
     /// the orb page shipped with the app (VOXIS_FRONTEND); None = the
     /// binary's own default, the checkout it was built from
     frontend: Option<PathBuf>,
+    /// exit code of the child that exited, until the tray takes it
+    exited: Option<Option<i32>>,
+    /// dictate exited 3: no input device until the user restarts it
+    mic_lost: bool,
 }
 
 impl LarisDaemon {
@@ -86,6 +90,8 @@ impl LarisDaemon {
             log_path,
             laris_bin: None,
             frontend: None,
+            exited: None,
+            mic_lost: false,
         }
     }
 
@@ -102,11 +108,29 @@ impl LarisDaemon {
     pub fn owns_running(&mut self) -> bool {
         match self.child.as_mut().map(|c| c.try_wait()) {
             Some(Ok(None)) => true,
+            Some(Ok(Some(status))) => {
+                self.exited = Some(status.code());
+                self.child = None;
+                false
+            }
             _ => {
                 self.child = None;
                 false
             }
         }
+    }
+
+    pub fn mic_lost(&self) -> bool {
+        self.mic_lost
+    }
+
+    pub fn set_mic_lost(&mut self, lost: bool) {
+        self.mic_lost = lost;
+    }
+
+    /// The exit code of the child that exited since the last call, once.
+    pub fn take_exit(&mut self) -> Option<Option<i32>> {
+        self.exited.take()
     }
 
     pub fn spawn(&mut self) -> Result<(), String> {

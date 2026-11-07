@@ -28,6 +28,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadParams};
 
 const RATE: u32 = 16_000;
+/// The one recognition language on Windows (dictation and meetings).
+pub const LANGUAGE: &str = "pt";
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -125,7 +127,7 @@ fn meeting(mic: Option<&str>) {
         eprintln!("{e}");
         std::process::exit(1);
     }
-    transcribe(&dir, &model.to_string_lossy(), &vad.to_string_lossy(), "pt");
+    transcribe(&dir, &model.to_string_lossy(), &vad.to_string_lossy(), LANGUAGE);
     if let Err(e) = minutes::run(&dir) {
         // the transcript is already on disk; summarize can be retried alone
         eprintln!("ata falhou: {e}

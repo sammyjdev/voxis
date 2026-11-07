@@ -335,7 +335,7 @@ fn pipeline(dir: &Path) -> Result<PathBuf, String> {
     // a retry keeps a transcript that already covers both recordings
     if !transcript_fresh(dir, ready) {
         let (model, vad) = super::models()?;
-        super::transcribe(dir, &model.to_string_lossy(), &vad.to_string_lossy(), "pt");
+        super::transcribe(dir, &model.to_string_lossy(), &vad.to_string_lossy(), super::LANGUAGE);
     }
     transcribed(dir, &mut std::io::stdout())?;
     let ata = super::minutes::run(dir)?;
