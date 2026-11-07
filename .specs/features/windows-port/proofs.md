@@ -1,9 +1,9 @@
 # windows-port proofs
 
-**HEAD**: 1ff3403
+**HEAD**: b2d6b5c
 **Tree**: clean
 **Shell**: C:/Program Files/Git\bin\bash.exe
-**Result**: 167 pass, 0 fail
+**Result**: 197 pass, 0 fail
 
 | Check | Proof | Result |
 | --- | --- | --- |
@@ -30,6 +30,7 @@
 | C12 | `run native / session::tests::start_refuses_while_the_newest_active_session_has_a_live_owner ... ok` | pass |
 | C13 | `run native / session::tests::a_dead_recorder_is_marked_interrupted_with_owner_died_and_a_new_session_starts ..` | pass |
 | C13 | `run native / session::tests::a_pid_reused_by_another_program_is_not_a_live_owner ... ok` | pass |
+| C13 | `run native / session::tests::a_session_whose_recorder_exited_does_not_block_a_new_start_under_the_system_owner` | pass |
 | C13 | `walk - matrix M7` | pass (Walked) |
 | C14 | `run native / session::tests::a_dead_pipeline_puts_its_session_back_to_captured ... ok` | pass |
 | C14 | `walk - matrix M8` | pass (Walked) |
@@ -39,9 +40,17 @@
 | C16 | `run native / session::tests::a_recorder_that_exits_before_recording_fails_the_session_with_recorder_error ... ` | pass |
 | C17 | `run native / session::tests::stop_ends_a_recorder_that_never_finishes_and_marks_it_interrupted ... ok` | pass |
 | C17 | `run native / session::tests::stop_keeps_stopping_when_the_recorder_cannot_be_ended ... ok` | pass |
+| C17 | `run native / session::tests::stop_keeps_the_terminal_failure_the_recorder_wrote_after_the_stop_request ... ok` | pass |
 | C18 | `run native / tests::a_failed_wav_write_finalizes_the_header_of_the_samples_written ... ok` | pass |
 | C18 | `run native / session::tests::a_disk_write_error_fails_the_session_and_keeps_both_files ... ok` | pass |
+| C18 | `run native / tests::a_full_disk_under_the_buffered_writer_leaves_a_wav_that_counts_the_samples_on_disk ... ok` | pass |
+| C18 | `run native / tests::a_half_written_sample_at_the_end_is_left_out_of_the_header ... ok` | pass |
+| C18 | `run native / tests::a_disk_that_took_less_than_a_header_reports_the_repair_failure_with_the_write_error ... ok` | pass |
+| C18 | `run native / tests::a_track_that_cannot_be_created_ends_in_an_error_not_a_panic ... ok` | pass |
 | C19 | `run contract / PASS: no_automatic_retention` | pass |
+| C19 | `run tray / laris::tests::a_windows_run_is_appended_to_the_log_and_nothing_is_moved_or_replaced ... ok` | pass |
+| C19 | `run tray / tests::an_exit_is_classified_from_the_latest_run_not_from_an_older_one_in_the_appended_log ... ok` | pass |
+| C19 | `run tray / laris::tests::macos_and_linux_keep_one_generation_of_the_log ... ok` | pass |
 | C20 | `run native / tests::config_toml_values_are_read_as_toml_like_the_tray ... ok` | pass |
 | C21 | `run native / tests::an_invalid_config_toml_is_reported_and_the_defaults_are_used ... ok` | pass |
 | C22 | `run tray / commands::tests::windows_offers_exactly_f5_to_f15_for_dictation ... ok` | pass |
@@ -82,17 +91,27 @@
 | C39 | `walk - matrix M3, dictate-<date>.log, laris.log and laris.log.1 searched for the utterance text` | pass (Walked) |
 | C40 | `run native / dictate::tests::a_paste_puts_the_text_sends_ctrl_v_and_restores_the_previous_text ... ok` | pass |
 | C41 | `run native / dictate::tests::a_partial_injection_leaves_the_text_on_the_clipboard ... ok` | pass |
+| C41 | `run native / dictate::tests::a_paste_that_did_not_happen_has_no_completion_timestamp ... ok` | pass |
 | C42 | `run native / dictate::tests::a_clipboard_failure_is_logged_without_the_text ... ok` | pass |
+| C42 | `run native / dictate::tests::a_clipboard_failure_hides_the_orb_in_both_modes ... ok` | pass |
 | C43 | `run native / dictate::tests::an_orb_that_cannot_be_created_leaves_dictation_running ... ok` | pass |
 | C44 | `run native / dictate::tests::a_lost_microphone_logs_and_exits_with_code_3 ... ok` | pass |
 | C44 | `run tray / tests::a_dictation_that_lost_its_microphone_is_not_respawned ... ok` | pass |
 | C44 | `run tray / tests::the_dictation_row_offers_one_restart_after_a_lost_microphone ... ok` | pass |
+| C44 | `run native / dictate::tests::a_dictate_that_starts_with_no_microphone_exits_3_like_a_lost_one ... ok` | pass |
+| C44 | `run tray / tests::a_poll_that_sees_exit_3_or_a_model_failure_does_not_respawn_in_the_same_tick ... ok` | pass |
+| C44 | `run tray / tests::a_poll_after_another_exit_keeps_the_three_attempt_respawn ... ok` | pass |
 | C44 | `walk - matrix M11` | pass (Walked) |
 | C45 | `run native / dictate::tests::an_unsupported_sample_format_or_model_failure_is_logged_with_exit_1 ... ok` | pass |
+| C45 | `run native / dictate::tests::a_model_that_fails_to_make_its_state_or_to_warm_up_is_logged_not_a_panic ... ok` | pass |
 | C46 | `run bench / test_the_backend_is_read_from_the_whisper_cpp_stderr_line PASSED` | pass |
 | C46 | `walk - matrix M3, the backend line in laris.log` | pass (Walked) |
 | C47 | `run native / dictate::tests::a_cpu_fallback_is_logged_as_sem_gpu ... ok` | pass |
 | C47 | `run bench / test_a_gpu_init_failure_is_recorded_as_the_cpu_backend PASSED` | pass |
+| C47 | `run native / dictate::tests::the_backend_whisper_cpp_names_is_read_from_its_own_log_line ... ok` | pass |
+| C47 | `run native / dictate::tests::a_gpu_that_whisper_cpp_did_not_use_is_logged_as_sem_gpu_whatever_ggml_registered ` | pass |
+| C47 | `run native / dictate::tests::without_a_backend_report_the_registered_devices_decide ... ok` | pass |
+| C47 | `run native / dictate::tests::the_log_hook_is_wired_to_whisper_cpp_itself ... ok` | pass |
 | C48 | `run native / models::tests::verify_replaces_a_file_whose_hash_differs_after_a_verified_download ... ok` | pass |
 | C48 | `run native / models::tests::verify_leaves_files_that_match_their_pin ... ok` | pass |
 | C48 | `run native / models::tests::fetching_models_that_are_already_there_downloads_nothing ... ok` | pass |
@@ -133,8 +152,14 @@
 | C71 | `run bench / test_the_promptfile_config_reads_its_prompt_from_stt_prompt_file PASSED` | pass |
 | C71 | `walk - Vera's prompt and noprompt tables` | pass (Walked) |
 | C72 | `run bench / test_a_variant_that_fails_is_recorded_with_its_exit_code_and_error PASSED` | pass |
+| C72 | `run bench / test_a_variant_that_cannot_launch_is_recorded_as_unavailable_with_its_launch_error PASSED` | pass |
+| C72 | `run bench / test_a_run_with_an_unlaunchable_variant_still_writes_the_manifest PASSED` | pass |
 | C72 | `walk - Vera's runs` | pass (Walked) |
 | C73 | `run bench / test_a_fake_variant_run_writes_raw_json_with_exit_code_backend_and_hashes PASSED` | pass |
+| C73 | `run bench / test_a_missing_source_sha_keeps_the_reason_it_could_not_be_read PASSED` | pass |
+| C73 | `run bench / test_a_python_variant_record_names_the_engine_package_the_model_and_the_prompt PASSED` | pass |
+| C73 | `run bench / test_a_native_variant_record_carries_the_model_file_hash PASSED` | pass |
+| C73 | `run bench / test_voice_py_reports_the_python_package_versions_and_the_model_identity PASSED` | pass |
 | C74 | `run bench / test_process_stats_give_warm_percentiles_over_all_sweeps_and_rtf_per_sweep PASSED` | pass |
 | C74 | `run bench / test_runs_are_summarized_with_count_min_median_and_max PASSED` | pass |
 | C75 | `run bench / test_a_per_process_gpu_counter_shown_as_na_is_unavailable_not_zero PASSED` | pass |
@@ -143,11 +168,15 @@
 | C76 | `walk - Vera's run manifest` | pass (Walked) |
 | C77 | `run bench / test_a_difference_is_claimed_only_when_every_block_has_the_same_sign PASSED` | pass |
 | C77 | `run bench / test_one_block_with_the_other_sign_means_no_consistent_difference PASSED` | pass |
+| C77 | `run bench / test_a_difference_needs_all_six_distinct_protocol_blocks PASSED` | pass |
+| C77 | `run bench / test_a_report_from_fewer_than_six_blocks_makes_no_difference_claim PASSED` | pass |
 | C78 | `run bench / test_scoring_reports_wer_cer_terms_empty_outputs_repeats_and_omissions PASSED` | pass |
 | C78 | `run bench / test_a_schema_1_file_and_a_schema_2_file_read_the_same_hypotheses PASSED` | pass |
 | C79 | `run bench / test_generated_silence_and_noise_clips_are_ten_seconds_of_16_khz_mono PASSED` | pass |
 | C79 | `run bench / test_a_control_run_reports_every_non_empty_output PASSED` | pass |
 | C80 | `run native / dictate::tests::the_utterance_log_carries_release_and_paste_timestamps ... ok` | pass |
+| C80 | `run native / dictate::tests::a_completed_paste_reports_when_ctrl_v_was_sent_and_when_the_clipboard_came_back .` | pass |
+| C80 | `run native / dictate::tests::the_utterance_line_names_paste_and_restore_times_only_for_a_paste_that_happened .` | pass |
 | C80 | `walk - layer 2 on the candidate installer` | pass (Walked) |
 | C81 | `run native / session::tests::the_meeting_latency_marks_name_the_stop_and_the_ready_transcript ... ok` | pass |
 | C81 | `walk - layer 2 on the candidate installer` | pass (Walked) |
@@ -159,6 +188,7 @@
 | C85 | `run native / session::tests::sysinfo_reads_the_argv_elements_of_a_spawned_process ... ok` | pass |
 | C86 | `run native / session::tests::process_and_recover_refuse_a_session_whose_owner_is_live ... ok` | pass |
 | C86 | `run native / session::tests::stop_writes_the_stop_file_only_after_checking_the_recorder ... ok` | pass |
+| C86 | `run native / session::tests::stop_settles_a_session_whose_recorder_exited_at_once_under_the_system_owner_check` | pass |
 | C87 | `run contract / PASS: harness_commit_changes_exactly_the_listed_files` | pass |
 | C88 | `run native / session::tests::a_retry_reuses_a_fresh_transcript_and_runs_only_the_minutes ... ok` | pass |
 | C88 | `run native / session::tests::a_wav_newer_than_the_transcript_runs_the_full_pipeline ... ok` | pass |
@@ -180,21 +210,21 @@
 `Run native` - exit 0
 
 ```
-test dictate::tests::a_junction_inside_the_root_pointing_outside_answers_404 ... ok
-test session::tests::a_pid_reused_by_another_program_is_not_a_live_owner ... ok
-test session::tests::sysinfo_reads_the_argv_elements_of_a_spawned_process ... ok
-test minutes::tests::a_drive_upload_timeout_says_it_may_have_completed_and_keeps_ata_md ... ok
-test dictate::tests::a_file_in_a_subfolder_of_the_frontend_root_is_served ... ok
-test dictate::tests::the_overlay_page_is_served_without_a_token ... ok
+test models::tests::an_unreachable_model_server_exits_1 ... ok
+test minutes::tests::every_provider_call_carries_its_deadline ... ok
 test dictate::tests::theme_requests_without_the_token_get_403_and_leave_the_theme_file_unchanged ... ok
+test dictate::tests::a_sentinel_outside_the_root_is_never_served_over_http ... ok
+test session::tests::sysinfo_reads_the_argv_elements_of_a_spawned_process ... ok
+test dictate::tests::the_overlay_page_is_served_without_a_token ... ok
+test session::tests::a_pid_reused_by_another_program_is_not_a_live_owner ... ok
 
-test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.48s
+test result: ok. 112 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.52s
 
 'vswhere.exe' n�o � reconhecido como um comando interno
 ou externo, um programa oper�vel ou um arquivo em lotes.
-   Compiling meetrec v0.1.0 (D:\voxis-port-work\repo\spikes\windows-rust\meetrec)
-    Finished `release` profile [optimized] target(s) in 2.66s
-     Running unittests src\main.rs (D:\vpc\release\deps\meetrec-b2f3f96a35562ec8.exe)
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized] target(s) in 1m 45s
+     Running unittests src\main.rs (D:\felix-voxis-pr5\tc\release\deps\meetrec-b2f3f96a35562ec8.exe)
 ```
 
 `Run tray` - exit 0
@@ -209,11 +239,11 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Compiling tray v0.1.0 (D:\voxis-port-work\repo\apps\tray\src-tauri)
-    Finished `release` profile [optimized] target(s) in 2.26s
-     Running unittests src\lib.rs (D:\vpc\release\deps\tray_lib-f63f88a659cd12ec.exe)
+   Compiling tray v0.1.0 (D:\felix-voxis-pr5\repo\apps\tray\src-tauri)
+    Finished `release` profile [optimized] target(s) in 30.12s
+     Running unittests src\lib.rs (D:\felix-voxis-pr5\tc\release\deps\tray_lib-f63f88a659cd12ec.exe)
 O sistema n�o pode encontrar o caminho especificado.
-     Running unittests src\main.rs (D:\vpc\release\deps\tray-adbbc2f4e625d0b2.exe)
+     Running unittests src\main.rs (D:\felix-voxis-pr5\tc\release\deps\tray-adbbc2f4e625d0b2.exe)
    Doc-tests tray_lib
 ```
 
@@ -240,11 +270,11 @@ PASS: harness_commit_changes_exactly_the_listed_files
 `Run frontend` - exit 0
 
 ```
-✔ the key list is the platform's and preselects the key the daemon uses (0.4405ms)
-✔ a saved unsupported key shows the F13 notice (0.08ms)
-✔ legacy controls are disabled with the Windows notice (0.3962ms)
-✔ the Windows form leaves STT_MODEL and NOISE_REDUCTION out of the save (0.1169ms)
-✔ the Windows settings show the fixed Portuguese language (0.0652ms)
+✔ the key list is the platform's and preselects the key the daemon uses (0.4593ms)
+✔ a saved unsupported key shows the F13 notice (0.0785ms)
+✔ legacy controls are disabled with the Windows notice (0.4015ms)
+✔ the Windows form leaves STT_MODEL and NOISE_REDUCTION out of the save (0.1306ms)
+✔ the Windows settings show the fixed Portuguese language (0.0942ms)
 ℹ tests 5
 ℹ suites 0
 ℹ pass 5
@@ -252,25 +282,25 @@ PASS: harness_commit_changes_exactly_the_listed_files
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 69.7328
+ℹ duration_ms 81.8679
 ```
 
 `Run bench` - exit 0
 
 ```
-scripts/stt_bench/test_perf_driver.py::test_one_block_with_the_other_sign_means_no_consistent_difference PASSED [ 57%]
-scripts/stt_bench/test_perf_driver.py::test_a_tie_or_a_missing_block_means_no_consistent_difference PASSED [ 60%]
-scripts/stt_bench/test_perf_driver.py::test_generated_silence_and_noise_clips_are_ten_seconds_of_16_khz_mono PASSED [ 64%]
-scripts/stt_bench/test_perf_driver.py::test_a_control_run_reports_every_non_empty_output PASSED [ 67%]
-scripts/stt_bench/test_perf_driver.py::test_a_fake_variant_run_writes_raw_json_with_exit_code_backend_and_hashes PASSED [ 71%]
-scripts/stt_bench/test_perf_driver.py::test_a_variant_that_fails_is_recorded_with_its_exit_code_and_error PASSED [ 75%]
-scripts/stt_bench/test_perf_driver.py::test_a_schema_1_file_and_a_schema_2_file_read_the_same_hypotheses PASSED [ 78%]
-scripts/stt_bench/test_perf_driver.py::test_scoring_reports_wer_cer_terms_empty_outputs_repeats_and_omissions PASSED [ 82%]
-scripts/stt_bench/test_perf_driver.py::test_identical_text_scores_zero_errors PASSED [ 85%]
-scripts/stt_bench/test_perf_driver.py::test_voice_py_writes_schema_2_with_every_sweep_and_prints_ready PASSED [ 89%]
-scripts/stt_bench/test_perf_driver.py::test_the_promptfile_config_reads_its_prompt_from_stt_prompt_file PASSED [ 92%]
-scripts/stt_bench/test_perf_driver.py::test_bench_flags_are_split_from_the_positionals PASSED [ 96%]
-scripts/stt_bench/test_perf_driver.py::test_a_run_without_a_protocol_file_runs_nothing PASSED [100%]
+scripts/stt_bench/test_perf_driver.py::test_voice_py_writes_schema_2_with_every_sweep_and_prints_ready PASSED [ 67%]
+scripts/stt_bench/test_perf_driver.py::test_the_promptfile_config_reads_its_prompt_from_stt_prompt_file PASSED [ 70%]
+scripts/stt_bench/test_perf_driver.py::test_bench_flags_are_split_from_the_positionals PASSED [ 72%]
+scripts/stt_bench/test_perf_driver.py::test_a_run_without_a_protocol_file_runs_nothing PASSED [ 75%]
+scripts/stt_bench/test_perf_driver_review1.py::test_a_difference_needs_all_six_distinct_protocol_blocks PASSED [ 78%]
+scripts/stt_bench/test_perf_driver_review1.py::test_a_report_from_fewer_than_six_blocks_makes_no_difference_claim PASSED [ 81%]
+scripts/stt_bench/test_perf_driver_review1.py::test_a_variant_that_cannot_launch_is_recorded_as_unavailable_with_its_launch_error PASSED [ 83%]
+scripts/stt_bench/test_perf_driver_review1.py::test_a_run_with_an_unlaunchable_variant_still_writes_the_manifest PASSED [ 86%]
+scripts/stt_bench/test_perf_driver_review1.py::test_a_missing_source_sha_keeps_the_reason_it_could_not_be_read PASSED [ 89%]
+scripts/stt_bench/test_perf_driver_review1.py::test_git_head_of_a_folder_that_is_no_repository_returns_a_reason PASSED [ 91%]
+scripts/stt_bench/test_perf_driver_review1.py::test_a_python_variant_record_names_the_engine_package_the_model_and_the_prompt PASSED [ 94%]
+scripts/stt_bench/test_perf_driver_review1.py::test_a_native_variant_record_carries_the_model_file_hash PASSED [ 97%]
+scripts/stt_bench/test_perf_driver_review1.py::test_voice_py_reports_the_python_package_versions_and_the_model_identity PASSED [100%]
 
-============================= 28 passed in 0.55s ==============================
+============================= 37 passed in 1.15s ==============================
 ```

@@ -170,6 +170,25 @@ criterion 87. This round changes `scripts/stt_bench/perf_driver.py` and `voice.p
 `engine_inputs_unchanged_since_h`). A layer 1 run must record the repository HEAD it ran from: the earlier harness
 smoke was run before this round and does not cover the changed driver.
 
+### Observed results at `b2d6b5c` (code head of this round)
+
+Run by the author in this session, on the build host of the first round (Windows 11 x64, RTX 4070 Ti, CUDA 13.5
+with `CUDAARCHS=89`, local only; builds in the fixer's own `D:` folders, the CI toolchain is unchanged):
+
+| Run | Result |
+| --- | --- |
+| native (`meetrec-test.cmd`, CUDA) | 112 passed, 0 failed (was 95 at `581fefc`, 25 at `889d48c`), no warnings |
+| Windows tray | 79 passed, 0 failed, no warnings (was 73) |
+| frontend (`node --test`) | 5 passed |
+| bench (`pytest scripts/stt_bench`) | 37 passed (was 28) |
+| contract (`check-windows-contract.sh`) | 18 of 18 PASS |
+| Vulkan edition build of `meetrec` | exit 0, no warnings |
+| `check_proofs.py windows-port` | 160 run proofs and 3 builds pass, 0 fail, tree clean; 34 `walk` rows listed as `Walked`, which is a handoff marker, not an execution |
+| `frozen-repro.sh` on `889d48c` | 2 controls ok, 5 reproductions fail (`evidence/frozen/`) |
+
+The Python suites of `packages/` and the Linux tray run in CI only; the PR's CI result for this head is not
+known to this document.
+
 ### Pending, counted honestly
 
 Nothing below was executed by this round:

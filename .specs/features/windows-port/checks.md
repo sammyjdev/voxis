@@ -455,6 +455,7 @@ Proof: walk - matrix M17 lists the seam tests of C3, C18, C41, C43, C45, C47 and
 
 - **Settled mid-build:** none; no user answer was needed while building
 - **Dispatched:** none by the author; independent review (Rita) and verification (Vera) are routed by Otto, per the Engineering channel and AC 65
+- **Round 1 (Felix):** fixes for Rita's findings on `581fefc`, code head `b2d6b5c`; 160 run proofs and 3 builds pass in `proofs.md`, and the 34 `walk` rows are still pending (see `development.md`, "Review round 1"); this is development evidence, not review or verification
 - **Boundary:** C1-C92 proofs that run in this session pass at `1ff3403` (131 run proofs and the build, `proofs.md`); harness `H` = `77a4ba37d7ee72c99f3831c737fce1c34904bc89`
 - **Abandoned:** the native-lock job in `security-audit.yml` (push refused without a `workflow`-scope token; C60 uses the README fallback AC 60 allows); `toml_edit` 0.22 (moved two locked versions; 0.25 already locked is used); whisper-rs `raw-api` and `log_backend` (feature changes to the engine inputs of AC 84)
 - **Walked:** none. The 34 `walk` proofs are matrix rows and reviewer steps still to run; `check_proofs.py` lists them as "pass (Walked)" only because this line exists, not because anything was walked
