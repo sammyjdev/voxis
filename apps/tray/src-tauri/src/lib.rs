@@ -219,8 +219,6 @@ fn tray_tooltip(recording_session: Option<&str>, now: chrono::DateTime<chrono::L
     }
 }
 
-/// `<meetrec> models fetch`: progress goes to the tooltip and the menu, and
-/// a successful fetch starts dictation.
 /// ~/.voxis/logs/tray-<date>.log: the tray has no console on Windows.
 fn tray_log(msg: &str) {
     let Some(home) = dirs::home_dir() else { return };
