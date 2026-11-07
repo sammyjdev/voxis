@@ -125,7 +125,7 @@ Proof: `TRAY_TEST after_a_failed_download_the_menu_says_the_models_failed`
 
 ### PR review round 1 - findings the owner chose · 6 files · ~8k
 
-Done: C27-C29 green on 2026-11-06 (meetrec suite 25 passed, tray suite 60 passed; verification round 4 added the proofs through the quit path)
+Done: C27-C29 green on 2026-11-06 (meetrec suite 25 passed, tray suite 61 passed; verification rounds 4-6 added the proofs through the quit path and the no-spawn probe)
 
 **C27** - A model server that sends the headers and part of the body, then stops sending with the connection open, makes `models fetch` give up within the stall limit and exit `1`, with no file under the final name (PR review: download without a timeout)
 Proof: `MEETREC_TEST a_download_that_stops_sending_gives_up_and_exits_1`

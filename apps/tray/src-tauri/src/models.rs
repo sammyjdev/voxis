@@ -276,16 +276,31 @@ mod tests {
     fn a_download_refused_after_quit_runs_no_process() {
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("ran.txt");
+        // a script that leaves a file behind when it runs
+        let script = if cfg!(windows) {
+            let s = tmp.path().join("probe.cmd");
+            std::fs::write(&s, format!("@echo ran> \"{}\"\r\n", marker.display())).unwrap();
+            s
+        } else {
+            let s = tmp.path().join("probe.sh");
+            std::fs::write(&s, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            s
+        };
+        let script = script.to_string_lossy().into_owned();
+        let control = FetchRun::default();
+        let _ = control.start(&script, &[]).unwrap();
+        control.wait();
+        assert!(marker.exists(), "the probe must leave its file when it runs");
+        std::fs::remove_file(&marker).unwrap();
         let run = FetchRun::default();
         run.stop();
-        let script = if cfg!(windows) {
-            format!("echo ran> \"{}\"", marker.display())
-        } else {
-            format!("touch '{}'", marker.display())
-        };
-        let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
 
-        let _ = run.start(program, &[flag, &script]);
+        let _ = run.start(&script, &[]);
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         assert!(!marker.exists());
