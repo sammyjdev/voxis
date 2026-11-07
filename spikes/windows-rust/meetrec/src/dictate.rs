@@ -173,9 +173,9 @@ fn merge(base: &mut Value, over: &Value) {
     }
 }
 
-fn load_theme() -> Value {
+fn load_theme(path: &std::path::Path) -> Value {
     let mut theme = theme_defaults();
-    if let Some(stored) = std::fs::read_to_string(theme_path()).ok().and_then(|r| serde_json::from_str::<Value>(&r).ok()) {
+    if let Some(stored) = std::fs::read_to_string(path).ok().and_then(|r| serde_json::from_str::<Value>(&r).ok()) {
         merge(&mut theme, &stored);
     }
     if theme_valid(&theme).is_ok() {
@@ -185,15 +185,14 @@ fn load_theme() -> Value {
     }
 }
 
-fn save_theme(updates: &Value) -> Result<Value, String> {
+fn save_theme(path: &std::path::Path, updates: &Value) -> Result<Value, String> {
     let known = theme_defaults();
     if let Some(bad) = updates.as_object().into_iter().flatten().map(|(k, _)| k).find(|k| known.get(k.as_str()).is_none()) {
         return Err(format!("unknown key: {bad}"));
     }
-    let mut theme = load_theme();
+    let mut theme = load_theme(path);
     merge(&mut theme, updates);
     theme_valid(&theme)?;
-    let path = theme_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&theme).unwrap()).map_err(|e| e.to_string())?;
@@ -462,7 +461,62 @@ fn serve_ws(stream: std::net::TcpStream) {
     }
 }
 
-fn serve_http(mut stream: std::net::TcpStream, token: &str) {
+/// Where `/static/<rel>` may be read from: a file under the frontend root.
+#[derive(Debug, PartialEq)]
+enum StaticErr {
+    BadPath,
+    NotFound,
+}
+
+/// Names Windows maps to a device in any folder: `NUL.txt` is NUL too.
+const RESERVED: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// `%XX` decoded; None for a bad escape or bytes that are not UTF-8.
+fn percent_decode(raw: &str) -> Option<String> {
+    let b = raw.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The file `/static/<rel>` names, only when it lies under the canonical
+/// frontend root. Every segment, split on both separators after decoding,
+/// must be a plain name: no empty segment (rooted or UNC), no `.`/`..`, no
+/// `:` (a drive or an alternate data stream), no reserved device name. A
+/// link or junction that leaves the root is not found.
+fn static_file(root: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, StaticErr> {
+    let decoded = percent_decode(rel).ok_or(StaticErr::BadPath)?;
+    let mut path = root.to_path_buf();
+    for seg in decoded.split(['/', '\\']) {
+        let stem = seg.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains(':') || RESERVED.contains(&stem.as_str()) {
+            return Err(StaticErr::BadPath);
+        }
+        path.push(seg);
+    }
+    let root = std::fs::canonicalize(root).map_err(|_| StaticErr::NotFound)?;
+    let target = std::fs::canonicalize(&path).map_err(|_| StaticErr::NotFound)?;
+    if target.starts_with(&root) && target.is_file() {
+        Ok(target)
+    } else {
+        Err(StaticErr::NotFound)
+    }
+}
+
+fn serve_http(mut stream: std::net::TcpStream, token: &str, frontend: &std::path::Path, theme: &std::path::Path) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
@@ -485,18 +539,16 @@ fn serve_http(mut stream: std::net::TcpStream, token: &str) {
     let path = target.split('?').next().unwrap_or("");
     let authorized = target.contains(&format!("token={token}"));
     match (method, path) {
-        ("GET", "/overlay") => match std::fs::read(frontend_dir().join("overlay.html")) {
+        ("GET", "/overlay") => match std::fs::read(frontend.join("overlay.html")) {
             Ok(b) => respond(&mut stream, "200 OK", content_type("x.html"), &b),
             Err(_) => respond(&mut stream, "404 Not Found", "text/plain", b"frontend not found"),
         },
         ("GET", p) if p.starts_with("/static/") => {
             let rel = &p["/static/".len()..];
-            if rel.contains("..") {
-                return respond(&mut stream, "400 Bad Request", "text/plain", b"bad path");
-            }
-            match std::fs::read(frontend_dir().join(rel)) {
-                Ok(b) => respond(&mut stream, "200 OK", content_type(rel), &b),
-                Err(_) => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
+            match static_file(frontend, rel).map(std::fs::read) {
+                Ok(Ok(b)) => respond(&mut stream, "200 OK", content_type(rel), &b),
+                Err(StaticErr::BadPath) => respond(&mut stream, "400 Bad Request", "text/plain", b"bad path"),
+                _ => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
             }
         }
         (_, "/theme") if !authorized => json_response(&mut stream, "403 Forbidden", &json!({"detail": "invalid token"})),
@@ -504,13 +556,13 @@ fn serve_http(mut stream: std::net::TcpStream, token: &str) {
             &mut stream,
             "200 OK",
             &json!({
-                "theme": load_theme(), "palettes": palettes(), "ptt_trusted": true,
+                "theme": load_theme(theme), "palettes": palettes(), "ptt_trusted": true,
                 "ready": READY.load(Ordering::SeqCst), "dictating": DICTATING.load(Ordering::SeqCst),
             }),
         ),
         ("POST", "/theme") => {
             let updates: Value = serde_json::from_slice(&body).unwrap_or_default();
-            match save_theme(&updates) {
+            match save_theme(theme, &updates) {
                 Ok(theme) => {
                     ui(Ui::Theme);
                     json_response(&mut stream, "200 OK", &json!({"theme": theme, "palettes": palettes()}))
@@ -552,7 +604,7 @@ fn serve() -> (String, String) {
                         serve_ws(stream);
                     }
                 } else {
-                    serve_http(stream, &tok);
+                    serve_http(stream, &tok, &frontend_dir(), &theme_path());
                 }
             });
         }
@@ -743,7 +795,7 @@ pub fn run() {
     // the orb window, before anything can show it
     let event_loop = EventLoopBuilder::<Ui>::with_user_event().build();
     PROXY.set(Mutex::new(event_loop.create_proxy())).ok();
-    let theme = load_theme();
+    let theme = load_theme(&theme_path());
     let size = theme["size"].as_f64().unwrap_or(190.0);
     let window = WindowBuilder::new()
         .with_title("VOXIS orb")
@@ -841,8 +893,12 @@ pub fn run() {
                     window.set_visible(true);
                 }
                 Ui::Visible(false) => window.set_visible(false),
-                Ui::Theme => place(&window, &load_theme()),
+                Ui::Theme => place(&window, &load_theme(&theme_path())),
             }
         }
     });
 }
+
+#[cfg(test)]
+#[path = "dictate_tests.rs"]
+mod tests;
