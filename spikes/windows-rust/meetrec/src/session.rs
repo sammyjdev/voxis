@@ -284,6 +284,13 @@ fn start() -> Result<(), String> {
     wait_until_recording(&dir, || matches!(child.try_wait(), Ok(Some(_))), 100, std::time::Duration::from_millis(100))
 }
 
+/// A pipeline that failed: back to `captured` so the tray offers "Processar
+/// gravação"; every file stays.
+fn pipeline_failed(dir: &Path, e: &str) {
+    let code = if e.contains(super::minutes::DEADLINE_MARK) { "provider_timeout" } else { "pipeline_error" };
+    fail(dir, "captured", code, e);
+}
+
 /// A recorder that failed: `failed`, with `disk_write_error` when a track
 /// could not be written (both WAV headers are already finalized), else
 /// `recorder_error`. Every file stays.
@@ -481,8 +488,7 @@ pub fn cli(cmd: &str, args: &[String]) -> i32 {
                 Ok(())
             }
             Err(e) => {
-                // back to captured so the tray offers "Processar gravação"
-                fail(&d, "captured", "pipeline_error", &e);
+                pipeline_failed(&d, &e);
                 Err(e)
             }
         }),
@@ -538,6 +544,60 @@ mod tests {
         assert_eq!(note, session.path().join("transcript.md"));
         assert!(!session.path().join("ata.md").exists());
         assert_eq!(read(session.path()).unwrap()["state"], "completed");
+    }
+
+    // ------------------------------------------------------------ S5 provider failures and notes
+
+    /// A session the pipeline left with a transcript and minutes on disk.
+    fn processed_session() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), &json!({"schema_version": 1, "state": "processing", "transcript_ready": true})).unwrap();
+        std::fs::write(dir.path().join("transcript.md"), "# Transcrição\n\nfechar sexta\n").unwrap();
+        std::fs::write(dir.path().join("ata.md"), "# Alinhamento\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_provider_timeout_returns_the_session_to_captured_and_keeps_the_files() {
+        let s = processed_session();
+
+        pipeline_failed(s.path(), "anthropic: no answer within 300 s (deadline)");
+
+        let m = read(s.path()).unwrap();
+        assert_eq!(m["state"], "captured");
+        assert_eq!(m["error"]["code"], "provider_timeout");
+        assert!(s.path().join("transcript.md").is_file() && s.path().join("ata.md").is_file());
+    }
+
+    #[test]
+    fn a_malformed_provider_answer_returns_to_captured_with_the_files() {
+        let s = processed_session();
+
+        pipeline_failed(s.path(), "anthropic: minutes json: expected value at line 1 column 1: <html>");
+
+        let m = read(s.path()).unwrap();
+        assert_eq!(m["state"], "captured");
+        assert_eq!(m["error"]["code"], "pipeline_error");
+        assert!(m["error"]["message"].as_str().unwrap().starts_with("anthropic: minutes json"));
+        assert!(s.path().join("transcript.md").is_file() && s.path().join("ata.md").is_file());
+    }
+
+    #[test]
+    fn a_drive_upload_makes_the_note_a_url_shortcut_to_the_doc() {
+        let session = transcribed_session();
+        let creds = Credentials { anthropic_key: Some("key".into()), google: true };
+        let minutes = |_: &str| -> Result<Value, String> {
+            Ok(json!({"titulo": "Alinhamento", "resumo": "Fechar sexta.", "decisoes": [], "action_items": []}))
+        };
+        let drive = |_: &str, _: &str| -> Result<Value, String> { Ok(json!({"webViewLink": "https://docs.google.com/document/d/D"})) };
+
+        let ata = crate::minutes::run_with_drive(session.path(), &creds, &minutes, &drive).unwrap();
+        let note = finish(session.path(), ata).unwrap();
+
+        assert_eq!(note.extension().unwrap(), "url");
+        assert_eq!(note.parent().unwrap(), session.path());
+        assert!(std::fs::read_to_string(&note).unwrap().contains("URL=https://docs.google.com/document/d/D"));
+        assert_eq!(read(session.path()).unwrap()["note_path"], note.to_string_lossy().as_ref());
     }
 
     // ------------------------------------------------------------ S2 session folders and recover
