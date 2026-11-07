@@ -63,10 +63,18 @@ pub fn find(places: &[PathBuf]) -> Result<PathBuf, String> {
         })
 }
 
+/// How long a download may go without receiving a byte before it fails.
+pub const STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// `meetrec models fetch`: models already found anywhere are left alone;
 /// otherwise each pin is downloaded into `target`. Returns the exit code:
-/// 0 ready, 1 network or HTTP error, 2 hash mismatch.
+/// 0 ready, 1 network or HTTP error (a stall included), 2 hash mismatch.
 pub fn fetch(places: &[PathBuf], target: &Path, pins: &[Pin], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    fetch_with(places, target, pins, STALL, out, err)
+}
+
+/// `fetch` with the stall limit passed in.
+pub fn fetch_with(places: &[PathBuf], target: &Path, pins: &[Pin], stall: std::time::Duration, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     if let Ok(dir) = find(places) {
         let _ = writeln!(out, "ready {}", dir.display());
         return 0;
@@ -76,7 +84,7 @@ pub fn fetch(places: &[PathBuf], target: &Path, pins: &[Pin], out: &mut dyn Writ
         return 1;
     }
     for pin in pins {
-        let code = download(pin, target, out, err);
+        let code = download(pin, target, stall, out, err);
         if code != 0 {
             return code;
         }
@@ -88,13 +96,18 @@ pub fn fetch(places: &[PathBuf], target: &Path, pins: &[Pin], out: &mut dyn Writ
 /// One pin into `<target>\<name>`, through `<name>.part`: a download cut
 /// short never sits under the final name, and neither does a file whose
 /// hash is not the pinned one.
-fn download(pin: &Pin, target: &Path, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+fn download(pin: &Pin, target: &Path, stall: std::time::Duration, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
     let dest = target.join(pin.name);
     let part = target.join(format!("{}.part", pin.name));
-    let mut resp = match ureq::get(pin.url).call() {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(stall))
+        .timeout_per_read(Some(stall))
+        .build()
+        .into();
+    let mut resp = match agent.get(pin.url).call() {
         Ok(r) => r,
         Err(e) => {
             let _ = writeln!(err, "{}: {e}", pin.url);
@@ -312,6 +325,35 @@ mod tests {
         assert_eq!(code, 2);
         assert!(!target.path().join(MODEL).exists());
         assert!(!target.path().join(format!("{MODEL}.part")).exists());
+    }
+
+    #[test]
+    fn a_download_that_stops_sending_gives_up_and_exits_1() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            while r.read_line(&mut line).unwrap() > 2 {
+                line.clear();
+            }
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n");
+            let _ = s.write_all(&[7u8; 100]);
+            std::thread::sleep(std::time::Duration::from_secs(30)); // stalls, connection open
+        });
+        let target = tempfile::tempdir().unwrap();
+        let path = target.path().to_path_buf();
+        let pins = pins_at(&base, &[7u8; 1000], b"x");
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let code = fetch_with(&[], &path, &pins, std::time::Duration::from_secs(1), &mut Vec::new(), &mut Vec::new());
+            let _ = tx.send(code);
+        });
+
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(10)), Ok(1));
+        assert!(!target.path().join(MODEL).exists());
     }
 
     #[test]
