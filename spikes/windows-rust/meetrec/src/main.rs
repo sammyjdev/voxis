@@ -9,7 +9,8 @@
 //!   meetrec summarize <dir>                         Claude minutes -> Google Doc
 //!   meetrec meeting [mic]                           record (Enter stops) + transcribe + summarize
 //!     into %USERPROFILE%\.voxis\meetings\<date>
-//!   meetrec models fetch                            download the pinned models (see models.rs)
+//!   meetrec models fetch [--verify]                 download the pinned models (see models.rs);
+//!                                                   --verify re-hashes the files already there
 //! Models come from VOXIS_MODELS, %LOCALAPPDATA%\voxis\models, or the bench
 //! cache %USERPROFILE%\.cache\voxis-bench\models, first match wins.
 
@@ -46,7 +47,9 @@ fn main() {
             transcribe(Path::new(&a[2]), &a[3], &a[4], a.get(5).map(String::as_str).unwrap_or("pt"))
         }
         Some("meeting") => meeting(a.get(2).map(String::as_str)),
-        Some("models") if a.get(2).map(String::as_str) == Some("fetch") => std::process::exit(models_fetch()),
+        Some("models") if a.get(2).map(String::as_str) == Some("fetch") => {
+            std::process::exit(models_fetch(a.get(3).map(String::as_str) == Some("--verify")))
+        }
         #[cfg(windows)]
         Some("dictate") => dictate::run(),
         // MIRIS-compatible surface the tray drives (see session.rs)
@@ -85,13 +88,18 @@ pub fn models() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     Ok((dir.join(models::MODEL), dir.join(models::VAD)))
 }
 
-/// `meetrec models fetch`: into VOXIS_MODELS when set, else the installed
-/// app's %LOCALAPPDATA%\voxis\models.
-fn models_fetch() -> i32 {
+/// `meetrec models fetch [--verify]`: into VOXIS_MODELS when set, else the
+/// installed app's %LOCALAPPDATA%\voxis\models. `--verify` hashes the files
+/// already there against their pins.
+fn models_fetch(verify: bool) -> i32 {
     let places = model_places();
     let target = models::fetch_target_from_env(&|k| std::env::var_os(k).map(Into::into), &home());
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
-    models::fetch(&places, &target, &models::PINS, &mut out, &mut err)
+    if verify {
+        models::fetch_verify(&places, &target, &models::PINS, &mut out, &mut err)
+    } else {
+        models::fetch(&places, &target, &models::PINS, &mut out, &mut err)
+    }
 }
 
 /// The folder of a `meetrec meeting` run: `meetings/<YYYY-MM-DD_HHMM>`, or
