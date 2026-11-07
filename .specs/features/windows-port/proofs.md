@@ -1,6 +1,6 @@
 # windows-port proofs
 
-**HEAD**: ac0d020
+**HEAD**: 1ff3403
 **Tree**: clean
 **Shell**: C:/Program Files/Git\bin\bash.exe
 **Result**: 167 pass, 0 fail
@@ -180,37 +180,37 @@
 `Run native` - exit 0
 
 ```
-test dictate::tests::the_overlay_page_is_served_without_a_token ... ok
-test dictate::tests::theme_requests_without_the_token_get_403_and_leave_the_theme_file_unchanged ... ok
 test dictate::tests::a_junction_inside_the_root_pointing_outside_answers_404 ... ok
-test dictate::tests::a_theme_update_with_the_token_answers_200_and_an_invalid_one_422 ... ok
 test session::tests::a_pid_reused_by_another_program_is_not_a_live_owner ... ok
 test session::tests::sysinfo_reads_the_argv_elements_of_a_spawned_process ... ok
-test dictate::tests::a_file_under_the_frontend_root_is_served ... ok
+test minutes::tests::a_drive_upload_timeout_says_it_may_have_completed_and_keeps_ata_md ... ok
+test dictate::tests::a_file_in_a_subfolder_of_the_frontend_root_is_served ... ok
+test dictate::tests::the_overlay_page_is_served_without_a_token ... ok
+test dictate::tests::theme_requests_without_the_token_get_403_and_leave_the_theme_file_unchanged ... ok
 
-test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.47s
+test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.48s
 
 'vswhere.exe' n�o � reconhecido como um comando interno
 ou externo, um programa oper�vel ou um arquivo em lotes.
    Compiling meetrec v0.1.0 (D:\voxis-port-work\repo\spikes\windows-rust\meetrec)
-    Finished `release` profile [optimized] target(s) in 2.65s
+    Finished `release` profile [optimized] target(s) in 2.66s
      Running unittests src\main.rs (D:\vpc\release\deps\meetrec-b2f3f96a35562ec8.exe)
 ```
 
 `Run tray` - exit 0
 
 ```
-   Compiling tauri-macros v2.6.3
-   Compiling tauri-plugin-notification v2.3.3
-   Compiling tauri-plugin-opener v2.5.4
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
    Compiling tray v0.1.0 (D:\voxis-port-work\repo\apps\tray\src-tauri)
-   Compiling tao v0.35.3
-   Compiling tauri-winrt-notification v0.7.3
-   Compiling sysinfo v0.37.2
-   Compiling notify-rust v4.18.0
-   Compiling webview2-com v0.38.2
-   Compiling tauri-plugin-single-instance v2.4.3
-    Finished `release` profile [optimized] target(s) in 1m 09s
+    Finished `release` profile [optimized] target(s) in 2.26s
      Running unittests src\lib.rs (D:\vpc\release\deps\tray_lib-f63f88a659cd12ec.exe)
 O sistema n�o pode encontrar o caminho especificado.
      Running unittests src\main.rs (D:\vpc\release\deps\tray-adbbc2f4e625d0b2.exe)
@@ -240,11 +240,11 @@ PASS: harness_commit_changes_exactly_the_listed_files
 `Run frontend` - exit 0
 
 ```
-✔ the key list is the platform's and preselects the key the daemon uses (0.4287ms)
-✔ a saved unsupported key shows the F13 notice (0.0762ms)
-✔ legacy controls are disabled with the Windows notice (0.3796ms)
-✔ the Windows form leaves STT_MODEL and NOISE_REDUCTION out of the save (0.1061ms)
-✔ the Windows settings show the fixed Portuguese language (0.0674ms)
+✔ the key list is the platform's and preselects the key the daemon uses (0.4405ms)
+✔ a saved unsupported key shows the F13 notice (0.08ms)
+✔ legacy controls are disabled with the Windows notice (0.3962ms)
+✔ the Windows form leaves STT_MODEL and NOISE_REDUCTION out of the save (0.1169ms)
+✔ the Windows settings show the fixed Portuguese language (0.0652ms)
 ℹ tests 5
 ℹ suites 0
 ℹ pass 5
@@ -252,12 +252,17 @@ PASS: harness_commit_changes_exactly_the_listed_files
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 69.2265
+ℹ duration_ms 69.7328
 ```
 
 `Run bench` - exit 0
 
 ```
+scripts/stt_bench/test_perf_driver.py::test_one_block_with_the_other_sign_means_no_consistent_difference PASSED [ 57%]
+scripts/stt_bench/test_perf_driver.py::test_a_tie_or_a_missing_block_means_no_consistent_difference PASSED [ 60%]
+scripts/stt_bench/test_perf_driver.py::test_generated_silence_and_noise_clips_are_ten_seconds_of_16_khz_mono PASSED [ 64%]
+scripts/stt_bench/test_perf_driver.py::test_a_control_run_reports_every_non_empty_output PASSED [ 67%]
+scripts/stt_bench/test_perf_driver.py::test_a_fake_variant_run_writes_raw_json_with_exit_code_backend_and_hashes PASSED [ 71%]
 scripts/stt_bench/test_perf_driver.py::test_a_variant_that_fails_is_recorded_with_its_exit_code_and_error PASSED [ 75%]
 scripts/stt_bench/test_perf_driver.py::test_a_schema_1_file_and_a_schema_2_file_read_the_same_hypotheses PASSED [ 78%]
 scripts/stt_bench/test_perf_driver.py::test_scoring_reports_wer_cer_terms_empty_outputs_repeats_and_omissions PASSED [ 82%]
@@ -267,10 +272,5 @@ scripts/stt_bench/test_perf_driver.py::test_the_promptfile_config_reads_its_prom
 scripts/stt_bench/test_perf_driver.py::test_bench_flags_are_split_from_the_positionals PASSED [ 96%]
 scripts/stt_bench/test_perf_driver.py::test_a_run_without_a_protocol_file_runs_nothing PASSED [100%]
 
-============================= 28 passed in 0.73s ==============================
-Downloading rapidfuzz (1.6MiB)
-Downloading numpy (12.2MiB)
- Downloaded rapidfuzz
- Downloaded numpy
-Installed 16 packages in 136ms
+============================= 28 passed in 0.55s ==============================
 ```

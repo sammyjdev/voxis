@@ -67,12 +67,17 @@ boundary), the protocol guard of the driver (AC 69).
   child started while another test's socket was open reset that connection.
 - The harness self-tests land in their own commit after `H`, so `H` holds
   exactly the files criterion 87 lists.
+- AC 60 takes its fallback branch: pushing a change to
+  `.github/workflows/security-audit.yml` was refused (the `openbot-dev` token
+  has no `workflow` scope), so the native lock is not added to the audit
+  workflow and the README says the `meetrec` binary is not covered. Adding
+  the job needs a push with a workflow-scope token: Sammy's decision.
 - The native Run line of `checks.md` disables MSYS conversion, because
   `check_proofs.py` runs proofs in Git Bash.
 
 ## Development commands and observed results at the branch head
 
-`check_proofs.py windows-port` at `ac0d020`: 131 run proofs and the build pass, 0 fail, tree clean (`proofs.md`, `check_proofs.log`); its 34 `walk` rows are pending, not walked, and
+`check_proofs.py windows-port` at `1ff3403`: 131 run proofs and the build pass, 0 fail, tree clean (`proofs.md`, `check_proofs.log`); its 34 `walk` rows are pending, not walked, and
 `build-vulkan.log`, `build-tray.log` for the Vulkan edition and tray release
 builds (exit 0, no warnings). The harness smoke (`harness-smoke/`, one block,
 two sweeps, native CUDA only, local 13.5 build) only shows the driver works
