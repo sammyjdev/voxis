@@ -8,8 +8,8 @@ surface and starts the dictation daemon for you.
 Dictation, the tray and meeting recording also run on **Linux (GNOME on
 Wayland)**. See [Linux](#linux-gnome-on-wayland).
 
-A Windows port lives in its own fork:
-[Allyhgf/voxis-windows](https://github.com/Allyhgf/voxis-windows).
+Windows runs from installers built in this repository; see
+[Windows](#windows).
 
 ---
 
@@ -364,3 +364,33 @@ publisher. First launch:
   written into your vault.
 - Linux: also `~/.config/autostart/voxis-tray.desktop`, the VOXIS custom
   shortcut, and `/etc/udev/rules.d/70-voxis-uinput.rules` if you added it.
+
+---
+
+## Windows
+
+Install from the installers in the README's
+[Windows section](../README.md#windows): pick the CUDA or the Vulkan edition
+of the release candidate tag. Each installs for the current user without an
+admin prompt.
+
+Verified configuration: Windows 11 x64 with an NVIDIA GeForce RTX 4070 Ti, the CUDA 13.3.1 edition, and Vulkan edition transcription on that same host. Not tested: Windows 10, ARM64, AMD and Intel GPUs, other NVIDIA generations, and other audio devices.
+
+- **Folders.** The app folder `%LOCALAPPDATA%\VOXIS` and the data folder
+  `%LOCALAPPDATA%\voxis` are the same folder on Windows, whose file names
+  ignore case: the installed binaries, the speech models (`models`) and the
+  orb's WebView2 data (`webview`) sit side by side there. That layout is kept
+  as it is; uninstall keeps the models, so a reinstall does not download them
+  again.
+- **Your data.** Tray meetings keep audio, transcript and notes in
+  `%USERPROFILE%\.miris\sessions\<id>`; `meetrec meeting` runs keep theirs in
+  `%USERPROFILE%\.voxis\meetings`; logs are in `%USERPROFILE%\.voxis\logs`
+  and `%USERPROFILE%\.config\voice-at\laris.log`. Nothing deletes them
+  automatically, and nothing moves or compresses them: `laris.log` is appended
+  to, one `--- voxis run <time> ---` line per dictation start. To remove them, close VOXIS and delete the session folders
+  and log files you no longer want; uninstalling does not remove them.
+- **Settings.** `%APPDATA%\voxis\config.toml` (`mic`, `speaker`,
+  `minutes_model`), `%APPDATA%\voxis\secrets.toml` and the two Google files
+  for the minutes; `%USERPROFILE%\.config\voice-at\laris-settings.json` for
+  dictation.
+- Developer notes for the native binary: `spikes/windows-rust/README.md`.

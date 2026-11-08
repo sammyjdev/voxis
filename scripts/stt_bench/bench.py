@@ -1,6 +1,6 @@
 """One STT config over a fixed sample: WER/CER, latency, VRAM.
 
-usage: bench.py <config-name> <out-dir> [coraa|ami]
+usage: bench.py <config-name> <out-dir> [coraa|ami] [--sweeps N] [--out <file.json>]
 Each config runs in its own process so VRAM and load time are its own.
 Datasets and local model copies live in $STT_BENCH_HOME (see README.md).
 """
@@ -17,7 +17,6 @@ import time
 import unicodedata
 
 import numpy as np
-import pyarrow.parquet as pq
 import soundfile as sf
 
 BENCH_HOME = os.path.expanduser(os.environ.get("STT_BENCH_HOME", "~/.cache/voxis-bench"))
@@ -43,6 +42,9 @@ CONFIGS = {
     # detection limited to the two meeting languages: the larger of p(pt), p(en)
     "turbo-pten-b5": ("fw", "large-v3-turbo", {"language": "pt|en", "beam_size": 5}),
     "turbo-pt-b5-prompt": ("fw", "large-v3-turbo", {"language": "pt", "beam_size": 5, "prompt": True}),
+    # the prompt is the file named by STT_PROMPT_FILE: the perf driver passes
+    # prompt.txt, the text of dictate.rs DEFAULT_PROMPT, to every engine
+    "turbo-pt-b5-promptfile": ("fw", "large-v3-turbo", {"language": "pt", "beam_size": 5, "prompt": "file"}),
     "turbo-pt-b5-sentence": ("fw", "large-v3-turbo", {"language": "pt", "beam_size": 5, "prompt": "sentence"}),
     "large-v3-pt-b5": ("fw", "large-v3", {"language": "pt", "beam_size": 5}),
     # TheStage AI's turbo fine-tune (cc-by-4.0), converted with
@@ -62,6 +64,7 @@ def sample(dataset: str) -> list[dict]:
     """coraa: 100 random utterances from each of CORAA's five corpora (pt-BR).
     ami: 300 random utterances of one AMI test shard (English meetings,
     headset mics)."""
+    import pyarrow.parquet as pq  # only the CORAA/AMI samples need it, not voice.py
     rng = random.Random(SEED)
     if dataset == "ami":
         rows = pq.read_table(os.path.join(BENCH_HOME, "data", "ami-ihm-test-0.parquet")).to_pylist()
@@ -87,7 +90,34 @@ def sample(dataset: str) -> list[dict]:
     return out
 
 
-def vram_mib() -> int:
+def split_flags(argv: list[str]) -> tuple[list[str], int, str | None]:
+    """`--sweeps N` and `--out <file>` taken out, positionals kept in order."""
+    pos, sweeps, out = [], 1, None
+    it = iter(argv)
+    for a in it:
+        if a == "--sweeps":
+            sweeps = int(next(it))
+        elif a == "--out":
+            out = next(it)
+        else:
+            pos.append(a)
+    return pos, max(sweeps, 1), out
+
+
+def prompt_text(option) -> str | None:
+    """The initial prompt a config asks for; "file" reads STT_PROMPT_FILE."""
+    if option == "file":
+        with open(os.environ["STT_PROMPT_FILE"], encoding="utf-8") as f:
+            return f.read() or None
+    return {True: VOCABULARY_PROMPT, "sentence": VOCABULARY_SENTENCE}.get(option)
+
+
+def ready() -> None:
+    """The cold-start mark the perf driver reads, printed after the warm-up."""
+    print(f"READY {int(time.time() * 1000)}", flush=True)
+
+
+def vram_mib() -> int | None:
     q = subprocess.run(
         ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
         capture_output=True, text=True).stdout
@@ -96,7 +126,7 @@ def vram_mib() -> int:
         # Windows (WDDM) reports per-process memory as [N/A]
         if int(pid) == os.getpid() and mem.isdigit():
             return int(mem)
-    return 0
+    return None  # unavailable is not zero
 
 
 def load(engine: str, model: str, opts: dict):
@@ -123,7 +153,7 @@ def load(engine: str, model: str, opts: dict):
             if language == "pt|en":
                 probs = dict(m.detect_language(audio)[2])
                 language = "pt" if probs.get("pt", 0) >= probs.get("en", 0) else "en"
-            prompt = {True: VOCABULARY_PROMPT, "sentence": VOCABULARY_SENTENCE}.get(opts.get("prompt"))
+            prompt = prompt_text(opts.get("prompt"))
             extra = {"initial_prompt": prompt} if prompt else {}
             segs, info = m.transcribe(audio, language=language, beam_size=opts["beam_size"],
                                       task="transcribe", condition_on_previous_text=False, **extra)
@@ -141,25 +171,35 @@ def load(engine: str, model: str, opts: dict):
 
 
 def main() -> None:
-    name, out_dir = sys.argv[1], sys.argv[2]
-    dataset = sys.argv[3] if len(sys.argv) > 3 else "coraa"
+    args, sweeps, out_file = split_flags(sys.argv[1:])
+    name, out_dir = args[0], args[1]
+    dataset = args[2] if len(args) > 2 else "coraa"
     engine, model, opts = CONFIGS[name]
     data = sample(dataset)
     t0 = time.perf_counter()
     run = load(engine, model, opts)
-    run(np.zeros(8000, dtype=np.float32))  # warm, like laris does at boot
     load_s = time.perf_counter() - t0
-    results = []
-    for item in data:
-        t = time.perf_counter()
-        hyp, lang = run(item["audio"])
-        results.append({"id": item["id"], "source": item["source"], "ref": item["ref"], "hyp": hyp,
-                        "lang": lang, "audio_s": len(item["audio"]) / 16000,
-                        "stt_s": time.perf_counter() - t})
+    t0 = time.perf_counter()
+    run(np.zeros(8000, dtype=np.float32))  # warm, like laris does at boot
+    warmup_s = time.perf_counter() - t0
+    ready()
+    all_sweeps = []
+    for _ in range(sweeps):
+        results = []
+        for item in data:
+            t = time.perf_counter()
+            hyp, lang = run(item["audio"])
+            results.append({"id": item["id"], "source": item["source"], "ref": item["ref"], "hyp": hyp,
+                            "lang": lang, "audio_s": len(item["audio"]) / 16000,
+                            "stt_s": time.perf_counter() - t})
+        all_sweeps.append(results)
+    vram = vram_mib()
     meta = {"config": name, "engine": engine, "model": model, "opts": opts,
-            "load_s": load_s, "vram_mib": vram_mib()}
-    with open(os.path.join(out_dir, f"{name}.json"), "w") as f:
-        json.dump({"meta": meta, "results": results}, f, ensure_ascii=False)
+            "load_s": load_s, "warmup_s": warmup_s, "vram_mib": vram}
+    if vram is None:
+        meta["vram_mib_unavailable"] = "nvidia-smi has no per-process value for this pid"
+    with open(out_file or os.path.join(out_dir, f"{name}.json"), "w") as f:
+        json.dump({"schema": 2, "meta": meta, "results": all_sweeps[0], "sweeps": all_sweeps}, f, ensure_ascii=False)
     print(json.dumps(meta))
 
 

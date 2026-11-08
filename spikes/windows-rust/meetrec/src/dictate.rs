@@ -173,9 +173,9 @@ fn merge(base: &mut Value, over: &Value) {
     }
 }
 
-fn load_theme() -> Value {
+fn load_theme(path: &std::path::Path) -> Value {
     let mut theme = theme_defaults();
-    if let Some(stored) = std::fs::read_to_string(theme_path()).ok().and_then(|r| serde_json::from_str::<Value>(&r).ok()) {
+    if let Some(stored) = std::fs::read_to_string(path).ok().and_then(|r| serde_json::from_str::<Value>(&r).ok()) {
         merge(&mut theme, &stored);
     }
     if theme_valid(&theme).is_ok() {
@@ -185,15 +185,14 @@ fn load_theme() -> Value {
     }
 }
 
-fn save_theme(updates: &Value) -> Result<Value, String> {
+fn save_theme(path: &std::path::Path, updates: &Value) -> Result<Value, String> {
     let known = theme_defaults();
     if let Some(bad) = updates.as_object().into_iter().flatten().map(|(k, _)| k).find(|k| known.get(k.as_str()).is_none()) {
         return Err(format!("unknown key: {bad}"));
     }
-    let mut theme = load_theme();
+    let mut theme = load_theme(path);
     merge(&mut theme, updates);
     theme_valid(&theme)?;
-    let path = theme_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&theme).unwrap()).map_err(|e| e.to_string())?;
@@ -308,7 +307,7 @@ impl Capture {
                     self.keep_preroll(chunk);
                     if rms > gate {
                         self.speaking = true;
-                        self.speech_len = 0;
+                        self.speech_len = chunk.len();
                         self.silence_len = 0;
                         self.buf = self.pre.drain(..).collect();
                         show(Show::Hearing);
@@ -378,7 +377,8 @@ fn to_16k(mono: Vec<f32>, rate: u32) -> Vec<f32> {
 
 // ---------------------------------------------------------------- paste
 
-fn ctrl_v() {
+/// Ctrl+V into the focused window; the number of events SendInput injected.
+fn ctrl_v() -> u32 {
     let key = |vk: u16, up: bool| INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -386,22 +386,458 @@ fn ctrl_v() {
         },
     };
     let seq = [key(VK_CONTROL, false), key(0x56, false), key(0x56, true), key(VK_CONTROL, true)];
-    unsafe {
-        SendInput(seq.len() as u32, seq.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+    unsafe { SendInput(seq.len() as u32, seq.as_ptr(), std::mem::size_of::<INPUT>() as i32) }
+}
+
+/// The text clipboard, as paste uses it.
+trait Clip {
+    fn get(&mut self) -> Option<String>;
+    fn set(&mut self, text: &str) -> Result<(), String>;
+}
+
+impl Clip for arboard::Clipboard {
+    fn get(&mut self) -> Option<String> {
+        self.get_text().ok()
+    }
+    fn set(&mut self, text: &str) -> Result<(), String> {
+        self.set_text(text.to_owned()).map_err(|e| e.to_string())
     }
 }
 
-/// Clipboard + Ctrl+V, then the user's clipboard text comes back.
-fn paste(text: &str) {
-    let Ok(mut cb) = arboard::Clipboard::new() else { return };
-    let previous = cb.get_text().ok();
-    if cb.set_text(text.to_owned()).is_err() {
+/// Whether the foreground window belongs to an elevated process while this
+/// one is not, or to a process whose token cannot be read. Windows drops
+/// keys injected into such a window without telling the sender (UIPI), so
+/// the paste is skipped and the text stays on the clipboard. Best effort: a
+/// window that blocks input some other way is not detected.
+fn foreground_elevated() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    unsafe fn elevated(process: HANDLE) -> Option<bool> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut e as *mut TOKEN_ELEVATION as *mut std::ffi::c_void,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        (ok != 0).then_some(e.TokenIsElevated != 0)
+    }
+
+    unsafe {
+        let window = GetForegroundWindow();
+        let mut pid = 0u32;
+        if window.is_null() || GetWindowThreadProcessId(window, &mut pid) == 0 || pid == GetCurrentProcessId() {
+            return false;
+        }
+        if elevated(GetCurrentProcess()).unwrap_or(false) {
+            return false; // an elevated dictate can type anywhere
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return true;
+        }
+        let target = elevated(process);
+        CloseHandle(process);
+        target.unwrap_or(true)
+    }
+}
+
+/// How one paste ended. Only `Pasted` carries timestamps: a failed, skipped
+/// or empty paste has no completion time to report.
+#[derive(Debug, Clone, PartialEq)]
+enum PasteOutcome {
+    /// Ctrl+V was sent at `injected_ms`; `restore` says what became of the
+    /// user's previous clipboard text.
+    Pasted { injected_ms: u128, restore: Restore },
+    /// nothing was transcribed, so nothing was pasted
+    Empty,
+    /// the clipboard could not be opened or set (AC 42)
+    ClipboardFailed(String),
+    /// `SendInput` reported fewer than 4 events (AC 41)
+    InjectFailed(u32),
+    /// the target window is elevated; the text stays on the clipboard
+    SkippedElevated,
+}
+
+/// What became of the clipboard text the user had before a paste.
+#[derive(Debug, Clone, PartialEq)]
+enum Restore {
+    /// the previous text was put back at this unix ms, after the restore wait
+    Done(u128),
+    /// the clipboard held no text before, so there was nothing to put back
+    NoPrevious,
+    /// putting it back failed: the dictated text is still on the clipboard
+    Failed(String),
+}
+
+impl PasteOutcome {
+    /// The log lines of this outcome (never the text).
+    fn log_lines(&self) -> Vec<String> {
+        match self {
+            Self::Pasted { restore: Restore::Failed(e), .. } => vec![format!("paste restore failed: clipboard {e}")],
+            Self::Pasted { .. } | Self::Empty => Vec::new(),
+            Self::ClipboardFailed(e) => vec![format!("paste failed: clipboard {e}")],
+            Self::InjectFailed(n) => vec![format!("paste failed: injected {n} of 4")],
+            Self::SkippedElevated => vec!["paste skipped: elevated target".to_owned()],
+        }
+    }
+}
+
+/// Clipboard + Ctrl+V, then the user's clipboard text comes back. `now` reads
+/// the clock: once right after Ctrl+V was sent, once after the restore.
+fn paste_outcome_with(
+    clip: Result<&mut dyn Clip, String>,
+    text: &str,
+    inject: &mut dyn FnMut() -> u32,
+    elevated: bool,
+    wait: Duration,
+    now: &mut dyn FnMut() -> u128,
+) -> PasteOutcome {
+    let cb = match clip {
+        Ok(cb) => cb,
+        Err(e) => return PasteOutcome::ClipboardFailed(e),
+    };
+    let previous = cb.get();
+    if let Err(e) = cb.set(text) {
+        return PasteOutcome::ClipboardFailed(e);
+    }
+    if elevated {
+        // the text stays on the clipboard for the user to paste by hand
+        return PasteOutcome::SkippedElevated;
+    }
+    let injected = inject();
+    if injected < 4 {
+        return PasteOutcome::InjectFailed(injected);
+    }
+    let injected_ms = now();
+    std::thread::sleep(wait);
+    let restore = match previous {
+        Some(p) => match cb.set(&p) {
+            Ok(()) => Restore::Done(now()),
+            Err(e) => Restore::Failed(e),
+        },
+        None => Restore::NoPrevious,
+    };
+    PasteOutcome::Pasted { injected_ms, restore }
+}
+
+/// `paste_outcome_with`, reduced to its log lines.
+#[cfg(test)]
+fn paste_with(clip: Result<&mut dyn Clip, String>, text: &str, inject: &mut dyn FnMut() -> u32, elevated: bool, wait: Duration) -> Vec<String> {
+    paste_outcome_with(clip, text, inject, elevated, wait, &mut unix_ms).log_lines()
+}
+
+fn paste(text: &str) -> PasteOutcome {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string());
+    let clip: Result<&mut dyn Clip, String> = match cb.as_mut() {
+        Ok(c) => Ok(c),
+        Err(e) => Err(e.clone()),
+    };
+    let outcome = paste_outcome_with(clip, text, &mut ctrl_v, foreground_elevated(), Duration::from_millis(250), &mut unix_ms);
+    for line in outcome.log_lines() {
+        log_line(&line);
+    }
+    outcome
+}
+
+/// Whether the orb goes back to hidden after a paste. A clipboard failure
+/// hides it in both modes (AC 42); otherwise only a push-to-talk utterance
+/// with nothing else being captured does.
+fn hide_orb_after(outcome: &PasteOutcome, hands_free: bool, idle: bool) -> bool {
+    matches!(outcome, PasteOutcome::ClipboardFailed(_) | PasteOutcome::Pasted { restore: Restore::Failed(_), .. })
+        || (!hands_free && idle)
+}
+
+/// The log line of one transcribed utterance.
+/// Counts and timings only: the transcript text is on screen where it was
+/// pasted and never goes to a log (dictate-<date>.log, stdout, laris.log).
+/// `release_ms` (key release or utterance end) and `paste_ms` (paste done)
+/// time release-to-paste.
+fn utterance_log(mode: &str, audio_s: f64, proc_s: f64, text: &str, release_ms: u128, paste_ms: u128) -> String {
+    format!(
+        "{mode} {audio_s:.1} s -> {proc_s:.2} s, {} chars, release_ms={release_ms} paste_ms={paste_ms}",
+        text.chars().count()
+    )
+}
+
+/// The log line of an utterance with its paste outcome: `paste_ms` is when
+/// Ctrl+V was sent and `restore_ms` when the clipboard came back, both only
+/// for a paste that happened; otherwise `paste=<why not>`.
+fn utterance_line(mode: &str, audio_s: f64, proc_s: f64, text: &str, release_ms: u128, outcome: &PasteOutcome) -> String {
+    match outcome {
+        PasteOutcome::Pasted { injected_ms, restore } => {
+            let line = utterance_log(mode, audio_s, proc_s, text, release_ms, *injected_ms);
+            match restore {
+                Restore::Done(restored_ms) => format!("{line} restore_ms={restored_ms}"),
+                Restore::NoPrevious => format!("{line} restore=none"),
+                Restore::Failed(_) => format!("{line} restore=failed"),
+            }
+        }
+        other => {
+            let why = match other {
+                PasteOutcome::Empty => "empty",
+                PasteOutcome::ClipboardFailed(_) => "clipboard_failed",
+                PasteOutcome::InjectFailed(_) => "inject_failed",
+                _ => "skipped_elevated",
+            };
+            format!("{mode} {audio_s:.1} s -> {proc_s:.2} s, {} chars, release_ms={release_ms} paste={why}", text.chars().count())
+        }
+    }
+}
+
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
+/// A dictation key gesture: what a press or release asks for.
+#[derive(Debug, PartialEq)]
+enum Gesture {
+    /// push-to-talk starts recording
+    StartPtt,
+    /// a press during hands-free turns it off
+    HandsFreeOff,
+    /// the second short tap turns hands-free on
+    HandsFreeOn,
+    /// a held key released with enough audio: transcribe and paste
+    Transcribe,
+    /// nothing to paste (a short tap, too little audio)
+    Hide,
+    /// autorepeat, or the release of the press that ended hands-free
+    Ignore,
+}
+
+/// The key state machine: hold to talk, double-tap for hands-free.
+struct Gestures {
+    held: bool,
+    pressed_at: Option<Instant>,
+    last_tap: Option<Instant>,
+    swallow_release: bool,
+}
+
+impl Gestures {
+    fn new() -> Self {
+        Self { held: false, pressed_at: None, last_tap: None, swallow_release: false }
+    }
+
+    fn down(&mut self, at: Instant, hands_free: bool) -> Gesture {
+        if self.held {
+            return Gesture::Ignore; // autorepeat
+        }
+        self.held = true;
+        self.pressed_at = Some(at);
+        if hands_free {
+            self.swallow_release = true;
+            self.last_tap = None;
+            Gesture::HandsFreeOff
+        } else {
+            Gesture::StartPtt
+        }
+    }
+
+    /// `captured` samples at `rate` were recorded while the key was down.
+    fn up(&mut self, at: Instant, captured: usize, rate: u32) -> Gesture {
+        self.held = false;
+        if std::mem::take(&mut self.swallow_release) {
+            return Gesture::Ignore;
+        }
+        let tap = self.pressed_at.is_some_and(|p| at.duration_since(p) < TAP);
+        if tap && self.last_tap.is_some_and(|t| at.duration_since(t) < DOUBLE_TAP) {
+            self.last_tap = None;
+            Gesture::HandsFreeOn
+        } else if tap {
+            self.last_tap = Some(at);
+            Gesture::Hide
+        } else if captured > rate as usize * 3 / 10 {
+            Gesture::Transcribe
+        } else {
+            Gesture::Hide
+        }
+    }
+}
+
+/// Speech a key press cut in the middle of a hands-free utterance, when it
+/// is long enough to paste.
+fn cut_utterance(c: &mut Capture) -> Option<Vec<f32>> {
+    let cut_speech = c.speaking && c.speech_len >= c.ms(MIN_SPEECH_MS);
+    let rest = c.stop();
+    cut_speech.then_some(rest)
+}
+
+/// The text a paste types: one trailing space so dictations do not glue.
+fn paste_text(text: &str) -> Option<String> {
+    (!text.is_empty()).then(|| format!("{text} "))
+}
+
+/// Exit code of a dictate whose input device went away: the tray does not
+/// respawn it.
+pub const EXIT_DEVICE_LOST: i32 = 3;
+
+/// The log line and exit code of an input device that cannot be used when
+/// dictate starts (none, or it went away before it opened): the same as one
+/// lost while running, so the tray shows the click-to-restart row and does
+/// not respawn it.
+fn mic_start_failure(e: &str) -> (String, i32) {
+    (format!("microfone desconectado: {e}"), EXIT_DEVICE_LOST)
+}
+
+/// Load the model, make its state and run the warm-up pass; any step that
+/// fails is `modelo não carregou: <path>: <error>` (AC 45), never a panic.
+fn prepare_model<C, S, E1: std::fmt::Display, E2: std::fmt::Display, E3: std::fmt::Display>(
+    path: &std::path::Path,
+    load: impl FnOnce() -> Result<C, E1>,
+    make_state: impl FnOnce(&C) -> Result<S, E2>,
+    warm: impl FnOnce(&mut S) -> Result<(), E3>,
+) -> Result<(C, S), String> {
+    let ctx = load_model(path, load)?;
+    let mut state = load_model(path, || make_state(&ctx))?;
+    load_model(path, || warm(&mut state))?;
+    Ok((ctx, state))
+}
+
+/// The log line and exit code for an input stream error.
+fn stream_lost(e: &str) -> (String, Option<i32>) {
+    (format!("microfone desconectado: {e}"), Some(EXIT_DEVICE_LOST))
+}
+
+/// The input formats dictate converts.
+fn sample_format_ok(f: cpal::SampleFormat) -> Result<(), String> {
+    match f {
+        cpal::SampleFormat::F32 | cpal::SampleFormat::I16 => Ok(()),
+        f => Err(format!("formato de áudio não suportado: {f}")),
+    }
+}
+
+/// A loaded model, or the log line that says why not.
+fn load_model<T, E: std::fmt::Display>(path: &std::path::Path, load: impl FnOnce() -> Result<T, E>) -> Result<T, String> {
+    load().map_err(|e| format!("modelo não carregou: {}: {e}", path.display()))
+}
+
+/// The orb, or the log line that says dictation runs without it.
+fn orb_or_log<T, E: std::fmt::Display>(made: Result<T, E>, log: &mut dyn FnMut(&str)) -> Option<T> {
+    made.map_err(|e| log(&format!("overlay unavailable: {e}"))).ok()
+}
+
+/// What the ggml device list says about the GPU: the log line when
+/// whisper.cpp has only the CPU to run on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Device {
+    Cpu,
+    Gpu,
+}
+
+fn gpu_note(devices: &[Device]) -> Option<&'static str> {
+    (!devices.contains(&Device::Gpu)).then_some("sem GPU: usando CPU")
+}
+
+/// What whisper.cpp itself said about the backend it chose, read from its
+/// own `whisper_backend_init_gpu` log lines (criterion 46, 47).
+#[derive(Debug, Clone, PartialEq)]
+enum BackendResult {
+    /// `using <name> backend`: CUDA0, Vulkan0, or CPU
+    Named(String),
+    /// `no GPU found`, or a backend that failed to initialize
+    CpuFallback,
+}
+
+fn observe_backend(line: &str) -> Option<BackendResult> {
+    if let Some(rest) = line.split("using ").nth(1) {
+        if let Some(name) = rest.strip_suffix(" backend").or_else(|| rest.trim_end().strip_suffix(" backend")) {
+            if !name.is_empty() && !name.contains(' ') {
+                return Some(BackendResult::Named(name.to_owned()));
+            }
+        }
+    }
+    let lower = line.to_lowercase();
+    let failed_init = lower.find("failed to initialize").is_some_and(|i| lower[i..].contains("backend"));
+    (lower.contains("no gpu found") || failed_init).then_some(BackendResult::CpuFallback)
+}
+
+/// The log line `sem GPU: usando CPU` when the GPU did not come up. The
+/// backend whisper.cpp reported decides; with no report, the devices ggml
+/// registered do.
+fn backend_note(devices: &[Device], observed: Option<&BackendResult>) -> Option<&'static str> {
+    match observed {
+        Some(BackendResult::CpuFallback) => Some("sem GPU: usando CPU"),
+        Some(BackendResult::Named(name)) if name.to_uppercase().starts_with("CPU") => Some("sem GPU: usando CPU"),
+        Some(BackendResult::Named(_)) => None,
+        None => gpu_note(devices),
+    }
+}
+
+static BACKEND: Mutex<Option<BackendResult>> = Mutex::new(None);
+static LOG_TAIL: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+/// One line of whisper.cpp's own log: remembered when it names the backend,
+/// and kept in a short tail.
+fn note_whisper_log(line: &str) {
+    if let Some(found) = observe_backend(line) {
+        if let Ok(mut b) = BACKEND.lock() {
+            *b = Some(found);
+        }
+    }
+    if let Ok(mut tail) = LOG_TAIL.lock() {
+        if tail.len() >= 64 {
+            tail.pop_front();
+        }
+        tail.push_back(line.trim_end().to_owned());
+    }
+}
+
+fn observed_backend() -> Option<BackendResult> {
+    BACKEND.lock().ok().and_then(|b| b.clone())
+}
+
+/// whisper.cpp's log callback: the line goes to stderr as before (it reaches
+/// laris.log there) and through `note_whisper_log`.
+unsafe extern "C" fn whisper_log(_level: std::ffi::c_int, text: *const std::ffi::c_char, _user: *mut std::ffi::c_void) {
+    if text.is_null() {
         return;
     }
-    ctrl_v();
-    std::thread::sleep(Duration::from_millis(250));
-    if let Some(p) = previous {
-        let _ = cb.set_text(p);
+    let line = std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned();
+    eprint!("{line}");
+    note_whisper_log(&line);
+}
+
+fn install_whisper_log() {
+    // SAFETY: the callback is a plain function that never unwinds and keeps no pointer to `text`
+    unsafe { whisper_log_set(Some(whisper_log), std::ptr::null_mut()) }
+}
+
+// ggml's device registry, linked from whisper-rs-sys's static ggml; declared
+// here instead of enabling whisper-rs `raw-api`, which would change the
+// engine's features (plan criterion 84)
+extern "C" {
+    fn whisper_log_set(
+        callback: Option<unsafe extern "C" fn(std::ffi::c_int, *const std::ffi::c_char, *mut std::ffi::c_void)>,
+        user_data: *mut std::ffi::c_void,
+    );
+    fn ggml_backend_dev_count() -> usize;
+    fn ggml_backend_dev_get(index: usize) -> *mut std::ffi::c_void;
+    fn ggml_backend_dev_type(device: *mut std::ffi::c_void) -> std::ffi::c_int;
+}
+
+/// The ggml devices this build registered (ggml-backend.h: 0 CPU, 1 GPU,
+/// 2 integrated GPU, 3 accelerator).
+fn ggml_devices() -> Vec<Device> {
+    unsafe {
+        (0..ggml_backend_dev_count())
+            .map(|i| match ggml_backend_dev_type(ggml_backend_dev_get(i)) {
+                1 | 2 => Device::Gpu,
+                _ => Device::Cpu,
+            })
+            .collect()
     }
 }
 
@@ -462,7 +898,62 @@ fn serve_ws(stream: std::net::TcpStream) {
     }
 }
 
-fn serve_http(mut stream: std::net::TcpStream, token: &str) {
+/// Where `/static/<rel>` may be read from: a file under the frontend root.
+#[derive(Debug, PartialEq)]
+enum StaticErr {
+    BadPath,
+    NotFound,
+}
+
+/// Names Windows maps to a device in any folder: `NUL.txt` is NUL too.
+const RESERVED: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// `%XX` decoded; None for a bad escape or bytes that are not UTF-8.
+fn percent_decode(raw: &str) -> Option<String> {
+    let b = raw.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The file `/static/<rel>` names, only when it lies under the canonical
+/// frontend root. Every segment, split on both separators after decoding,
+/// must be a plain name: no empty segment (rooted or UNC), no `.`/`..`, no
+/// `:` (a drive or an alternate data stream), no reserved device name. A
+/// link or junction that leaves the root is not found.
+fn static_file(root: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, StaticErr> {
+    let decoded = percent_decode(rel).ok_or(StaticErr::BadPath)?;
+    let mut path = root.to_path_buf();
+    for seg in decoded.split(['/', '\\']) {
+        let stem = seg.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains(':') || RESERVED.contains(&stem.as_str()) {
+            return Err(StaticErr::BadPath);
+        }
+        path.push(seg);
+    }
+    let root = std::fs::canonicalize(root).map_err(|_| StaticErr::NotFound)?;
+    let target = std::fs::canonicalize(&path).map_err(|_| StaticErr::NotFound)?;
+    if target.starts_with(&root) && target.is_file() {
+        Ok(target)
+    } else {
+        Err(StaticErr::NotFound)
+    }
+}
+
+fn serve_http(mut stream: std::net::TcpStream, token: &str, frontend: &std::path::Path, theme: &std::path::Path) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
@@ -485,18 +976,16 @@ fn serve_http(mut stream: std::net::TcpStream, token: &str) {
     let path = target.split('?').next().unwrap_or("");
     let authorized = target.contains(&format!("token={token}"));
     match (method, path) {
-        ("GET", "/overlay") => match std::fs::read(frontend_dir().join("overlay.html")) {
+        ("GET", "/overlay") => match std::fs::read(frontend.join("overlay.html")) {
             Ok(b) => respond(&mut stream, "200 OK", content_type("x.html"), &b),
             Err(_) => respond(&mut stream, "404 Not Found", "text/plain", b"frontend not found"),
         },
         ("GET", p) if p.starts_with("/static/") => {
             let rel = &p["/static/".len()..];
-            if rel.contains("..") {
-                return respond(&mut stream, "400 Bad Request", "text/plain", b"bad path");
-            }
-            match std::fs::read(frontend_dir().join(rel)) {
-                Ok(b) => respond(&mut stream, "200 OK", content_type(rel), &b),
-                Err(_) => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
+            match static_file(frontend, rel).map(std::fs::read) {
+                Ok(Ok(b)) => respond(&mut stream, "200 OK", content_type(rel), &b),
+                Err(StaticErr::BadPath) => respond(&mut stream, "400 Bad Request", "text/plain", b"bad path"),
+                _ => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
             }
         }
         (_, "/theme") if !authorized => json_response(&mut stream, "403 Forbidden", &json!({"detail": "invalid token"})),
@@ -504,13 +993,13 @@ fn serve_http(mut stream: std::net::TcpStream, token: &str) {
             &mut stream,
             "200 OK",
             &json!({
-                "theme": load_theme(), "palettes": palettes(), "ptt_trusted": true,
+                "theme": load_theme(theme), "palettes": palettes(), "ptt_trusted": true,
                 "ready": READY.load(Ordering::SeqCst), "dictating": DICTATING.load(Ordering::SeqCst),
             }),
         ),
         ("POST", "/theme") => {
             let updates: Value = serde_json::from_slice(&body).unwrap_or_default();
-            match save_theme(&updates) {
+            match save_theme(theme, &updates) {
                 Ok(theme) => {
                     ui(Ui::Theme);
                     json_response(&mut stream, "200 OK", &json!({"theme": theme, "palettes": palettes()}))
@@ -552,7 +1041,7 @@ fn serve() -> (String, String) {
                         serve_ws(stream);
                     }
                 } else {
-                    serve_http(stream, &tok);
+                    serve_http(stream, &tok, &frontend_dir(), &theme_path());
                 }
             });
         }
@@ -588,6 +1077,27 @@ fn place(window: &Window, theme: &Value) {
 
 // ---------------------------------------------------------------- run
 
+/// What laris-settings.json asks of the next dictate start.
+#[derive(Debug, PartialEq)]
+struct DictateSettings {
+    /// f5..f15; anything else (cmd_r, shift_r) runs f13
+    key_name: String,
+    vk: u32,
+    /// empty disables priming; unset is the dictation vocabulary
+    prompt: String,
+    hands_free: bool,
+}
+
+fn dictate_settings(settings: &Value) -> DictateSettings {
+    let key_name = settings["DICTATE_KEY"].as_str().filter(|k| key_vk(k).is_some()).unwrap_or("f13").to_owned();
+    DictateSettings {
+        vk: key_vk(&key_name).unwrap(),
+        key_name,
+        prompt: settings["INITIAL_PROMPT"].as_str().map(str::to_owned).unwrap_or_else(|| DEFAULT_PROMPT.to_owned()),
+        hands_free: settings["ASSISTANT_MODE"] == "always_on",
+    }
+}
+
 pub fn run() {
     watch_parent();
     let home = super::home();
@@ -595,10 +1105,7 @@ pub fn run() {
         .ok()
         .and_then(|r| serde_json::from_str(&r).ok())
         .unwrap_or_default();
-    let key_name = settings["DICTATE_KEY"].as_str().filter(|k| key_vk(k).is_some()).unwrap_or("f13").to_owned();
-    let vk = key_vk(&key_name).unwrap();
-    let prompt = settings["INITIAL_PROMPT"].as_str().map(str::to_owned).unwrap_or_else(|| DEFAULT_PROMPT.to_owned());
-    let start_hands_free = settings["ASSISTANT_MODE"] == "always_on";
+    let DictateSettings { key_name, vk, prompt, hands_free: start_hands_free } = dictate_settings(&settings);
     let (url, token) = serve(); // the tray shows "Carregando modelo..." until READY
     let (model, vad) = super::models().unwrap_or_else(|e| {
         log_line(&e);
@@ -606,14 +1113,13 @@ pub fn run() {
     });
 
     let t = Instant::now();
+    install_whisper_log();
     let mut cp = WhisperContextParameters::default();
     cp.use_gpu(true);
-    let ctx = WhisperContext::new_with_params(&model, cp).expect("load model");
-    let mut state = ctx.create_state().unwrap();
     let vad = vad.to_string_lossy().into_owned();
     let params = |prompt: &str, vad: &str| {
         let mut p = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
-        p.set_language(Some("pt"));
+        p.set_language(Some(super::LANGUAGE));
         p.set_no_context(true);
         p.set_no_timestamps(true);
         p.set_print_progress(false);
@@ -629,14 +1135,34 @@ pub fn run() {
         p.set_vad_params(WhisperVadParams::new());
         p
     };
-    state.full(params(&prompt, &vad), &vec![0.0f32; RATE as usize]).expect("warm");
-
-    let mic = super::pick_input(super::session::configured_mic().as_deref()).unwrap_or_else(|e| {
+    let (_ctx, mut state) = prepare_model(
+        &model,
+        || WhisperContext::new_with_params(&model, cp),
+        |ctx| ctx.create_state(),
+        |state| state.full(params(&prompt, &vad), &vec![0.0f32; RATE as usize]).map(|_| ()),
+    )
+    .unwrap_or_else(|e| {
         log_line(&e);
         std::process::exit(1)
     });
+    if let Some(note) = backend_note(&ggml_devices(), observed_backend().as_ref()) {
+        log_line(note);
+    }
+
+    // no input device, or one that went away before it opened, is a lost microphone: exit 3
+    let mic_lost = |e: &str| -> ! {
+        let (line, code) = mic_start_failure(e);
+        log_line(&line);
+        std::process::exit(code)
+    };
+    let mic = super::pick_input_with(super::session::configured_mic().as_deref(), &mut |w| log_line(w))
+        .unwrap_or_else(|e| mic_lost(&e));
     log_line(&format!("microfone: {}", mic.name().unwrap_or_default()));
-    let cfg = mic.default_input_config().unwrap();
+    let cfg = mic.default_input_config().unwrap_or_else(|e| mic_lost(&e.to_string()));
+    if let Err(e) = sample_format_ok(cfg.sample_format()) {
+        log_line(&e);
+        std::process::exit(1);
+    }
     let mic_rate = cfg.sample_rate().0;
     let ch = cfg.channels() as usize;
     let cap = Arc::new(Mutex::new(Capture {
@@ -649,7 +1175,8 @@ pub fn run() {
         silence_len: 0,
         floor: 0.003,
     }));
-    let (jobs_tx, jobs_rx) = mpsc::channel::<(Vec<f32>, bool)>();
+    // (audio, hands-free, key-release or utterance-end unix ms)
+    let (jobs_tx, jobs_rx) = mpsc::channel::<(Vec<f32>, bool, u128)>();
 
     let cap2 = cap.clone();
     let jobs2 = jobs_tx.clone();
@@ -660,7 +1187,7 @@ pub fn run() {
         let listening = c.mode != Mode::Idle;
         drop(c);
         if let Some(utterance) = finished {
-            let _ = jobs2.send((to_16k(utterance, mic_rate), true));
+            let _ = jobs2.send((to_16k(utterance, mic_rate), true, unix_ms()));
         }
         since_emit += mono.len();
         // ~25 orb updates per second while the mic is open
@@ -670,7 +1197,14 @@ pub fn run() {
         }
     };
     let scfg: cpal::StreamConfig = cfg.clone().into();
-    let err = |e| log_line(&format!("erro no microfone: {e}"));
+    let err = |e: cpal::StreamError| {
+        let (line, code) = stream_lost(&e.to_string());
+        log_line(&line);
+        if let Some(code) = code {
+            show(Show::Hidden);
+            std::process::exit(code);
+        }
+    };
     let stream = match cfg.sample_format() {
         cpal::SampleFormat::F32 => mic.build_input_stream(
             &scfg,
@@ -686,31 +1220,30 @@ pub fn run() {
             err,
             None,
         ),
-        f => panic!("unsupported sample format {f:?}"),
+        f => unreachable!("checked by sample_format_ok: {f:?}"),
     }
-    .expect("open mic");
-    stream.play().unwrap();
+    .unwrap_or_else(|e| mic_lost(&e.to_string()));
+    stream.play().unwrap_or_else(|e| mic_lost(&e.to_string()));
 
     // transcription + paste, off the hook thread
     let cap_t = cap.clone();
     std::thread::spawn(move || {
-        for (audio, hands_free) in jobs_rx {
+        for (audio, hands_free, released) in jobs_rx {
             let secs = audio.len() as f64 / RATE as f64;
             let t = Instant::now();
             if state.full(params(&prompt, &vad), &audio).is_err() {
                 continue;
             }
             let text: String = state.as_iter().map(|s| s.to_string()).collect::<String>().trim().to_owned();
-            log_line(&format!(
-                "{} {secs:.1} s -> {:.2} s: {text}",
-                if hands_free { "hf " } else { "ptt" },
-                t.elapsed().as_secs_f64()
-            ));
-            if !text.is_empty() {
-                // trailing space: consecutive dictations must not glue together
-                paste(&format!("{text} "));
-            }
-            if !hands_free && cap_t.lock().unwrap().mode == Mode::Idle {
+            let proc_s = t.elapsed().as_secs_f64();
+            // trailing space: consecutive dictations must not glue together
+            let outcome = match paste_text(&text) {
+                Some(typed) => paste(&typed),
+                None => PasteOutcome::Empty,
+            };
+            log_line(&utterance_line(if hands_free { "hf" } else { "ptt" }, secs, proc_s, &text, released, &outcome));
+            let idle = cap_t.lock().unwrap().mode == Mode::Idle;
+            if hide_orb_after(&outcome, hands_free, idle) {
                 show(Show::Hidden);
             }
         }
@@ -725,13 +1258,9 @@ pub fn run() {
         let mut c = cap3.lock().unwrap();
         if on {
             c.start(Mode::HandsFree);
-        } else {
-            let cut_speech = c.speaking && c.speech_len >= c.ms(MIN_SPEECH_MS);
-            let rest = c.stop();
+        } else if let Some(rest) = cut_utterance(&mut c) {
             // an utterance cut by the key press still gets pasted
-            if cut_speech {
-                let _ = jobs_tx.send((to_16k(rest, mic_rate), true));
-            }
+            let _ = jobs_tx.send((to_16k(rest, mic_rate), true, unix_ms()));
         }
         drop(c);
         DICTATING.store(on, Ordering::SeqCst);
@@ -743,9 +1272,9 @@ pub fn run() {
     // the orb window, before anything can show it
     let event_loop = EventLoopBuilder::<Ui>::with_user_event().build();
     PROXY.set(Mutex::new(event_loop.create_proxy())).ok();
-    let theme = load_theme();
+    let theme = load_theme(&theme_path());
     let size = theme["size"].as_f64().unwrap_or(190.0);
-    let window = WindowBuilder::new()
+    let window = orb_or_log(WindowBuilder::new()
         .with_title("VOXIS orb")
         .with_decorations(false)
         .with_transparent(true)
@@ -756,64 +1285,63 @@ pub fn run() {
         .with_visible(false)
         .with_resizable(false)
         .with_inner_size(LogicalSize::new(size, size))
-        .build(&event_loop)
-        .expect("orb window");
-    let _ = window.set_ignore_cursor_events(true); // clicks go through to the app below
-    place(&window, &theme);
+        .build(&event_loop), &mut |l| log_line(l));
+    if let Some(w) = &window {
+        let _ = w.set_ignore_cursor_events(true); // clicks go through to the app below
+        place(w, &theme);
+    }
     let data = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.clone())
         .join("voxis")
         .join("webview");
     let mut web_context = wry::WebContext::new(Some(data));
-    let _webview = wry::WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_transparent(true)
-        .with_background_color((0, 0, 0, 0))
-        .with_url(format!("{url}/overlay?token={token}"))
-        .build(&window)
-        .expect("orb webview");
+    let _webview = window.as_ref().and_then(|w| {
+        orb_or_log(
+            wry::WebViewBuilder::new_with_web_context(&mut web_context)
+                .with_transparent(true)
+                .with_background_color((0, 0, 0, 0))
+                .with_url(format!("{url}/overlay?token={token}"))
+                .build(w),
+            &mut |l| log_line(l),
+        )
+    });
 
     if start_hands_free {
         set_hands_free(true);
     }
     std::thread::spawn(move || {
-        let (mut held, mut pressed_at, mut last_tap) = (false, Instant::now(), None::<Instant>);
-        let mut swallow_release = false;
+        let mut g = Gestures::new();
         for k in keys_rx {
             match k {
-                Key::Down(_) if held => {} // autorepeat
                 Key::Down(at) => {
-                    held = true;
-                    pressed_at = at;
-                    if cap4.lock().unwrap().mode == Mode::HandsFree {
-                        set_hands_free(false);
-                        swallow_release = true;
-                        last_tap = None;
-                    } else {
-                        cap4.lock().unwrap().start(Mode::Ptt);
-                        DICTATING.store(true, Ordering::SeqCst);
-                        show(Show::Recording);
+                    let hands_free = cap4.lock().unwrap().mode == Mode::HandsFree;
+                    match g.down(at, hands_free) {
+                        Gesture::HandsFreeOff => set_hands_free(false),
+                        Gesture::StartPtt => {
+                            cap4.lock().unwrap().start(Mode::Ptt);
+                            DICTATING.store(true, Ordering::SeqCst);
+                            show(Show::Recording);
+                        }
+                        _ => {}
                     }
                 }
                 Key::Up(at) => {
-                    held = false;
-                    if std::mem::take(&mut swallow_release) {
+                    let released = unix_ms();
+                    let captured = cap4.lock().unwrap().buf.len();
+                    let gesture = g.up(at, captured, mic_rate);
+                    if gesture == Gesture::Ignore {
                         continue;
                     }
-                    let tap = at.duration_since(pressed_at) < TAP;
                     let raw = cap4.lock().unwrap().stop();
                     DICTATING.store(false, Ordering::SeqCst);
-                    if tap && last_tap.is_some_and(|t| at.duration_since(t) < DOUBLE_TAP) {
-                        last_tap = None;
-                        set_hands_free(true);
-                    } else if tap {
-                        last_tap = Some(at);
-                        show(Show::Hidden);
-                    } else if raw.len() > mic_rate as usize * 3 / 10 {
-                        show(Show::Transcribing);
-                        let _ = jobs4.send((to_16k(raw, mic_rate), false));
-                    } else {
-                        show(Show::Hidden);
+                    match gesture {
+                        Gesture::HandsFreeOn => set_hands_free(true),
+                        Gesture::Transcribe => {
+                            show(Show::Transcribing);
+                            let _ = jobs4.send((to_16k(raw, mic_rate), false, released));
+                        }
+                        _ => show(Show::Hidden),
                     }
                 }
             }
@@ -834,15 +1362,19 @@ pub fn run() {
     let _mic = stream;
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
-        if let Event::UserEvent(e) = event {
+        if let (Event::UserEvent(e), Some(window)) = (event, &window) {
             match e {
                 Ui::Visible(true) => {
                     window.set_always_on_top(true);
                     window.set_visible(true);
                 }
                 Ui::Visible(false) => window.set_visible(false),
-                Ui::Theme => place(&window, &load_theme()),
+                Ui::Theme => place(window, &load_theme(&theme_path())),
             }
         }
     });
 }
+
+#[cfg(test)]
+#[path = "dictate_tests.rs"]
+mod tests;

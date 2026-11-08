@@ -1,0 +1,12 @@
+﻿{
+    "date":  "2026-11-07",
+    "blockId":  "bea16b12-f0f2-4b5b-9450-f299bc7c0350",
+    "actionId":  "approve_plan_with_pr",
+    "userWords":  "Aprovar com PR",
+    "approvedPlanSha256":  "d89179836eb03b28f3c8933cd874a0d0783cc241d6cef742a4ff0bf32abc3efa",
+    "sourceMessageId":  "9c2f4997-c0d6-4e9d-80d4-f26fad15a738",
+    "scope":  "Revision 3 with recommended Q1/Q2 defaults, Defaults table, Execution gate, Phase C branch and draft PR",
+    "excluded":  "Merge, tag, release publication, real provider calls; phase A/B preflights remain pending",
+    "recordedPlanSha256":  "c6af42c0781d93e349508ee010b823b30bb8b5cb0913149a364d3cea49dc70e2",
+    "recordingChanges":  "Approval metadata, Q1/Q2/default confirmations and explicit Gate declaration restating criterion 66; no acceptance criterion changed. Original approved bytes retained in plan.rev3.preapproval.md."
+}

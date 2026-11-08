@@ -9,7 +9,8 @@
 //!   meetrec summarize <dir>                         Claude minutes -> Google Doc
 //!   meetrec meeting [mic]                           record (Enter stops) + transcribe + summarize
 //!     into %USERPROFILE%\.voxis\meetings\<date>
-//!   meetrec models fetch                            download the pinned models (see models.rs)
+//!   meetrec models fetch [--verify]                 download the pinned models (see models.rs);
+//!                                                   --verify re-hashes the files already there
 //! Models come from VOXIS_MODELS, %LOCALAPPDATA%\voxis\models, or the bench
 //! cache %USERPROFILE%\.cache\voxis-bench\models, first match wins.
 
@@ -28,6 +29,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadParams};
 
 const RATE: u32 = 16_000;
+/// The one recognition language on Windows (dictation and meetings).
+pub const LANGUAGE: &str = "pt";
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -35,13 +38,18 @@ fn main() {
         Some("devices") => devices(a.get(2).map(String::as_str) == Some("--json")),
         Some("record") if a.len() >= 3 => {
             let stop = a.get(4).map(|s| Stop::After(s.parse().expect("secs"))).unwrap_or(Stop::Enter);
-            record(Path::new(&a[2]), a.get(3).map(String::as_str).filter(|s| !s.is_empty()), stop, || {});
+            if let Err(e) = record(Path::new(&a[2]), a.get(3).map(String::as_str).filter(|s| !s.is_empty()), stop, || {}) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
         }
         Some("transcribe") if a.len() >= 5 => {
             transcribe(Path::new(&a[2]), &a[3], &a[4], a.get(5).map(String::as_str).unwrap_or("pt"))
         }
         Some("meeting") => meeting(a.get(2).map(String::as_str)),
-        Some("models") if a.get(2).map(String::as_str) == Some("fetch") => std::process::exit(models_fetch()),
+        Some("models") if a.get(2).map(String::as_str) == Some("fetch") => {
+            std::process::exit(models_fetch(a.get(3).map(String::as_str) == Some("--verify")))
+        }
         #[cfg(windows)]
         Some("dictate") => dictate::run(),
         // MIRIS-compatible surface the tray drives (see session.rs)
@@ -80,24 +88,54 @@ pub fn models() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     Ok((dir.join(models::MODEL), dir.join(models::VAD)))
 }
 
-/// `meetrec models fetch`: into VOXIS_MODELS when set, else the installed
-/// app's %LOCALAPPDATA%\voxis\models.
-fn models_fetch() -> i32 {
+/// `meetrec models fetch [--verify]`: into VOXIS_MODELS when set, else the
+/// installed app's %LOCALAPPDATA%\voxis\models. `--verify` hashes the files
+/// already there against their pins.
+fn models_fetch(verify: bool) -> i32 {
     let places = model_places();
     let target = models::fetch_target_from_env(&|k| std::env::var_os(k).map(Into::into), &home());
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
-    models::fetch(&places, &target, &models::PINS, &mut out, &mut err)
+    if verify {
+        models::fetch_verify(&places, &target, &models::PINS, &mut out, &mut err)
+    } else {
+        models::fetch(&places, &target, &models::PINS, &mut out, &mut err)
+    }
+}
+
+/// The folder of a `meetrec meeting` run: `meetings/<YYYY-MM-DD_HHMM>`, or
+/// `_2` to `_99` when a run in the same minute holds it. Created with a call
+/// that fails on an existing path, so a second run never writes into the
+/// first one's folder.
+fn reserve_meeting_dir(base: &Path, stamp: &str) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(base).map_err(|e| format!("{}: {e}", base.display()))?;
+    for n in 1..=99 {
+        let dir = if n == 1 { base.join(stamp) } else { base.join(format!("{stamp}_{n}")) };
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err(format!("no free session folder for {} in {}", stamp, base.display()))
 }
 
 fn meeting(mic: Option<&str>) {
-    let dir = home().join(".voxis").join("meetings").join(chrono::Local::now().format("%Y-%m-%d_%H%M").to_string());
+    let base = home().join(".voxis").join("meetings");
     let (model, vad) = models().unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1)
     });
+    let stamp = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
+    let dir = reserve_meeting_dir(&base, &stamp).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
     println!("sessão: {}", dir.display());
-    record(&dir, mic, Stop::Enter, || {});
-    transcribe(&dir, &model.to_string_lossy(), &vad.to_string_lossy(), "pt");
+    if let Err(e) = record(&dir, mic, Stop::Enter, || {}) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+    transcribe(&dir, &model.to_string_lossy(), &vad.to_string_lossy(), LANGUAGE);
     if let Err(e) = minutes::run(&dir) {
         // the transcript is already on disk; summarize can be retried alone
         eprintln!("ata falhou: {e}
@@ -142,37 +180,67 @@ pub fn config_text() -> Option<String> {
 
 /// `key` in a config.toml text; empty or missing is None.
 pub fn config_value_in(raw: &str, key: &str) -> Option<String> {
-    raw.lines()
-        .filter_map(|l| l.split_once('='))
-        .filter(|(k, _)| k.trim() == key)
-        .map(|(_, v)| v.trim().trim_matches('"').to_owned())
-        .find(|v| !v.is_empty())
+    config_value_logged(raw, key, &mut std::io::stderr())
+}
+
+/// `config_value_in`: the file parsed as TOML, as the tray's reader parses
+/// it (a top-level string; comments, quoting and escapes per the spec). A
+/// file that is not TOML is reported to `err` and every key is unset, so
+/// the defaults apply and nothing exits.
+fn config_value_logged(raw: &str, key: &str, err: &mut dyn std::io::Write) -> Option<String> {
+    match raw.parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(str::to_owned),
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = writeln!(err, "config.toml invalid: {}", msg.split_whitespace().collect::<Vec<_>>().join(" "));
+            None
+        }
+    }
 }
 
 /// The device named `want` (exact name first, then a substring such as
 /// "fifine"), or the system default when nothing is chosen. A chosen device
 /// that is unplugged falls back to the default with a warning instead of
 /// failing the meeting.
-fn pick(all: Vec<cpal::Device>, default: Option<cpal::Device>, want: Option<&str>, what: &str) -> Result<cpal::Device, String> {
-    if let Some(w) = want {
-        let name = |d: &cpal::Device| d.name().unwrap_or_default();
-        let lower = w.to_lowercase();
-        if let Some(d) = all.iter().position(|d| name(d) == w).or_else(|| all.iter().position(|d| name(d).to_lowercase().contains(&lower))) {
-            return Ok(all.into_iter().nth(d).unwrap());
-        }
-        eprintln!("{what} '{w}' não encontrado, usando o padrão do sistema");
+fn pick(all: Vec<cpal::Device>, default: Option<cpal::Device>, want: Option<&str>, what: &str, warn: &mut dyn FnMut(&str)) -> Result<cpal::Device, String> {
+    let names: Vec<String> = all.iter().map(|d| d.name().unwrap_or_default()).collect();
+    let (index, warning) = choose_device(&names, want, what);
+    if let Some(w) = warning {
+        warn(&w);
     }
-    default.ok_or_else(|| format!("nenhum {what} disponível"))
+    match index {
+        Some(i) => Ok(all.into_iter().nth(i).unwrap()),
+        None => default.ok_or_else(|| format!("nenhum {what} disponível")),
+    }
 }
 
+/// Which of `names` the user chose (exact name first, then a substring such
+/// as "fifine"); None is the system default, with the warning to log when a
+/// chosen device is absent.
+fn choose_device(names: &[String], want: Option<&str>, what: &str) -> (Option<usize>, Option<String>) {
+    let Some(w) = want else { return (None, None) };
+    let lower = w.to_lowercase();
+    match names.iter().position(|n| n == w).or_else(|| names.iter().position(|n| n.to_lowercase().contains(&lower))) {
+        Some(i) => (Some(i), None),
+        None => (None, Some(format!("{what} '{w}' não encontrado, usando o padrão do sistema"))),
+    }
+}
+
+/// The input device; a chosen one that is absent is warned on stderr (the
+/// recorder's recorder.log).
 pub fn pick_input(want: Option<&str>) -> Result<cpal::Device, String> {
+    pick_input_with(want, &mut |w| eprintln!("{w}"))
+}
+
+/// `pick_input` with the warning going to `warn` (dictation's own log).
+pub fn pick_input_with(want: Option<&str>, warn: &mut dyn FnMut(&str)) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
-    pick(host.input_devices().map(|d| d.collect()).unwrap_or_default(), host.default_input_device(), want, "microfone")
+    pick(host.input_devices().map(|d| d.collect()).unwrap_or_default(), host.default_input_device(), want, "microfone", warn)
 }
 
 pub fn pick_output(want: Option<&str>) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
-    pick(host.output_devices().map(|d| d.collect()).unwrap_or_default(), host.default_output_device(), want, "dispositivo de saída")
+    pick(host.output_devices().map(|d| d.collect()).unwrap_or_default(), host.default_output_device(), want, "dispositivo de saída", &mut |w| eprintln!("{w}"))
 }
 
 /// Mono samples tagged with the moment the callback ran, so the writer can
@@ -216,28 +284,76 @@ fn open_track(
 
 /// Writes a track at the device rate as f32 mono, padding silence whenever
 /// the clock says samples are missing. Returns the peak level for a sanity print.
-fn writer(path: std::path::PathBuf, rate: u32, rx: mpsc::Receiver<Chunk>) -> std::thread::JoinHandle<(u64, f32)> {
+fn writer(
+    path: std::path::PathBuf,
+    rate: u32,
+    rx: mpsc::Receiver<Chunk>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<Result<(u64, f32), String>> {
     std::thread::spawn(move || {
-        let spec = hound::WavSpec { channels: 1, sample_rate: rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
-        let mut w = hound::WavWriter::create(&path, spec).expect("create wav");
-        let (mut written, mut peak) = (0u64, 0f32);
-        for c in rx {
-            // where this chunk should start on the shared clock
-            let due = ((c.at * rate as f64) as u64).saturating_sub(c.mono.len() as u64);
-            if due > written + rate as u64 / 10 {
-                for _ in written..due {
-                    w.write_sample(0.0f32).unwrap();
-                }
-            }
-            for s in c.mono {
-                peak = peak.max(s.abs());
-                w.write_sample(s).unwrap();
-            }
-            written = w.len() as u64;
+        let result = std::fs::File::create(&path)
+            .map_err(|e| format!("disk_write_error: {}: {e}", path.display()))
+            .and_then(|file| {
+                let reopen = || std::fs::OpenOptions::new().read(true).write(true).open(&path);
+                write_wav(file, rate, rx, reopen)
+            });
+        if result.is_err() {
+            // ends the recording loop: there is no point waiting for a stop
+            failed.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        w.finalize().unwrap();
-        (written, peak)
+        result
     })
+}
+
+/// The track on `inner` through the buffered writer production uses
+/// (`hound::WavWriter::create` is this over a `File`). A failed flush stops
+/// the writer before it can update the header, so a failure is followed by a
+/// repair of the sizes from the bytes on disk, through `reopen`, which needs
+/// no free space.
+fn write_wav<W, R>(inner: W, rate: u32, rx: mpsc::Receiver<Chunk>, reopen: impl FnOnce() -> std::io::Result<R>) -> Result<(u64, f32), String>
+where
+    W: std::io::Write + std::io::Seek,
+    R: std::io::Read + std::io::Write + std::io::Seek,
+{
+    let w = hound::WavWriter::new(std::io::BufWriter::new(inner), track_spec(rate)).map_err(|e| format!("disk_write_error: {e}"))?;
+    let result = write_track(w, rate, rx);
+    if result.is_err() {
+        if let Err(repair) = reopen().map_err(|e| e.to_string()).and_then(|mut f| session::repair_wav_in(&mut f)) {
+            return result.map_err(|e| format!("{e}; header repair failed: {repair}"));
+        }
+    }
+    result
+}
+
+fn track_spec(rate: u32) -> hound::WavSpec {
+    hound::WavSpec { channels: 1, sample_rate: rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float }
+}
+
+/// The track's samples into `w`, padded on the shared clock. A failed
+/// write (a full disk) stops the track: the header is finalized over the
+/// samples already on disk, so the file stays playable and recoverable.
+fn write_track<W: std::io::Write + std::io::Seek>(mut w: hound::WavWriter<W>, rate: u32, rx: mpsc::Receiver<Chunk>) -> Result<(u64, f32), String> {
+    let (mut written, mut peak) = (0u64, 0f32);
+    let mut failure = None;
+    'chunks: for c in rx {
+        // where this chunk should start on the shared clock
+        let due = ((c.at * rate as f64) as u64).saturating_sub(c.mono.len() as u64);
+        let pad = if due > written + rate as u64 / 10 { due - written } else { 0 };
+        for s in std::iter::repeat_n(0.0f32, pad as usize).chain(c.mono) {
+            peak = peak.max(s.abs());
+            if let Err(e) = w.write_sample(s) {
+                failure = Some(e);
+                break 'chunks;
+            }
+        }
+        written = w.len() as u64;
+    }
+    let finalized = w.finalize();
+    match (failure, finalized) {
+        (Some(e), _) => Err(format!("disk_write_error: {e}")),
+        (None, Err(e)) => Err(format!("disk_write_error: {e}")),
+        (None, Ok(())) => Ok((written, peak)),
+    }
 }
 
 pub enum Stop {
@@ -252,8 +368,21 @@ pub struct Track {
     pub rate: u32,
 }
 
-pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl FnOnce()) -> (Track, Track) {
-    std::fs::create_dir_all(dir).unwrap();
+/// The folder a recording writes into: created when missing, refused when
+/// it already holds a track, before any writer opens (a writer would
+/// truncate it).
+fn prepare_record_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for track in ["mic.wav", "system.wav"] {
+        if dir.join(track).exists() {
+            return Err(format!("{} already holds {track}; refusing to overwrite a recording", dir.display()));
+        }
+    }
+    Ok(())
+}
+
+pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl FnOnce()) -> Result<(Track, Track), String> {
+    prepare_record_dir(dir)?;
     let mic = pick_input(mic_want).unwrap_or_else(|e| panic!("{e}"));
     let out = pick_output(config_value("speaker").as_deref()).unwrap_or_else(|e| panic!("{e}"));
     let mic_cfg = mic.default_input_config().unwrap();
@@ -265,8 +394,10 @@ pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl F
     let t0 = Instant::now();
     let (mtx, mrx) = mpsc::channel();
     let (stx, srx) = mpsc::channel();
-    let mw = writer(dir.join("mic.wav"), mic_cfg.sample_rate().0, mrx);
-    let sw = writer(dir.join("system.wav"), out_cfg.sample_rate().0, srx);
+    let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mw = writer(dir.join("mic.wav"), mic_cfg.sample_rate().0, mrx, failed.clone());
+    let sw = writer(dir.join("system.wav"), out_cfg.sample_rate().0, srx, failed.clone());
+    let failing = || failed.load(std::sync::atomic::Ordering::SeqCst);
     let ms = open_track(&mic, mic_cfg.clone(), t0, mtx.clone());
     let ss = open_track(&out, out_cfg.clone(), t0, stx.clone());
     ms.play().unwrap();
@@ -275,14 +406,16 @@ pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl F
     match stop {
         Stop::After(s) => {
             println!("gravando por {s} s...");
-            std::thread::sleep(std::time::Duration::from_secs_f64(s));
+            while t0.elapsed().as_secs_f64() < s && !failing() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
         }
         Stop::Enter => {
             println!("gravando... Enter para parar");
             let _ = std::io::stdin().lock().lines().next();
         }
         Stop::File(f) => {
-            while !f.exists() {
+            while !f.exists() && !failing() {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
@@ -295,11 +428,13 @@ pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl F
     let _ = stx.send(Chunk { at: secs, mono: vec![] });
     drop(mtx);
     drop(stx);
-    let (mn, mp) = mw.join().unwrap();
-    let (sn, sp) = sw.join().unwrap();
+    // both writers finish (and finalize) before either error is returned
+    let (mic_done, sys_done) = (mw.join().unwrap(), sw.join().unwrap());
+    let (mn, mp) = mic_done?;
+    let (sn, sp) = sys_done?;
     println!("{secs:.1} s  mic {:.1} s peak {mp:.3}  system {:.1} s peak {sp:.3}",
              mn as f64 / mic_cfg.sample_rate().0 as f64, sn as f64 / out_cfg.sample_rate().0 as f64);
-    (Track { frames: mn, rate: mic_cfg.sample_rate().0 }, Track { frames: sn, rate: out_cfg.sample_rate().0 })
+    Ok((Track { frames: mn, rate: mic_cfg.sample_rate().0 }, Track { frames: sn, rate: out_cfg.sample_rate().0 }))
 }
 
 /// Mono f32 at RATE. Box-filter average then linear interpolation: good
@@ -419,6 +554,15 @@ fn transcript_md(mut lines: Vec<Line>) -> (String, usize) {
     (md, dropped)
 }
 
+/// Tests that open loopback sockets or start processes run one at a time:
+/// a process started while another test's socket is open resets that
+/// connection when it exits.
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +650,338 @@ mod tests {
         let (md, _) = transcript_md(lines);
 
         assert_eq!(md.matches("vamos marcar sexta então").count(), 2);
+    }
+
+    fn sha(path: &Path) -> Vec<u8> {
+        use sha2::Digest;
+        sha2::Sha256::digest(std::fs::read(path).unwrap()).to_vec()
+    }
+
+    // ------------------------------------------------------------ S4 config and devices (F20)
+
+    #[test]
+    fn config_toml_values_are_read_as_toml_like_the_tray() {
+        let cases = [
+            ("mic = \"USB Microphone\" # desk\n", Some("USB Microphone")),
+            ("mic = 'USB Mic'\n", Some("USB Mic")),
+            ("mic = \"A \\\"B\\\"\"\n", Some("A \"B\"")),
+            ("[audio]\nmic = \"nested\"\n", None),
+            ("mic = \"\"\n", None),
+        ];
+
+        for (raw, want) in cases {
+            assert_eq!(config_value_logged(raw, "mic", &mut Vec::new()).as_deref(), want, "{raw}");
+        }
+        let all = "mic = \"fifine\" # mesa\nspeaker = 'Alto-falantes'\nminutes_model = \"claude-haiku-5-5\" # mais barato\n";
+        assert_eq!(config_value_logged(all, "speaker", &mut Vec::new()).as_deref(), Some("Alto-falantes"));
+        assert_eq!(config_value_logged(all, "minutes_model", &mut Vec::new()).as_deref(), Some("claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn an_invalid_config_toml_is_reported_and_the_defaults_are_used() {
+        let mut err = Vec::new();
+
+        let mic = config_value_logged("mic = \"USB\nspeaker = 3 =\n", "mic", &mut err);
+
+        let err = String::from_utf8(err).unwrap();
+        assert_eq!(mic, None, "the default device");
+        assert!(err.starts_with("config.toml invalid: "), "{err}");
+    }
+
+    #[test]
+    fn a_chosen_device_is_used_and_an_absent_one_falls_back_with_a_warning() {
+        let names: Vec<String> = ["Microfone (Realtek)", "Microfone (2- fifine Microphone)"].iter().map(|s| s.to_string()).collect();
+
+        assert_eq!(choose_device(&names, Some("Microfone (Realtek)"), "microfone"), (Some(0), None));
+        assert_eq!(choose_device(&names, Some("fifine"), "microfone"), (Some(1), None));
+        assert_eq!(choose_device(&names, None, "microfone"), (None, None));
+        assert_eq!(
+            choose_device(&names, Some("Anker PowerConf"), "microfone"),
+            (None, Some("microfone 'Anker PowerConf' não encontrado, usando o padrão do sistema".to_owned()))
+        );
+    }
+
+    // ------------------------------------------------------------ S2 meeting folders (F18)
+
+    #[test]
+    fn the_meeting_folder_is_reserved_with_a_create_new_call() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(base.path().join("2026-11-07_1432")).unwrap();
+
+        let dir = reserve_meeting_dir(base.path(), "2026-11-07_1432").unwrap();
+
+        assert_ne!(dir, base.path().join("2026-11-07_1432"), "an existing folder must never be reused");
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn a_second_meeting_in_the_same_minute_gets_its_own_folder_and_keeps_the_first() {
+        let base = tempfile::tempdir().unwrap();
+        let first = reserve_meeting_dir(base.path(), "2026-11-07_1432").unwrap();
+        std::fs::write(first.join("mic.wav"), b"first meeting").unwrap();
+        let before = sha(&first.join("mic.wav"));
+
+        let second = reserve_meeting_dir(base.path(), "2026-11-07_1432").unwrap();
+
+        assert_eq!(first, base.path().join("2026-11-07_1432"));
+        assert_eq!(second, base.path().join("2026-11-07_1432_2"));
+        assert_eq!(sha(&first.join("mic.wav")), before);
+    }
+
+    #[test]
+    fn after_99_folders_in_one_minute_the_meeting_refuses_with_no_free_session_folder() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(base.path().join("2026-11-07_1432")).unwrap();
+        for n in 2..=99 {
+            std::fs::create_dir_all(base.path().join(format!("2026-11-07_1432_{n}"))).unwrap();
+        }
+
+        let e = reserve_meeting_dir(base.path(), "2026-11-07_1432").unwrap_err();
+
+        assert!(e.contains("no free session folder"), "{e}");
+        assert!(!base.path().join("2026-11-07_1432_100").exists());
+    }
+
+    #[test]
+    fn recording_into_a_folder_that_already_holds_a_track_is_refused_and_leaves_it_unchanged() {
+        for track in ["mic.wav", "system.wav"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(track), b"an earlier recording").unwrap();
+
+            let refused = prepare_record_dir(dir.path());
+
+            assert!(refused.is_err(), "{track} must be refused");
+            assert_eq!(std::fs::read(dir.path().join(track)).unwrap(), b"an earlier recording");
+        }
+    }
+
+    #[test]
+    fn recording_into_a_missing_or_empty_folder_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("new");
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        assert_eq!(prepare_record_dir(&missing), Ok(()));
+        assert_eq!(prepare_record_dir(&empty), Ok(()));
+        assert!(missing.is_dir());
+    }
+
+    /// A file that accepts `cap` bytes, then fails like a full disk; bytes
+    /// already written can still be rewritten (the WAV header). The bytes
+    /// are shared so the test reads what reached the "disk".
+    #[derive(Clone)]
+    struct FullDisk {
+        data: std::rc::Rc<std::cell::RefCell<std::io::Cursor<Vec<u8>>>>,
+        cap: u64,
+    }
+
+    impl std::io::Write for FullDisk {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut d = self.data.borrow_mut();
+            if d.position() + buf.len() as u64 > self.cap {
+                return Err(std::io::Error::other("disk full"));
+            }
+            std::io::Write::write(&mut *d, buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Seek for FullDisk {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            std::io::Seek::seek(&mut *self.data.borrow_mut(), pos)
+        }
+    }
+
+    #[test]
+    fn a_failed_wav_write_finalizes_the_header_of_the_samples_written() {
+        let mut header = std::io::Cursor::new(Vec::new());
+        hound::WavWriter::new(&mut header, track_spec(16_000)).unwrap().finalize().unwrap();
+        let header_len = header.get_ref().len() as u64;
+        let disk = FullDisk { data: Default::default(), cap: header_len + 100 * 4 };
+        let w = hound::WavWriter::new(disk.clone(), track_spec(16_000)).unwrap();
+        let (tx, rx) = mpsc::channel();
+        tx.send(Chunk { at: 0.0, mono: vec![0.5; 400] }).unwrap();
+        drop(tx);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write_track(w, 16_000, rx)));
+
+        let result = result.expect("a write failure must not panic");
+        let e = result.unwrap_err();
+        assert!(e.starts_with("disk_write_error"), "{e}");
+        let bytes = disk.data.borrow().get_ref().clone();
+        let r = hound::WavReader::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(r.len(), 100, "the header counts the 100 samples that reached the disk");
+    }
+
+    /// Like a full disk: takes bytes up to `cap` (a write that crosses it is
+    /// partial), then fails; bytes already on it can be read and rewritten.
+    #[derive(Clone)]
+    struct PartialDisk {
+        data: std::rc::Rc<std::cell::RefCell<std::io::Cursor<Vec<u8>>>>,
+        cap: u64,
+    }
+
+    impl std::io::Write for PartialDisk {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut d = self.data.borrow_mut();
+            let room = self.cap.saturating_sub(d.position()) as usize;
+            if room == 0 {
+                return Err(std::io::Error::other("disk full"));
+            }
+            std::io::Write::write(&mut *d, &buf[..buf.len().min(room)])
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Seek for PartialDisk {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            std::io::Seek::seek(&mut *self.data.borrow_mut(), pos)
+        }
+    }
+
+    impl std::io::Read for PartialDisk {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut *self.data.borrow_mut(), buf)
+        }
+    }
+
+    fn recorded_samples_after_a_full_disk(cap_after_header: u64) -> (String, usize) {
+        let mut header = std::io::Cursor::new(Vec::new());
+        hound::WavWriter::new(&mut header, track_spec(16_000)).unwrap().finalize().unwrap();
+        let disk = PartialDisk { data: Default::default(), cap: header.get_ref().len() as u64 + cap_after_header };
+        let (tx, rx) = mpsc::channel();
+        tx.send(Chunk { at: 0.0, mono: vec![0.5; 400] }).unwrap();
+        drop(tx);
+
+        let again = disk.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write_wav(disk.clone(), 16_000, rx, || Ok::<_, std::io::Error>(again))));
+
+        let e = result.expect("a write failure must not panic").unwrap_err();
+        let bytes = disk.data.borrow().get_ref().clone();
+        let samples = hound::WavReader::new(std::io::Cursor::new(bytes)).expect("a header that can be read").len() as usize;
+        (e, samples)
+    }
+
+    #[test]
+    fn a_full_disk_under_the_buffered_writer_leaves_a_wav_that_counts_the_samples_on_disk() {
+        let (e, samples) = recorded_samples_after_a_full_disk(100 * 4);
+
+        assert!(e.starts_with("disk_write_error"), "{e}");
+        assert!(!e.contains("header repair failed"), "{e}");
+        assert_eq!(samples, 100, "the header counts the 100 whole samples that reached the disk");
+    }
+
+    #[test]
+    fn a_track_that_cannot_be_created_ends_in_an_error_not_a_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("no-such-folder").join("mic.wav");
+        let (tx, rx) = mpsc::channel();
+        tx.send(Chunk { at: 0.0, mono: vec![0.25; 160] }).unwrap();
+        drop(tx);
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let ended = writer(path, 16_000, rx, failed.clone()).join();
+
+        let result = ended.expect("the writer thread must not panic");
+        assert!(result.unwrap_err().starts_with("disk_write_error"));
+        assert!(failed.load(std::sync::atomic::Ordering::SeqCst), "the recording loop is told to end");
+    }
+
+    // A failure during writing on a real `File`, with nothing filling a disk: the track file is locked
+    // from 1 MiB on through a second handle (`LockFileEx`), so the first flush that reaches the locked
+    // range fails by itself. The same recipe runs against the frozen `writer` in
+    // .specs/features/windows-port/frozen-repro/main.midwrite.rs.inc.
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        event: *mut std::ffi::c_void,
+    }
+
+    extern "system" {
+        fn LockFileEx(file: *mut std::ffi::c_void, flags: u32, reserved: u32, low: u32, high: u32, overlapped: *mut Overlapped) -> i32;
+    }
+
+    const LOCK_FROM: u32 = 1 << 20;
+
+    fn locked_track(dir: &std::path::Path) -> (std::path::PathBuf, std::fs::File) {
+        use std::os::windows::io::AsRawHandle;
+        let path = dir.join("mic.wav");
+        let locker = std::fs::File::create(&path).unwrap();
+        let mut o = Overlapped { internal: 0, internal_high: 0, offset: LOCK_FROM, offset_high: 0, event: std::ptr::null_mut() };
+        let ok = unsafe { LockFileEx(locker.as_raw_handle() as *mut _, 3, 0, u32::MAX, 0, &mut o) };
+        assert_ne!(ok, 0, "LockFileEx failed: {}", std::io::Error::last_os_error());
+        (path, locker)
+    }
+
+    fn quiet_chunks(count: usize) -> mpsc::Receiver<Chunk> {
+        let (tx, rx) = mpsc::channel();
+        for i in 0..count {
+            tx.send(Chunk { at: i as f64 * 0.25, mono: vec![0.25; 4096] }).unwrap();
+        }
+        rx
+    }
+
+    #[test]
+    fn a_track_below_the_locked_range_is_written_and_finalized_on_a_real_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _locker) = locked_track(tmp.path());
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let (written, _) = writer(path.clone(), 16_000, quiet_chunks(10), failed.clone()).join().unwrap().unwrap();
+
+        assert_eq!(written, 10 * 4096);
+        assert_eq!(hound::WavReader::open(&path).unwrap().len(), 10 * 4096);
+        assert!(!failed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_write_that_fails_in_the_middle_of_a_track_on_a_real_file_is_an_error_and_the_data_on_disk_is_recoverable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _locker) = locked_track(tmp.path());
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let ended = writer(path.clone(), 16_000, quiet_chunks(100), failed.clone()).join();
+
+        let e = ended.expect("the writer thread must not panic").unwrap_err();
+        assert!(e.starts_with("disk_write_error"), "{e}");
+        assert!(!e.contains("header repair failed"), "the header was repaired from the bytes on disk: {e}");
+        assert!(failed.load(std::sync::atomic::Ordering::SeqCst), "the recording loop is told to end");
+        // exactly the file's length: a read at the end of file would touch the locked range
+        let len = std::fs::metadata(&path).unwrap().len() as usize;
+        let mut bytes = vec![0u8; len];
+        std::io::Read::read_exact(&mut std::fs::File::open(&path).unwrap(), &mut bytes).unwrap();
+        assert_eq!(bytes.len() as u32, LOCK_FROM, "everything before the locked range reached the disk, nothing after it");
+        let data_at = bytes.windows(4).position(|w| w == b"data").unwrap() + 8;
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.len() as usize, (bytes.len() - data_at) / 4, "the header counts every whole sample that reached the disk");
+        assert!(reader.len() > 0);
+    }
+
+    #[test]
+    fn a_half_written_sample_at_the_end_is_left_out_of_the_header() {
+        let (_, samples) = recorded_samples_after_a_full_disk(100 * 4 + 2);
+
+        assert_eq!(samples, 100);
+    }
+
+    #[test]
+    fn a_disk_that_took_less_than_a_header_reports_the_repair_failure_with_the_write_error() {
+        let disk = PartialDisk { data: Default::default(), cap: 10 };
+        let (tx, rx) = mpsc::channel();
+        tx.send(Chunk { at: 0.0, mono: vec![0.5; 4] }).unwrap();
+        drop(tx);
+        let again = disk.clone();
+
+        let e = write_wav(disk, 16_000, rx, || Ok::<_, std::io::Error>(again)).unwrap_err();
+
+        assert!(e.starts_with("disk_write_error") && e.contains("header repair failed"), "{e}");
     }
 }

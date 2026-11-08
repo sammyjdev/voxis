@@ -73,6 +73,73 @@ pub fn fetch(places: &[PathBuf], target: &Path, pins: &[Pin], out: &mut dyn Writ
     fetch_with(places, target, pins, STALL, out, err)
 }
 
+/// Opens the file a download writes into.
+pub type Opener = dyn Fn(&Path) -> std::io::Result<Box<dyn Write>>;
+
+fn create_file(path: &Path) -> std::io::Result<Box<dyn Write>> {
+    Ok(Box::new(std::fs::File::create(path)?))
+}
+
+/// `meetrec models fetch --verify`: each present file is hashed against its pin.
+pub fn fetch_verify(places: &[PathBuf], target: &Path, pins: &[Pin], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    fetch_verify_with(places, target, pins, STALL, &create_file, out, err)
+}
+
+/// `fetch_verify` with the stall limit and the file opener passed in.
+///
+/// Checks the folder the app loads from (the first place holding both
+/// files, else `target`). A file that matches its pin stays; one that
+/// differs or is missing is downloaded through `<name>.part`, verified, and
+/// only then put under its name. A download cut short, or a full disk,
+/// leaves the old file as it was, deletes only its own `.part`, and exits 1;
+/// a downloaded file whose hash differs exits 2.
+pub fn fetch_verify_with(places: &[PathBuf], target: &Path, pins: &[Pin], stall: std::time::Duration, open: &Opener, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let dir = find(places).unwrap_or_else(|_| target.to_path_buf());
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        let _ = writeln!(err, "{}: {e}", dir.display());
+        return 1;
+    }
+    for pin in pins {
+        let path = dir.join(pin.name);
+        let started = std::time::Instant::now();
+        match sha256_of(&path) {
+            Ok(digest) if digest == pin.sha256 => {
+                let _ = writeln!(out, "verified {} in {:.1} s", pin.name, started.elapsed().as_secs_f64());
+                continue;
+            }
+            Ok(digest) => {
+                let _ = writeln!(out, "mismatch {}: sha256 {digest}, expected {}", pin.name, pin.sha256);
+            }
+            Err(_) => {
+                let _ = writeln!(out, "missing {}", pin.name);
+            }
+        }
+        let code = download(pin, &dir, stall, open, out, err);
+        if code != 0 {
+            let _ = std::fs::remove_file(dir.join(format!("{}.part", pin.name)));
+            return code;
+        }
+    }
+    let _ = writeln!(out, "ready {}", dir.display());
+    0
+}
+
+fn sha256_of(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// `fetch` with the stall limit passed in.
 pub fn fetch_with(places: &[PathBuf], target: &Path, pins: &[Pin], stall: std::time::Duration, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     if let Ok(dir) = find(places) {
@@ -84,7 +151,7 @@ pub fn fetch_with(places: &[PathBuf], target: &Path, pins: &[Pin], stall: std::t
         return 1;
     }
     for pin in pins {
-        let code = download(pin, target, stall, out, err);
+        let code = download(pin, target, stall, &create_file, out, err);
         if code != 0 {
             return code;
         }
@@ -96,7 +163,7 @@ pub fn fetch_with(places: &[PathBuf], target: &Path, pins: &[Pin], stall: std::t
 /// One pin into `<target>\<name>`, through `<name>.part`: a download cut
 /// short never sits under the final name, and neither does a file whose
 /// hash is not the pinned one.
-fn download(pin: &Pin, target: &Path, stall: std::time::Duration, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+fn download(pin: &Pin, target: &Path, stall: std::time::Duration, open: &Opener, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
@@ -118,7 +185,7 @@ fn download(pin: &Pin, target: &Path, stall: std::time::Duration, out: &mut dyn 
         .headers()
         .get("content-length")
         .and_then(|v| v.to_str().ok()?.parse().ok());
-    let mut file = match std::fs::File::create(&part) {
+    let mut file = match open(&part) {
         Ok(f) => f,
         Err(e) => {
             let _ = writeln!(err, "{}: {e}", part.display());
@@ -382,6 +449,99 @@ mod tests {
 
         assert_eq!(code, 1);
         assert!(String::from_utf8_lossy(&err).contains(&format!("{base}/{MODEL}")));
+    }
+
+    /// A model folder holding `model` and `vad` bytes.
+    fn holding(model: &[u8], vad: &[u8]) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(MODEL), model).unwrap();
+        std::fs::write(d.path().join(VAD), vad).unwrap();
+        d
+    }
+
+    #[test]
+    fn verify_replaces_a_file_whose_hash_differs_after_a_verified_download() {
+        let good = b"the pinned model bytes".to_vec();
+        let (base, hits) = serve(good.clone(), good.len());
+        let dir = holding(b"corrupted on disk", b"vad");
+        let mut out = Vec::new();
+
+        let code = fetch_verify(&[dir.path().to_path_buf()], dir.path(), &pins_at(&base, &good, b"vad"), &mut out, &mut Vec::new());
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&out));
+        assert_eq!(std::fs::read(dir.path().join(MODEL)).unwrap(), good);
+        assert_eq!(std::fs::read(dir.path().join(VAD)).unwrap(), b"vad");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "only the differing file is downloaded");
+        assert!(!dir.path().join(format!("{MODEL}.part")).exists());
+    }
+
+    #[test]
+    fn verify_leaves_files_that_match_their_pin() {
+        let (base, hits) = serve(b"unused".to_vec(), 6);
+        let dir = holding(b"model", b"vad");
+
+        let code = fetch_verify(&[dir.path().to_path_buf()], dir.path(), &pins_at(&base, b"model", b"vad"), &mut Vec::new(), &mut Vec::new());
+
+        assert_eq!(code, 0);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(dir.path().join(MODEL)).unwrap(), b"model");
+    }
+
+    #[test]
+    fn a_cut_verify_download_keeps_the_old_file_and_removes_its_part() {
+        let full = vec![7u8; 1000];
+        let (base, _) = serve(vec![7u8; 400], 1000); // promises 1000, sends 400
+        let dir = holding(b"corrupted on disk", b"vad");
+
+        let code = fetch_verify(&[dir.path().to_path_buf()], dir.path(), &pins_at(&base, &full, b"vad"), &mut Vec::new(), &mut Vec::new());
+
+        assert_eq!(code, 1);
+        assert_eq!(std::fs::read(dir.path().join(MODEL)).unwrap(), b"corrupted on disk", "the old file is untouched");
+        assert!(!dir.path().join(format!("{MODEL}.part")).exists(), "its own .part is deleted");
+    }
+
+    #[test]
+    fn a_cut_download_with_no_old_file_leaves_nothing_under_the_final_name() {
+        let full = vec![7u8; 1000];
+        let (base, _) = serve(vec![7u8; 400], 1000);
+        let dir = tempfile::tempdir().unwrap();
+
+        let code = fetch_verify(&[dir.path().to_path_buf()], dir.path(), &pins_at(&base, &full, b"vad"), &mut Vec::new(), &mut Vec::new());
+
+        assert_eq!(code, 1);
+        assert!(!dir.path().join(MODEL).exists());
+        assert!(!dir.path().join(format!("{MODEL}.part")).exists());
+    }
+
+    /// A file that takes `cap` bytes, then fails like a full disk.
+    struct Full(std::fs::File, usize);
+
+    impl Write for Full {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len() > self.1 {
+                return Err(std::io::Error::other("There is not enough space on the disk"));
+            }
+            self.1 -= buf.len();
+            self.0.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    #[test]
+    fn a_full_disk_during_verify_keeps_the_old_file() {
+        let good = vec![9u8; 4000];
+        let (base, _) = serve(good.clone(), good.len());
+        let dir = holding(b"corrupted on disk", b"vad");
+        let full = |p: &Path| -> std::io::Result<Box<dyn Write>> { Ok(Box::new(Full(std::fs::File::create(p)?, 100))) };
+        let mut err = Vec::new();
+
+        let code = fetch_verify_with(&[dir.path().to_path_buf()], dir.path(), &pins_at(&base, &good, b"vad"), STALL, &full, &mut Vec::new(), &mut err);
+
+        assert_eq!(code, 1, "{}", String::from_utf8_lossy(&err));
+        assert_eq!(std::fs::read(dir.path().join(MODEL)).unwrap(), b"corrupted on disk");
+        assert!(!dir.path().join(format!("{MODEL}.part")).exists());
     }
 
     #[test]

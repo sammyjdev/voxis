@@ -1,4 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  ALL_DICTATE_KEYS, ditadoUpdates, keyChoice, languageNote, legacyControls, NOT_ON_WINDOWS,
+  type Platform,
+} from "./settings-logic";
 
 type Settings = {
   laris: Record<string, string>;
@@ -15,13 +19,12 @@ type Settings = {
   } | null;
   laris_alive: boolean;
   version: string;
+  // absent from an older tray: every key, nothing marked unavailable
+  platform?: Platform;
+  dictate_keys?: string[];
 };
 
-// mirrors laris/hotkey.py _ALLOWED (ctrl/alt are broken as global hotkeys on macOS)
-const DICTATE_KEYS = [
-  "cmd_r", "cmd_l", "shift_r", "shift_l",
-  "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "f13", "f14", "f15",
-];
+let platform: Platform = "other";
 
 const $ = <T extends HTMLElement>(sel: string) =>
   document.querySelector(sel) as T;
@@ -82,14 +85,20 @@ async function load() {
   loadAudio();
   const s = await invoke<Settings>("get_settings");
 
+  platform = s.platform ?? "other";
+  const keys = s.dictate_keys ?? ALL_DICTATE_KEYS;
   const keySelect = $<HTMLSelectElement>("#dictate-key");
-  keySelect.innerHTML = DICTATE_KEYS
+  keySelect.innerHTML = keys
     .map((k) => `<option value="${k}">${k}</option>`)
     .join("");
-  // an unknown stored value would leave the select unselected and submit ""
-  keySelect.value = DICTATE_KEYS.includes(s.laris.DICTATE_KEY ?? "")
-    ? s.laris.DICTATE_KEY
-    : "cmd_r";
+  const choice = keyChoice(keys, s.laris.DICTATE_KEY, platform);
+  keySelect.value = choice.selected;
+  const notice = $<HTMLParagraphElement>("#dictate-key-notice");
+  notice.textContent = choice.notice;
+  notice.hidden = !choice.notice;
+  const language = $<HTMLParagraphElement>("#language");
+  language.textContent = languageNote(platform);
+  language.hidden = !language.textContent;
   $<HTMLInputElement>("#hands-free").checked =
     s.laris.ASSISTANT_MODE === "always_on";
   $<HTMLInputElement>("#stt-model").value =
@@ -118,6 +127,17 @@ async function load() {
     $<HTMLInputElement>("#orb-size").value = String(s.theme.size);
   }
 
+  for (const c of legacyControls(platform)) {
+    const box = $<HTMLElement>(`#${c.id}`);
+    for (const el of box.matches("input, select, textarea, button") ? [box] : box.querySelectorAll<HTMLInputElement>("input, select, textarea, button")) {
+      (el as HTMLInputElement).disabled = true;
+    }
+    const note = document.createElement("small");
+    note.className = "unavailable";
+    note.textContent = NOT_ON_WINDOWS;
+    box.insertAdjacentElement("afterend", note);
+  }
+
   $<HTMLSpanElement>("#version").textContent = s.version;
 }
 
@@ -140,15 +160,13 @@ function bind() {
   $<HTMLButtonElement>("#save-laris").onclick = async () => {
     try {
       await invoke("save_laris_settings", {
-        updates: {
-          DICTATE_KEY: $<HTMLSelectElement>("#dictate-key").value,
-          ASSISTANT_MODE: $<HTMLInputElement>("#hands-free").checked
-            ? "always_on"
-            : "ptt",
-          STT_MODEL: $<HTMLInputElement>("#stt-model").value.trim(),
-          NOISE_REDUCTION: $<HTMLSelectElement>("#noise").value,
-          INITIAL_PROMPT: $<HTMLTextAreaElement>("#initial-prompt").value.trim(),
-        },
+        updates: ditadoUpdates(platform, {
+          key: $<HTMLSelectElement>("#dictate-key").value,
+          handsFree: $<HTMLInputElement>("#hands-free").checked,
+          sttModel: $<HTMLInputElement>("#stt-model").value,
+          noise: $<HTMLSelectElement>("#noise").value,
+          prompt: $<HTMLTextAreaElement>("#initial-prompt").value,
+        }),
       });
       feedback("Ditado salvo.");
     } catch (e) {

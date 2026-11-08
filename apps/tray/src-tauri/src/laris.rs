@@ -6,6 +6,37 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// The line that starts each run in a log that is only appended to.
+pub const RUN_MARKER: &str = "--- voxis run ";
+
+/// Opens the dictation daemon's log for one run.
+///
+/// `keep_all` (Windows, criterion 19): nothing already in the log is moved,
+/// replaced or truncated; the run is appended after a `RUN_MARKER` line.
+/// Otherwise (macOS, Linux: unchanged, criterion 66) one generation is kept:
+/// the interesting run is the one that just died, and truncating on respawn
+/// destroyed the only record of it - twice during a live diagnosis.
+/// Best-effort, a failed rename must never stop the daemon from starting.
+pub fn open_run_log(log: &Path, keep_all: bool) -> std::io::Result<std::fs::File> {
+    if keep_all {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        writeln!(f, "{RUN_MARKER}{at} ---")?;
+        return Ok(f);
+    }
+    let _ = std::fs::rename(log, log.with_extension("log.1"));
+    std::fs::File::create(log)
+}
+
+/// The part of an appended log written by the latest run: from the last
+/// `RUN_MARKER` line, or the whole text when there is none.
+pub fn current_run(text: &str) -> &str {
+    text.rmatch_indices(RUN_MARKER)
+        .find(|(i, _)| *i == 0 || text.as_bytes()[i - 1] == b'\n')
+        .map_or(text, |(i, _)| &text[i..])
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LarisPeer {
     pub url: String,
@@ -72,6 +103,10 @@ pub struct LarisDaemon {
     /// the orb page shipped with the app (VOXIS_FRONTEND); None = the
     /// binary's own default, the checkout it was built from
     frontend: Option<PathBuf>,
+    /// exit code of the child that exited, until the tray takes it
+    exited: Option<Option<i32>>,
+    /// dictate exited 3: no input device until the user restarts it
+    mic_lost: bool,
 }
 
 impl LarisDaemon {
@@ -86,6 +121,8 @@ impl LarisDaemon {
             log_path,
             laris_bin: None,
             frontend: None,
+            exited: None,
+            mic_lost: false,
         }
     }
 
@@ -102,11 +139,29 @@ impl LarisDaemon {
     pub fn owns_running(&mut self) -> bool {
         match self.child.as_mut().map(|c| c.try_wait()) {
             Some(Ok(None)) => true,
+            Some(Ok(Some(status))) => {
+                self.exited = Some(status.code());
+                self.child = None;
+                false
+            }
             _ => {
                 self.child = None;
                 false
             }
         }
+    }
+
+    pub fn mic_lost(&self) -> bool {
+        self.mic_lost
+    }
+
+    pub fn set_mic_lost(&mut self, lost: bool) {
+        self.mic_lost = lost;
+    }
+
+    /// The exit code of the child that exited since the last call, once.
+    pub fn take_exit(&mut self) -> Option<Option<i32>> {
+        self.exited.take()
     }
 
     pub fn spawn(&mut self) -> Result<(), String> {
@@ -148,12 +203,7 @@ impl LarisDaemon {
     /// inherit (a missing log must never stop the daemon from starting).
     fn redirect_log(&self, cmd: &mut Command) {
         if let Some(log) = &self.log_path {
-            // Keep one generation: the interesting run is the one that just
-            // died, and truncating on respawn destroyed the only record of it -
-            // twice during a live diagnosis. Best-effort, a failed rename must
-            // never stop the daemon from starting.
-            let _ = std::fs::rename(log, log.with_extension("log.1"));
-            if let Ok(f) = std::fs::File::create(log) {
+            if let Ok(f) = open_run_log(log, cfg!(windows)) {
                 if let Ok(f2) = f.try_clone() {
                     cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
                 }
@@ -367,6 +417,46 @@ mod tests {
             out.contains(&format!("parent: {}", std::process::id())),
             "daemon must be told which pid to watch, got: {out:?}"
         );
+    }
+
+    #[test]
+    fn a_windows_run_is_appended_to_the_log_and_nothing_is_moved_or_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("laris.log");
+        fs::write(&log, "old run line\n").unwrap();
+        fs::write(tmp.path().join("laris.log.1"), "older run line\n").unwrap();
+
+        let mut f = open_run_log(&log, true).unwrap();
+        std::io::Write::write_all(&mut f, b"new run line\n").unwrap();
+        drop(f);
+
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with("old run line\n"), "{text:?}");
+        assert!(text.contains(RUN_MARKER) && text.ends_with("new run line\n"), "{text:?}");
+        assert_eq!(fs::read_to_string(tmp.path().join("laris.log.1")).unwrap(), "older run line\n");
+    }
+
+    #[test]
+    fn macos_and_linux_keep_one_generation_of_the_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("laris.log");
+        fs::write(&log, "run-one\n").unwrap();
+
+        let mut f = open_run_log(&log, false).unwrap();
+        std::io::Write::write_all(&mut f, b"run-two\n").unwrap();
+        drop(f);
+
+        assert_eq!(fs::read_to_string(tmp.path().join("laris.log.1")).unwrap(), "run-one\n");
+        assert_eq!(fs::read_to_string(&log).unwrap(), "run-two\n");
+    }
+
+    #[test]
+    fn the_latest_run_is_read_from_its_marker_line() {
+        let text = format!("first\n{RUN_MARKER}1 ---\nsecond\nnot a marker: {RUN_MARKER}x\n{RUN_MARKER}2 ---\nthird\n");
+
+        assert_eq!(current_run(&text), format!("{RUN_MARKER}2 ---\nthird\n"));
+        assert_eq!(current_run("no marker\n"), "no marker\n");
+        assert_eq!(current_run(""), "");
     }
 
     #[cfg(unix)]

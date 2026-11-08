@@ -3,9 +3,19 @@
 //! both engines the same way.
 //!
 //! usage: stt-bench <config-name> <model.bin> <wav> <spans.json> <out-dir> [lang] [beam]
-//! STT_PROMPT, when set, is the initial prompt (bench.py VOCABULARY_PROMPT).
+//!                  [--sweeps N] [--out <file.json>]
+//! STT_PROMPT, when set, is the initial prompt (the driver passes prompt.txt,
+//! the text of dictate.rs DEFAULT_PROMPT).
+//!
+//! Result schema 2 (additive over schema 1): `results` is the first sweep,
+//! `sweeps` holds every sweep; `load_s` is the model load, `warmup_s` the
+//! warm-up pass; after the warm-up a `READY <unix_ms>` line goes to stdout so
+//! the driver can time the cold start. Backend, host and resource fields are
+//! null with a reason: scripts/stt_bench/perf_driver.py fills them from the
+//! captured stderr and its own sampler. No VAD: a stack measurement.
 
-use std::time::Instant;
+use std::io::Write;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -23,10 +33,28 @@ fn read_wav(path: &str) -> Vec<f32> {
     samples.chunks(ch).map(|c| c.iter().sum::<f32>() / ch as f32).collect()
 }
 
+/// `--sweeps N` and `--out <file>` taken out of the arguments, positionals kept in order.
+fn split_flags(args: &[String]) -> (Vec<String>, usize, Option<String>) {
+    let (mut pos, mut sweeps, mut out) = (Vec::new(), 1usize, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--sweeps" => sweeps = it.next().and_then(|n| n.parse().ok()).expect("--sweeps N"),
+            "--out" => out = it.next().cloned(),
+            _ => pos.push(a.clone()),
+        }
+    }
+    (pos, sweeps.max(1), out)
+}
+
+fn unix_ms() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let (a, sweeps, out_file) = split_flags(&std::env::args().collect::<Vec<_>>());
     if a.len() < 6 {
-        eprintln!("usage: stt-bench <config> <model.bin> <wav> <spans.json> <out-dir> [lang=pt] [beam=5]");
+        eprintln!("usage: stt-bench <config> <model.bin> <wav> <spans.json> <out-dir> [lang=pt] [beam=5] [--sweeps N] [--out file]");
         std::process::exit(2);
     }
     let (config, model, wav, spans_path, out_dir) = (&a[1], &a[2], &a[3], &a[4], &a[5]);
@@ -42,6 +70,7 @@ fn main() {
     cparams.use_gpu(true);
     let ctx = WhisperContext::new_with_params(model, cparams).expect("load model");
     let mut state = ctx.create_state().expect("state");
+    let load_s = t_load.elapsed().as_secs_f64();
 
     let params = || {
         let mut p = FullParams::new(SamplingStrategy::BeamSearch { beam_size: beam, patience: -1.0 });
@@ -59,27 +88,46 @@ fn main() {
         p
     };
     // warm, like voice.py's run(np.zeros(8000))
+    let t_warm = Instant::now();
     state.full(params(), &vec![0.0f32; 8000]).expect("warm");
-    let load_s = t_load.elapsed().as_secs_f64();
+    let warmup_s = t_warm.elapsed().as_secs_f64();
+    println!("READY {}", unix_ms());
+    let _ = std::io::stdout().flush();
 
-    let mut results = Vec::new();
-    for (start, end) in spans {
-        let t = Instant::now();
-        state.full(params(), &audio[start..end.min(audio.len())]).expect("transcribe");
-        let hyp: String = state
-            .as_iter()
-            .map(|seg| seg.to_string())
-            .collect::<String>()
-            .trim()
-            .to_string();
-        let stt_s = t.elapsed().as_secs_f64();
-        println!("{:>6.2}s audio  {:>5.3}s stt  {hyp}", (end - start) as f64 / 16000.0, stt_s);
-        results.push(json!({
-            "start_s": start as f64 / 16000.0,
-            "audio_s": (end - start) as f64 / 16000.0,
-            "hyp": hyp, "lang": lang, "stt_s": stt_s,
-        }));
+    let mut all = Vec::new();
+    for _ in 0..sweeps {
+        let mut results = Vec::new();
+        for &(start, end) in &spans {
+            let t = Instant::now();
+            state.full(params(), &audio[start..end.min(audio.len())]).expect("transcribe");
+            let hyp: String = state
+                .as_iter()
+                .map(|seg| seg.to_string())
+                .collect::<String>()
+                .trim()
+                .to_string();
+            let stt_s = t.elapsed().as_secs_f64();
+            println!("{:>6.2}s audio  {:>5.3}s stt  {hyp}", (end - start) as f64 / 16000.0, stt_s);
+            results.push(json!({
+                "start_s": start as f64 / 16000.0,
+                "audio_s": (end - start) as f64 / 16000.0,
+                "hyp": hyp, "lang": lang, "stt_s": stt_s,
+            }));
+        }
+        all.push(Value::Array(results));
     }
-    let out: Value = json!({"config": config, "vram_mib": Value::Null, "load_s": load_s, "results": results});
-    std::fs::write(format!("{out_dir}/{config}.json"), serde_json::to_string(&out).unwrap()).unwrap();
+    let by_driver = "sampled by scripts/stt_bench/perf_driver.py";
+    let out: Value = json!({
+        "schema": 2, "config": config,
+        "backend": Value::Null, "backend_unavailable": "read from stderr by scripts/stt_bench/perf_driver.py",
+        "host": Value::Null, "host_unavailable": "recorded by scripts/stt_bench/perf_driver.py",
+        "vram_mib": Value::Null, "vram_mib_unavailable": by_driver,
+        "cpu_s": Value::Null, "cpu_s_unavailable": by_driver,
+        "peak_rss_mib": Value::Null, "peak_rss_mib_unavailable": by_driver,
+        "vram_peak_mib": Value::Null, "vram_peak_mib_unavailable": by_driver,
+        "load_s": load_s, "warmup_s": warmup_s,
+        "results": all[0], "sweeps": all,
+    });
+    let path = out_file.unwrap_or_else(|| format!("{out_dir}/{config}.json"));
+    std::fs::write(path, serde_json::to_string(&out).unwrap()).unwrap();
 }
