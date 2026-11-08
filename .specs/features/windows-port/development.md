@@ -286,3 +286,73 @@ did not run; `check_proofs.py` still prints the walk rows as `Walked` only becau
 section. No installer, keyboard hook, microphone, loopback, real clipboard, real provider or model benchmark ran;
 the frozen tests started only `ping`, `cmd /C exit`, an inline `powershell -Command Start-Sleep` stand-in and the test
 binary itself, all ended by the tests.
+
+## Review round 3 (Felix): the certificates Vera's run left open
+
+Source: `Shared/evidence/vera-voxis-pr5-6eee125-execution/AC64-GAPS.md` and `EXEC-REPORT.md` (Vera's own runs on
+`6eee125`), with `rita-voxis-pr5-6eee125/VERA-NEXT.md`. Still development evidence: Vera runs this delta
+independently. No criterion, no existing test and no production behaviour changed in this round; the only
+production-side change is in the benchmark driver's records (V1 below). Logs, hashes and the recipe:
+`Shared/evidence/felix-voxis-pr5-certificates/`.
+
+### AC64 rows closed in this round
+
+All frozen tests call the unmodified frozen functions (the patch only appends text, `frozen-test-patch.diff`;
+no frozen line is changed). They are retrospective reproductions made now. Run: `scripts/windows/frozen-repro.sh`.
+
+| Gap row | Frozen result on `889d48c` | Candidate counterpart |
+| --- | --- | --- |
+| AC 10, collision at the generated second | `start_does_not_reuse_a_session_folder_at_the_generated_second`: red. Folders exist for this second and the next two, each with manifest, recording and sentinel; `start` rewrote `session.json` and created `recorder.log` in an existing session. A free-second rollover would add a folder and fail the test too; control `control_finished_sessions_do_not_block_admission` ok | `start_through_the_real_entry_refuses_a_session_folder_at_the_generated_second_and_keeps_every_byte` (real `start`, whole tree compared byte for byte) |
+| AC 29, OAuth over a stalled transport | `the_oauth_call_ends_at_its_thirty_second_deadline_when_the_endpoint_stalls_for_forty`: red. Loopback `token_uri` in a temporary APPDATA with made-up files; the call ended after 40.006 s with `google token: io: Peer disconnected`, when the server dropped it. No real host or secret | `the_oauth_call_ends_at_its_real_thirty_second_deadline_when_the_endpoint_stalls_for_forty` (real `DEADLINES`, about 30 s) |
+| AC 18, failure during writing, not at creation | `a_write_that_fails_in_the_middle_of_a_track_ends_in_an_error_not_a_panic`: red. No adapter: the frozen `writer` runs unmodified on a real file; a second handle locks the byte range from 1 MiB (`LockFileEx`, declared in the test), so the first flush reaching it fails by itself with a lock violation. Panic at `main.rs:234` (`write_sample(..).unwrap()`) with 1048576 bytes already on disk. Control `control_a_track_that_stays_below_the_locked_range_is_written_and_finalized` ok | `a_write_that_fails_in_the_middle_of_a_track_on_a_real_file_is_an_error_and_the_data_on_disk_is_recoverable`: the production `writer` (`File`, `BufWriter`, repair through `reopen`) on the same locked file returns `disk_write_error`, sets the failed flag, and the header counts every whole sample on disk (a `WavReader` reads them). Nothing fills a disk |
+| AC 49, old admission rule | `characterization_the_name_based_ready_admits_corrupt_models_and_never_asks_the_endpoint`: green on the base, not a red. MODEL and VAD corrupted, a loopback endpoint that cuts every download, the frozen `fetch_with` says `ready`, exit 0, hashes nothing, makes no request. `--verify` does not exist at `889d48c`, so no verify behaviour was run | `verify_replaces_a_file_whose_hash_differs_after_a_verified_download`, `a_cut_verify_download_keeps_the_old_file_and_removes_its_part`, `a_full_disk_during_verify_keeps_the_old_file` |
+
+Controls (7 in all, 2 new) and the 2 characterizations (the cut plain download of round 2 and this admission rule) are
+named `control_` and `characterization_`, and the script expects them green. Result of the last run: 24 tests, 15 red,
+7 controls ok, 2 characterizations ok, script exit 0.
+
+### AC 29-32: the provider branches, with real transport errors and bytes
+
+`a_real_transport_stall_at_each_provider_ends_at_its_deadline_and_the_pipeline_keeps_every_byte` (candidate): a
+loopback stand-in for Anthropic, the Google token endpoint and Drive stalls one call at a time. For each of the five
+branches (anthropic, google token, drive list, drive mkdir with an empty folder list, drive upload) it runs the real
+`summarize` or `upload_doc` through `run_with_drive`, takes the error the transport really produced, hands it to
+`pipeline_failed`, and checks: the call ended within 2.5 s; the error names the provider and carries the deadline mark;
+the manifest says `captured` / `provider_timeout` and its message is that same error; `mic.wav`, `system.wav` and
+`transcript.md` are byte-identical before and after; `ata.md` is absent for the anthropic branch and, for the others,
+exists before the first Drive call and is byte-identical after the failure. Added at the minutes level:
+`a_stalled_drive_folder_create_ends_at_its_deadline` (list returns no folder, the create stalls).
+
+### Python worker sampling (V1) and what the harness records
+
+A venv's `python.exe` is a launcher stub whose child does the work; the driver samples the pid it spawns, so a variant
+launched through it reads near-zero CPU and a few MiB. The rule, now in the `perf_driver.py` docstring: a Python variant
+names the interpreter that runs the model, with the venv's `site-packages` on `PYTHONPATH` (what Vera's protocol v2
+does). The run record now carries `sampled_process` (pid, image, and the children seen while sampling), so a stub is
+visible as a sampled image that has a child; tests `test_the_record_names_the_sampled_process_and_the_children_it_had`
+and `test_a_variant_without_children_records_none`. This does not follow children and builds no process monitor: with the
+documented launch rule AC 73 (the record names what was sampled) and AC 75 (a counter that cannot be read is null with a
+reason) hold for the worker; a variant launched through a stub still gets the stub's counters and says so in the record.
+It changes the driver after `H` again: a layer 1 run must record the HEAD it ran from, and a run already armed on `6eee125`
+keeps that SHA.
+
+### Running the proofs safely (V3)
+
+`check_proofs.py` with no overrides builds under `C:\vxc` and runs the tray test
+`enabling_autostart_writes_the_run_value_and_disabling_removes_it`, which writes and removes one value named
+`VOXIS-test-<pid>` under `HKCU\...\Run`. Run it only inside a gate that allows that, or with `CARGO_TARGET_DIR`
+and `TEMP` on a volume with space and the test skipped (`cargo test ... -- --skip enabling_autostart_writes_the_run_value`).
+Round 1 and 2 of this author ran that test inside the full tray suite; a read-only check of `HKCU\...\Run` afterwards
+found no `VOXIS-test` value left. This round skipped it and did not re-run `check_proofs.py`, so `proofs.md` still records
+`2d70f90`.
+
+### Still without a certificate, by reason
+
+- AC 17, a genuine stuck recorder (executable plus exact argv, then the 60 s path, termination and WAV recoverability) and
+  the genuine-owner antecedent of AC 86: no process of this image with exactly `miris.recorder <folder>` that lives long
+  enough can be built from a test binary; Preflight B.
+- AC 7-9 / F18 with the frozen `meeting` and `record`: the frozen route opens the microphone; Preflight B.
+- AC 49 `--verify` at the frozen SHA: no entry point exists.
+- AC 64's temporal wording: unchanged. No run on `889d48c` was made before the first implementation and none can be made
+  now; nothing is waived. Historical artifacts: Dani's per-slice reds (extracted old rule, before each change) and the
+  round-1 mutation reds (after the change).

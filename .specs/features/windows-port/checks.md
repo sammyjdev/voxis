@@ -58,6 +58,7 @@ Proof: run native | tests::recording_into_a_missing_or_empty_folder_is_allowed .
 
 **C10** - `start` fails with exit 1 when `sessions/<id>` already exists and never reuses it (AC 10)
 Proof: run native | session::tests::start_refuses_a_session_folder_that_already_exists ... ok
+Proof: run native | session::tests::start_through_the_real_entry_refuses_a_session_folder_at_the_generated_second_and_keeps_every_byte ... ok
 
 **C11** - `recover` changes only the header size fields of a zero-size WAV, sample bytes identical; a valid WAV stays byte-identical (AC 11)
 Proof: run native | session::tests::recover_fixes_only_the_header_sizes_and_keeps_every_sample_byte ... ok
@@ -98,6 +99,8 @@ Proof: run native | tests::a_full_disk_under_the_buffered_writer_leaves_a_wav_th
 Proof: run native | tests::a_half_written_sample_at_the_end_is_left_out_of_the_header ... ok
 Proof: run native | tests::a_disk_that_took_less_than_a_header_reports_the_repair_failure_with_the_write_error ... ok
 Proof: run native | tests::a_track_that_cannot_be_created_ends_in_an_error_not_a_panic ... ok
+Proof: run native | tests::a_track_below_the_locked_range_is_written_and_finalized_on_a_real_file ... ok
+Proof: run native | tests::a_write_that_fails_in_the_middle_of_a_track_on_a_real_file_is_an_error_and_the_data_on_disk_is_recoverable ... ok
 
 **C19** - Nothing deletes, moves or compresses a file in a session, `meetings/` or log folder on its own (AC 19)
 Proof: run contract | PASS: no_automatic_retention
@@ -148,11 +151,14 @@ Proof: walk - matrix M6 and M3 with a chosen device
 **C29** - Every Anthropic, OAuth, Drive list/create and Drive upload call carries its deadline: connect 10 s; 300 s; 30 s; 30 s; 120 s (AC 29)
 Proof: run native | minutes::tests::every_provider_call_carries_its_deadline ... ok
 Proof: run native | minutes::tests::a_stalled_anthropic_call_ends_at_its_deadline ... ok
+Proof: run native | minutes::tests::a_stalled_drive_folder_create_ends_at_its_deadline ... ok
+Proof: run native | minutes::tests::the_oauth_call_ends_at_its_real_thirty_second_deadline_when_the_endpoint_stalls_for_forty ... ok
 
 **C30** - A call past its deadline errors naming provider and deadline; the session returns to `captured` with `provider_timeout`, `transcript.md` and `ata.md` kept; a malformed answer returns to `captured` with the provider error (AC 30)
 Proof: run native | minutes::tests::a_timeout_names_the_provider_and_the_deadline ... ok
 Proof: run native | session::tests::a_provider_timeout_returns_the_session_to_captured_and_keeps_the_files ... ok
 Proof: run native | session::tests::a_malformed_provider_answer_returns_to_captured_with_the_files ... ok
+Proof: run native | session::tests::a_real_transport_stall_at_each_provider_ends_at_its_deadline_and_the_pipeline_keeps_every_byte ... ok
 Proof: walk - matrix M10
 
 **C31** - A Drive upload timeout says the upload may already have completed and names `VOXIS Atas`; `ata.md` stays (AC 31)
@@ -339,6 +345,8 @@ Proof: run bench | test_a_missing_source_sha_keeps_the_reason_it_could_not_be_re
 Proof: run bench | test_a_python_variant_record_names_the_engine_package_the_model_and_the_prompt PASSED
 Proof: run bench | test_a_native_variant_record_carries_the_model_file_hash PASSED
 Proof: run bench | test_voice_py_reports_the_python_package_versions_and_the_model_identity PASSED
+Proof: run bench | test_the_record_names_the_sampled_process_and_the_children_it_had PASSED
+Proof: run bench | test_a_variant_without_children_records_none PASSED
 
 **C74** - The report gives warm p50 and p95, RTF per sweep and cold time per variant, with run counts and min, median, max (AC 74)
 Proof: run bench | test_process_stats_give_warm_percentiles_over_all_sweeps_and_rtf_per_sweep PASSED

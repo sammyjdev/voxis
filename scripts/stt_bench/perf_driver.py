@@ -16,6 +16,12 @@ performance and it states no target.
   perf_driver.py controls --variants <variants.json> --out <evidence>
   perf_driver.py report --out <evidence>
 
+Sampled process (criteria 73 and 75): the counters are those of the process the driver spawns. For a
+Python variant, "python" must be the interpreter that runs the model: a venv's python.exe is a launcher
+stub whose child does the work, and its counters would be a false near-zero. Name the base interpreter and
+put the venv's site-packages on PYTHONPATH. Every run record says which pid and image were sampled and
+which children it had (`sampled_process`), so a stub shows up as a sampled image with a child.
+
 variants.json: a list of {"id": "V1", "kind": "native", "exe": ..., "model": ...,
 "build": {...}} or {"id": "V3", "kind": "python", "python": ..., "script":
 "voice.py"}. "build" carries what only the builder knows (CUDA toolkit,
@@ -344,11 +350,23 @@ def run_variant(variant: dict, run_dir: str, sweeps: int, extra_env: dict, host:
     try:
         import psutil
         ps = psutil.Process(proc.pid)
+        sampled_exe = ps.exe()
     except Exception:  # psutil missing or process already gone
         ps = None
+        sampled_exe = None
+    children_seen: dict[int, str | None] = {}
     while proc.poll() is None:
         s: dict = {"t": time.time()}
         if ps is not None:
+            try:
+                for c in ps.children(recursive=True):
+                    if c.pid not in children_seen:
+                        try:
+                            children_seen[c.pid] = c.exe()
+                        except Exception:
+                            children_seen[c.pid] = None
+            except Exception:
+                pass
             try:
                 t = ps.cpu_times()
                 s["cpu_s"] = t.user + t.system
@@ -369,7 +387,7 @@ def run_variant(variant: dict, run_dir: str, sweeps: int, extra_env: dict, host:
         f.writelines(stdout_lines)
     stderr = open(os.path.join(run_dir, "stderr.log"), encoding="utf-8", errors="replace").read()
     rec = {"variant": variant["id"], "cmd": cmd, "exit_code": code, "spawn_ms": spawn_ms, "ready_ms": ready["ms"],
-           "samples": samples}
+           "spawn_pid": proc.pid, "samples": samples}
     with open(os.path.join(run_dir, "samples.json"), "w") as f:
         json.dump(samples, f)
     if code != 0 or not os.path.isfile(out_json):
@@ -410,6 +428,15 @@ def run_variant(variant: dict, run_dir: str, sweeps: int, extra_env: dict, host:
             raw["model_unavailable"] = "the engine script did not report the model identity"
     raw["build"] = build_record(variant, repo)
     raw["exit_code"] = code
+    raw["sampled_process"] = {
+        "pid": proc.pid, "exe": sampled_exe,
+        "children_seen": [{"pid": pid, "exe": exe} for pid, exe in sorted(children_seen.items())],
+        "note": "CPU, working set and GPU memory are those of this pid only. A launcher (a venv's python.exe starts "
+                "the base interpreter as a child) shows near-zero CPU and a few MiB: a Python variant names the "
+                "interpreter that runs the model, with its packages on PYTHONPATH",
+    }
+    if sampled_exe is None:
+        raw["sampled_process"]["exe_unavailable"] = "psutil could not read the process image"
     raw["cold_s"] = process_stats(raw, spawn_ms, ready["ms"])["cold_s"]
     for k in [k for k in list(raw) if k.endswith("_unavailable") and k[:-12] in ("cpu_s", "peak_rss_mib", "vram_peak_mib")]:
         del raw[k]
