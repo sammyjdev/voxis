@@ -494,16 +494,22 @@ fn session_dir(id: &str) -> Result<PathBuf, String> {
 }
 
 pub fn cli(cmd: &str, args: &[String]) -> i32 {
+    cli_with(&SysOwners, cmd, args)
+}
+
+/// `cli` with the owner check passed in, so a test can reach `process` and
+/// `recover` through their real routing.
+fn cli_with(owners: &dyn Owners, cmd: &str, args: &[String]) -> i32 {
     let arg = |i: usize| args.get(i).map(String::as_str).ok_or_else(|| format!("{cmd}: missing argument"));
     let result = match cmd {
         "start" => start(),
         "stop" => stop(),
         "process" => arg(0).and_then(session_dir).and_then(|d| {
-            guard_inactive(&d, &SysOwners)?;
+            guard_inactive(&d, owners)?;
             run_pipeline(&d)
         }),
         "recover" => arg(0).and_then(session_dir).and_then(|d| {
-            guard_inactive(&d, &SysOwners)?;
+            guard_inactive(&d, owners)?;
             for f in ["mic.wav", "system.wav"] {
                 if d.join(f).exists() {
                     repair_wav(&d.join(f))?;
@@ -917,6 +923,59 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "stop waited for a recorder that is gone");
         let m = read(&dir).unwrap();
         assert_eq!((m["state"].as_str(), m["error"]["code"].as_str()), (Some("interrupted"), Some("owner_died")));
+    }
+
+    /// A session folder under a temporary MIRIS_HOME whose mic.wav has the zero-size header a killed
+    /// recorder leaves: (home, session dir, mic.wav bytes, session.json bytes).
+    fn live_owner_fixture(state: &str) -> (tempfile::TempDir, PathBuf, Vec<u8>, Vec<u8>) {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        let dir = session_in(&sessions, "20261107-110000", state, Some(4242), None);
+        let mut wav = std::io::Cursor::new(Vec::new());
+        {
+            let spec = hound::WavSpec { channels: 1, sample_rate: 16_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+            let mut w = hound::WavWriter::new(&mut wav, spec).unwrap();
+            for _ in 0..50 {
+                w.write_sample(0.25f32).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let mut bytes = wav.into_inner();
+        let data_at = bytes.windows(4).position(|w| w == b"data").unwrap() + 4;
+        bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
+        bytes[data_at..data_at + 4].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(dir.join("mic.wav"), &bytes).unwrap();
+        let manifest = std::fs::read(dir.join("session.json")).unwrap();
+        (home, dir, bytes, manifest)
+    }
+
+    #[test]
+    fn recover_and_process_through_the_cli_refuse_a_live_owner_and_leave_every_byte() {
+        let _one_at_a_time = crate::test_lock();
+        let (home, dir, wav, manifest) = live_owner_fixture("recording");
+        std::env::set_var("MIRIS_HOME", home.path());
+        let id = ["20261107-110000".to_owned()];
+
+        let recovered = cli_with(&alive(), "recover", &id);
+        let processed = cli_with(&alive(), "process", &id);
+
+        assert_eq!((recovered, processed), (1, 1), "both exit 1 with session is active");
+        assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), wav, "the recording is untouched");
+        assert_eq!(std::fs::read(dir.join("session.json")).unwrap(), manifest, "the manifest is untouched");
+    }
+
+    #[test]
+    fn recover_through_the_cli_repairs_a_session_whose_owner_is_gone() {
+        let _one_at_a_time = crate::test_lock();
+        let (home, dir, wav, _) = live_owner_fixture("recording");
+        std::env::set_var("MIRIS_HOME", home.path());
+
+        let recovered = cli_with(&dead(), "recover", &["20261107-110000".to_owned()]);
+
+        assert_eq!(recovered, 0);
+        assert_ne!(std::fs::read(dir.join("mic.wav")).unwrap(), wav, "the header is repaired");
+        assert_eq!(hound::WavReader::open(dir.join("mic.wav")).unwrap().len(), 50);
+        assert_eq!(read(&dir).unwrap()["state"], "captured");
     }
 
     #[test]
