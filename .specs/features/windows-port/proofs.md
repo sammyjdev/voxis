@@ -1,9 +1,9 @@
 # windows-port proofs
 
-**HEAD**: b2d6b5c
+**HEAD**: 2d70f90
 **Tree**: clean
 **Shell**: C:/Program Files/Git\bin\bash.exe
-**Result**: 197 pass, 0 fail
+**Result**: 203 pass, 0 fail
 
 | Check | Proof | Result |
 | --- | --- | --- |
@@ -92,8 +92,12 @@
 | C40 | `run native / dictate::tests::a_paste_puts_the_text_sends_ctrl_v_and_restores_the_previous_text ... ok` | pass |
 | C41 | `run native / dictate::tests::a_partial_injection_leaves_the_text_on_the_clipboard ... ok` | pass |
 | C41 | `run native / dictate::tests::a_paste_that_did_not_happen_has_no_completion_timestamp ... ok` | pass |
+| C41 | `run native / dictate::tests::a_restore_that_fails_keeps_the_injection_time_and_reports_no_restore_time ... ok` | pass |
+| C41 | `run native / dictate::tests::a_restore_failure_is_logged_without_the_dictated_text_and_has_no_restore_timestam` | pass |
+| C41 | `run native / dictate::tests::a_paste_with_no_previous_clipboard_text_reports_no_restore_time ... ok` | pass |
 | C42 | `run native / dictate::tests::a_clipboard_failure_is_logged_without_the_text ... ok` | pass |
 | C42 | `run native / dictate::tests::a_clipboard_failure_hides_the_orb_in_both_modes ... ok` | pass |
+| C42 | `run native / dictate::tests::a_restore_failure_hides_the_orb_in_both_modes ... ok` | pass |
 | C43 | `run native / dictate::tests::an_orb_that_cannot_be_created_leaves_dictation_running ... ok` | pass |
 | C44 | `run native / dictate::tests::a_lost_microphone_logs_and_exits_with_code_3 ... ok` | pass |
 | C44 | `run tray / tests::a_dictation_that_lost_its_microphone_is_not_respawned ... ok` | pass |
@@ -189,6 +193,8 @@
 | C86 | `run native / session::tests::process_and_recover_refuse_a_session_whose_owner_is_live ... ok` | pass |
 | C86 | `run native / session::tests::stop_writes_the_stop_file_only_after_checking_the_recorder ... ok` | pass |
 | C86 | `run native / session::tests::stop_settles_a_session_whose_recorder_exited_at_once_under_the_system_owner_check` | pass |
+| C86 | `run native / session::tests::recover_and_process_through_the_cli_refuse_a_live_owner_and_leave_every_byte ... ` | pass |
+| C86 | `run native / session::tests::recover_through_the_cli_repairs_a_session_whose_owner_is_gone ... ok` | pass |
 | C87 | `run contract / PASS: harness_commit_changes_exactly_the_listed_files` | pass |
 | C88 | `run native / session::tests::a_retry_reuses_a_fresh_transcript_and_runs_only_the_minutes ... ok` | pass |
 | C88 | `run native / session::tests::a_wav_newer_than_the_transcript_runs_the_full_pipeline ... ok` | pass |
@@ -210,37 +216,37 @@
 `Run native` - exit 0
 
 ```
+test minutes::tests::a_new_upload_carries_the_session_app_property ... ok
 test models::tests::an_unreachable_model_server_exits_1 ... ok
-test minutes::tests::every_provider_call_carries_its_deadline ... ok
-test dictate::tests::theme_requests_without_the_token_get_403_and_leave_the_theme_file_unchanged ... ok
-test dictate::tests::a_sentinel_outside_the_root_is_never_served_over_http ... ok
+test minutes::tests::a_stalled_anthropic_call_ends_at_its_deadline ... ok
+test session::tests::recover_and_process_through_the_cli_refuse_a_live_owner_and_leave_every_byte ... ok
+test session::tests::recover_through_the_cli_repairs_a_session_whose_owner_is_gone ... ok
 test session::tests::sysinfo_reads_the_argv_elements_of_a_spawned_process ... ok
-test dictate::tests::the_overlay_page_is_served_without_a_token ... ok
-test session::tests::a_pid_reused_by_another_program_is_not_a_live_owner ... ok
+test dictate::tests::a_missing_frontend_folder_answers_404_for_overlay_and_static ... ok
+test dictate::tests::a_junction_inside_the_root_pointing_outside_answers_404 ... ok
 
-test result: ok. 112 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.52s
+test result: ok. 118 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.50s
 
 'vswhere.exe' n�o � reconhecido como um comando interno
 ou externo, um programa oper�vel ou um arquivo em lotes.
-    Blocking waiting for file lock on build directory
-    Finished `release` profile [optimized] target(s) in 1m 45s
+    Finished `release` profile [optimized] target(s) in 0.18s
      Running unittests src\main.rs (D:\felix-voxis-pr5\tc\release\deps\meetrec-b2f3f96a35562ec8.exe)
 ```
 
 `Run tray` - exit 0
 
 ```
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Compiling tray v0.1.0 (D:\felix-voxis-pr5\repo\apps\tray\src-tauri)
-    Finished `release` profile [optimized] target(s) in 30.12s
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized] target(s) in 0.37s
      Running unittests src\lib.rs (D:\felix-voxis-pr5\tc\release\deps\tray_lib-f63f88a659cd12ec.exe)
 O sistema n�o pode encontrar o caminho especificado.
      Running unittests src\main.rs (D:\felix-voxis-pr5\tc\release\deps\tray-adbbc2f4e625d0b2.exe)
@@ -270,11 +276,11 @@ PASS: harness_commit_changes_exactly_the_listed_files
 `Run frontend` - exit 0
 
 ```
-✔ the key list is the platform's and preselects the key the daemon uses (0.4593ms)
-✔ a saved unsupported key shows the F13 notice (0.0785ms)
-✔ legacy controls are disabled with the Windows notice (0.4015ms)
-✔ the Windows form leaves STT_MODEL and NOISE_REDUCTION out of the save (0.1306ms)
-✔ the Windows settings show the fixed Portuguese language (0.0942ms)
+✔ the key list is the platform's and preselects the key the daemon uses (0.4695ms)
+✔ a saved unsupported key shows the F13 notice (0.0854ms)
+✔ legacy controls are disabled with the Windows notice (0.4127ms)
+✔ the Windows form leaves STT_MODEL and NOISE_REDUCTION out of the save (0.1161ms)
+✔ the Windows settings show the fixed Portuguese language (0.068ms)
 ℹ tests 5
 ℹ suites 0
 ℹ pass 5
@@ -282,7 +288,7 @@ PASS: harness_commit_changes_exactly_the_listed_files
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 81.8679
+ℹ duration_ms 80.0802
 ```
 
 `Run bench` - exit 0
@@ -302,5 +308,5 @@ scripts/stt_bench/test_perf_driver_review1.py::test_a_python_variant_record_name
 scripts/stt_bench/test_perf_driver_review1.py::test_a_native_variant_record_carries_the_model_file_hash PASSED [ 97%]
 scripts/stt_bench/test_perf_driver_review1.py::test_voice_py_reports_the_python_package_versions_and_the_model_identity PASSED [100%]
 
-============================= 37 passed in 1.15s ==============================
+============================= 37 passed in 1.23s ==============================
 ```

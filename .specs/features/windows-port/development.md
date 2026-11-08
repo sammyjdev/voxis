@@ -272,6 +272,13 @@ windows-port/red-S*.log`), written before each production change but against the
 not against `889d48c`; and the round-1 mutation reds (`felix-voxis-pr5-round1/red-*.log`), made after the change.
 The reproductions above add behavioural coverage at the frozen SHA, after the fact.
 
+### Observed results at `2d70f90` (code head of round 2)
+
+Same build host and local-only settings as round 1. Native 118 passed (CUDA), Windows tray 79, frontend 5, bench 37,
+contract 18 of 18, Vulkan build of `meetrec` exit 0 with no warnings. `check_proofs.py windows-port`: 166 run proofs
+and 3 builds pass, 0 fail, tree clean; the 34 `walk` rows are still only listed as `Walked`. Frozen reproduction: 13
+red, 4 controls ok, 1 characterization ok, script exit 0. The PR's CI for the new head is not known to this document.
+
 ### Pending, counted honestly
 
 The 34 `Proof: walk` rows, the matrix M1-M17, installer proofs, S10 layers 1 and 2 and the independent re-review
