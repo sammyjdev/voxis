@@ -82,7 +82,20 @@ if [[ -f $sidecar ]]; then
     tray_ran=1
 fi
 
-grep -hE '^test .* \.\.\. ' "$ev/frozen-run.log" $([[ $tray_ran == 1 ]] && echo "$ev/frozen-run-tray.log") | sed 's/\r$//' > "$ev/frozen-results.txt"
+# A test that runs a child (frozen spawn_child starts this test binary) can get the child's
+# "running 0 tests" lines in the middle of its own result line, so the result is read from the
+# `... ok` line, or from the `failures:` list cargo prints at the end of the run.
+logs=("$ev/frozen-run.log")
+[[ $tray_ran == 1 ]] && logs+=("$ev/frozen-run-tray.log")
+tr -d '\r' < <(cat "${logs[@]}") > "$ev/frozen-all.txt"
+grep -E '^    [A-Za-z0-9_:]+$' "$ev/frozen-all.txt" | sed 's/^ *//' | sort -u > "$ev/frozen-failed-names.txt"
+: > "$ev/frozen-results.txt"
+while read -r name; do
+    if grep -qE "^test ${name} \.\.\. ok$" "$ev/frozen-all.txt"; then r=ok
+    elif grep -qxF "$name" "$ev/frozen-failed-names.txt"; then r=FAILED
+    else r=UNKNOWN; fi
+    echo "test $name ... $r" >> "$ev/frozen-results.txt"
+done < <(grep -oE '^test [A-Za-z0-9_:]+ \.\.\.' "$ev/frozen-all.txt" | awk '{print $2}' | sort -u)
 bad=0
 while read -r _ name _ result; do
     case $name in
