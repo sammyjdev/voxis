@@ -200,3 +200,82 @@ Nothing below was executed by this round:
   ran in this round; the clipboard paths ran only against fakes and the backend hook only against a missing model.
 - `paste_ms` is the moment Ctrl+V was sent. When the target application finished pasting is not observable from
   here; the report of release-to-paste latency must say which boundary it used.
+
+## Review round 2 (Felix): carryover of Rita's review of `361a965`
+
+Controller: `Shared/evidence/rita-voxis-pr5-361a965/REPORT.md` (final, with `VERIFIER.md`, `JUDGE.md`,
+`findings.json`). Eight IDs closed there by inspection and are not reopened. This round covers the two
+carryovers: the clipboard restore (P5-4 and P5-21, one cause) and the behavioural certificates for P5-6 / AC 64.
+Still development evidence, not review or verification. Logs, exit codes, hashes:
+`Shared/evidence/felix-voxis-pr5-round2/`. No criterion and no existing test was changed.
+
+### Clipboard restore (P5-4, P5-21)
+
+`paste_outcome_with` ignored a failing `cb.set(previous)` and stamped `restore_ms` anyway, including when there was
+no previous text. `PasteOutcome::Pasted` now carries `Restore::{Done(ms), NoPrevious, Failed(error)}`:
+`restore_ms` only for `Done`; `Failed` logs `paste restore failed: clipboard <error>` (no dictated text) and the
+line says `restore=failed`; `NoPrevious` says `restore=none`; the injection timestamp (`paste_ms`) is unchanged and
+real; `hide_orb_after` hides the orb on a restore failure in both modes (AC 42, wording unqualified).
+Tests (fake clipboard, first `set` passes and the next fails; no previous text; the hide decision in both modes):
+red against the old restore rule in `red-clipboard-restore.log` (3 failed), green in the native run. Nothing real was
+touched, and the end of the paste inside the target application is still not observed.
+
+### AC 64: separated by kind
+
+Everything below the line "red" is a reproduction on `889d48c` written and run now: a retrospective reproduction,
+not an observation made before the first implementation. Run `scripts/windows/frozen-repro.sh <worktree>
+<evidence dir>` (needs `CARGO_TARGET_DIR` and `TRAY_TARGET_DIR` outside the worktree and the tray sidecar). It
+verifies six frozen blobs (`frozen-blobs.txt`), stores the hashes of the sources and of the test modules, and the
+exact diff against the frozen tree (`frozen-test-patch.diff`: appended lines only, no frozen line removed or
+changed, so the frozen functions are the byte-identical production code), the raw output and the exit codes. The
+tests call the frozen `serve_http`, `start`, `stop`, `cli`, `writer`, `agent` and the tray's `snapshot`. Result of
+the last run: 13 red, 4 controls ok, 1 characterization ok, script exit 0.
+
+| Obligation | Frozen test (`889d48c`) | Kind | Candidate-path test (`361a965` + this round) |
+| --- | --- | --- | --- |
+| AC 2, disclosure | `an_absolute_windows_path_under_static_is_not_served` | red | `a_sentinel_outside_the_root_is_never_served_over_http` |
+| AC 3, disclosure | `a_junction_inside_the_frontend_does_not_lead_outside_it` | red | `a_junction_inside_the_root_pointing_outside_answers_404` |
+| AC 13 / F19, stuck session | `a_session_whose_recorder_is_dead_does_not_block_a_new_start` | red | `a_session_whose_recorder_exited_does_not_block_a_new_start_under_the_system_owner_check` |
+| AC 14, dead processing owner | `a_processing_session_whose_pipeline_is_dead_does_not_block_a_new_start` | red | `a_dead_pipeline_puts_its_session_back_to_captured` (fake owner) |
+| AC 16, recorder exits early | `a_recorder_that_exits_before_recording_leaves_no_session_in_starting` | red | `a_recorder_that_exits_before_recording_fails_the_session_with_recorder_error` |
+| AC 86, `recover` with a live owner, bytes kept | `recover_refuses_a_session_whose_owner_is_live_and_leaves_every_byte` | red | `recover_and_process_through_the_cli_refuse_a_live_owner_and_leave_every_byte` (through `cli_with`) |
+| AC 86, `process` with a live owner | `process_refuses_a_session_whose_owner_is_live_and_leaves_every_byte` (controlled boundary: the frozen `spawn_child` starts the test binary, which runs no test) | red | same test as above |
+| AC 86, identity before the stop file | `stop_does_not_signal_a_process_it_has_not_identified_as_the_recorder` | red | `stop_writes_the_stop_file_only_after_checking_the_recorder` |
+| dead recorder, `stop` waiting | `stop_settles_a_session_whose_recorder_is_dead_without_waiting_60_seconds` | red (wait, not an AC 86 row) | `stop_settles_a_session_whose_recorder_exited_at_once_under_the_system_owner_check` |
+| AC 15 / F23, spaced profile path (tray reader) | `a_live_recorder_under_a_profile_path_with_a_space_is_recording` | red | `a_live_recorder_under_a_profile_with_spaces_shows_recording` |
+| AC 29-31, no finite deadline | `the_provider_client_carries_a_finite_connect_and_overall_deadline` (reads the frozen client; no host is called) | red | `every_provider_call_carries_its_deadline`, `a_stalled_anthropic_call_ends_at_its_deadline` |
+| AC 18, create failure only | `a_track_that_cannot_be_created_ends_in_an_error_not_a_panic` | red, create failure (not AC 18) | `a_track_that_cannot_be_created_ends_in_an_error_not_a_panic` |
+| AC 49 | `characterization_a_cut_plain_download_leaves_only_the_part_file` | characterization, green on the base | `a_cut_verify_download_keeps_the_old_file_and_removes_its_part` |
+| harness reach | `control_*` (4) | control | - |
+
+Behavioural properties with no frozen red, and why (not reproducible, not waived):
+
+- AC 18, an error during writing (not at creation): the frozen `writer` opens its own `File` and takes no injected
+  writer, and a physical full disk is not authorized. Candidate: `write_wav` over the real `BufWriter` with an
+  injected failing disk (`a_full_disk_under_the_buffered_writer_...`), which is what AC 92 allows.
+- AC 7-10 / F18 folder reuse: at the frozen SHA the only route is `record()`, which opens the microphone and the
+  loopback. Candidate: `reserve_meeting_dir` tests. A two-meetings-in-a-minute run with devices belongs to the
+  installed phase (Vera).
+- AC 49, verification and preservation: `models fetch --verify` does not exist at `889d48c`; there is no frozen
+  entry that can fail. The characterization above is explicitly not a red.
+- AC 17, a live recorder that never finishes: the candidate's owner identity needs this binary run with exactly
+  the marker and the folder, and a lookalike that survives 60 s cannot be built from the frozen test binary. The
+  frozen `stop` writes `recorder_timeout` after 60 s and ends nothing; not reproduced. Candidate:
+  `stop_ends_a_recorder_that_never_finishes_and_marks_it_interrupted`.
+- AC 29-32, bounded failure over a transport and preservation: the frozen provider URLs are constants and no real
+  host may be called, so a stall cannot be driven; only the missing deadline is shown (row above).
+
+Temporal non-conformance (only Sammy decides; nothing is waived or reinterpreted here): criterion 64 says the
+failing run comes before the production change. No run on `889d48c` was made before the first implementation, and
+none can be made now. Historical artifacts that exist: Dani's per-slice red logs (`Shared/evidence/dani-voxis-
+windows-port/red-S*.log`), written before each production change but against the old rule extracted into a seam,
+not against `889d48c`; and the round-1 mutation reds (`felix-voxis-pr5-round1/red-*.log`), made after the change.
+The reproductions above add behavioural coverage at the frozen SHA, after the fact.
+
+### Pending, counted honestly
+
+The 34 `Proof: walk` rows, the matrix M1-M17, installer proofs, S10 layers 1 and 2 and the independent re-review
+did not run; `check_proofs.py` still prints the walk rows as `Walked` only because this file has a handoff
+section. No installer, keyboard hook, microphone, loopback, real clipboard, real provider or model benchmark ran;
+the frozen tests started only `ping`, `cmd /C exit`, an inline `powershell -Command Start-Sleep` stand-in and the test
+binary itself, all ended by the tests.

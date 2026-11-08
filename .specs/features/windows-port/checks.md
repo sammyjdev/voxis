@@ -195,10 +195,14 @@ Proof: run native | dictate::tests::a_paste_puts_the_text_sends_ctrl_v_and_resto
 **C41** - Fewer than 4 injected events leave the text on the clipboard, skip the restore and log `paste failed: injected <n> of 4` (AC 41, unit-proven)
 Proof: run native | dictate::tests::a_partial_injection_leaves_the_text_on_the_clipboard ... ok
 Proof: run native | dictate::tests::a_paste_that_did_not_happen_has_no_completion_timestamp ... ok
+Proof: run native | dictate::tests::a_restore_that_fails_keeps_the_injection_time_and_reports_no_restore_time ... ok
+Proof: run native | dictate::tests::a_restore_failure_is_logged_without_the_dictated_text_and_has_no_restore_timestamp ... ok
+Proof: run native | dictate::tests::a_paste_with_no_previous_clipboard_text_reports_no_restore_time ... ok
 
 **C42** - A clipboard that cannot be opened or set logs `paste failed: clipboard <error>` without the text and hides the orb (AC 42)
 Proof: run native | dictate::tests::a_clipboard_failure_is_logged_without_the_text ... ok
 Proof: run native | dictate::tests::a_clipboard_failure_hides_the_orb_in_both_modes ... ok
+Proof: run native | dictate::tests::a_restore_failure_hides_the_orb_in_both_modes ... ok
 
 **C43** - An orb window or WebView2 that cannot be created leaves dictation running and logs `overlay unavailable: <error>` (AC 43, unit-proven)
 Proof: run native | dictate::tests::an_orb_that_cannot_be_created_leaves_dictation_running ... ok
@@ -392,6 +396,8 @@ Proof: run native | session::tests::sysinfo_reads_the_argv_elements_of_a_spawned
 Proof: run native | session::tests::process_and_recover_refuse_a_session_whose_owner_is_live ... ok
 Proof: run native | session::tests::stop_writes_the_stop_file_only_after_checking_the_recorder ... ok
 Proof: run native | session::tests::stop_settles_a_session_whose_recorder_exited_at_once_under_the_system_owner_check ... ok
+Proof: run native | session::tests::recover_and_process_through_the_cli_refuse_a_live_owner_and_leave_every_byte ... ok
+Proof: run native | session::tests::recover_through_the_cli_repairs_a_session_whose_owner_is_gone ... ok
 
 **C87** - The harness commit changes exactly `stt-bench/src/main.rs`, `voice.py`, `bench.py`, `voice_score.py` and the new `perf_driver.py` on top of `889d48c` (AC 87)
 Proof: run contract | PASS: harness_commit_changes_exactly_the_listed_files
