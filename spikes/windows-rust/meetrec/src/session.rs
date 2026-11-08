@@ -287,7 +287,7 @@ fn start() -> Result<(), String> {
 /// A pipeline that failed: back to `captured` so the tray offers "Processar
 /// gravação"; every file stays.
 fn pipeline_failed(dir: &Path, e: &str) {
-    let code = if e.contains(super::minutes::DEADLINE_MARK) { "provider_timeout" } else { "pipeline_error" };
+    let code = if e.contains(crate::minutes::DEADLINE_MARK) { "provider_timeout" } else { "pipeline_error" };
     fail(dir, "captured", code, e);
 }
 
@@ -976,6 +976,163 @@ mod tests {
         assert_ne!(std::fs::read(dir.join("mic.wav")).unwrap(), wav, "the header is repaired");
         assert_eq!(hound::WavReader::open(dir.join("mic.wav")).unwrap().len(), 50);
         assert_eq!(read(&dir).unwrap()["state"], "captured");
+    }
+
+    /// Every file under `dir` with its bytes, keyed by its path below `dir`.
+    fn tree_bytes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, at: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            for e in std::fs::read_dir(at).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(root, &p, out);
+                } else {
+                    out.insert(p.strip_prefix(root).unwrap().to_string_lossy().into_owned(), std::fs::read(&p).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// Session folders for the current second and the next two, each holding a finished manifest,
+    /// a recording and a sentinel: whichever second `start` picks, its folder already exists.
+    fn folders_at_the_generated_second(sessions: &Path) -> Vec<PathBuf> {
+        (0..3)
+            .map(|i| {
+                let id = (chrono::Local::now() + chrono::Duration::seconds(i)).format("%Y%m%d-%H%M%S").to_string();
+                let dir = session_in(sessions, &id, "completed", None, None);
+                std::fs::write(dir.join("sentinel.txt"), format!("must survive {id}")).unwrap();
+                dir
+            })
+            .collect()
+    }
+
+    #[test]
+    fn start_through_the_real_entry_refuses_a_session_folder_at_the_generated_second_and_keeps_every_byte() {
+        let _one_at_a_time = crate::test_lock();
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        let taken = folders_at_the_generated_second(&sessions);
+        std::env::set_var("MIRIS_HOME", home.path());
+        let before = tree_bytes(&sessions);
+
+        let started = start();
+
+        let e = started.unwrap_err();
+        assert!(e.starts_with("session folder "), "start did not stop at the existing folder: {e}");
+        assert_eq!(tree_bytes(&sessions), before, "no byte of an existing session was reused or changed");
+        assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), taken.len(), "no folder was added: a free second would be a false green");
+    }
+
+    /// A loopback stand-in for Anthropic, the Google token endpoint and Drive: every call answers at
+    /// once except the one named in `stalls`, which is held for 3 s and dropped.
+    fn provider_fake(stalls: &'static str) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, Read, Write};
+                    let mut s = s;
+                    let mut r = std::io::BufReader::new(s.try_clone().unwrap());
+                    let mut first = String::new();
+                    let _ = r.read_line(&mut first);
+                    let mut length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if r.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                            break;
+                        }
+                        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                            length = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    let _ = r.read_exact(&mut body);
+                    let mut parts = first.split_whitespace();
+                    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                    let (call, reply) = match (method, target) {
+                        ("POST", t) if t.starts_with("/v1/messages") => ("anthropic", r#"{"content": []}"#),
+                        ("POST", t) if t.starts_with("/token") => ("token", r#"{"access_token": "a"}"#),
+                        ("GET", t) if t.contains("appProperties") => ("lookup", r#"{"files": []}"#),
+                        ("GET", t) if t.starts_with("/drive/v3/files") => {
+                            ("list", if stalls == "mkdir" { r#"{"files": []}"# } else { r#"{"files": [{"id": "F"}]}"# })
+                        }
+                        ("POST", t) if t.starts_with("/drive/v3/files") => ("mkdir", r#"{"id": "F"}"#),
+                        ("POST", t) if t.starts_with("/upload/") => ("upload", r#"{"id": "D", "webViewLink": "x"}"#),
+                        _ => ("other", "{}"),
+                    };
+                    if call == stalls {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        return;
+                    }
+                    let _ = write!(s, "HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
+                });
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn a_real_transport_stall_at_each_provider_ends_at_its_deadline_and_the_pipeline_keeps_every_byte() {
+        use crate::minutes::{run_with_drive, summarize, upload_doc, Credentials, Ctx, Deadlines};
+        let _one_at_a_time = crate::test_lock();
+        let short = std::time::Duration::from_millis(300);
+        // (the call that stalls, the name its error carries, whether the minutes were already on disk)
+        let branches = [
+            ("anthropic", "anthropic", false),
+            ("token", "google token", true),
+            ("list", "drive list", true),
+            ("mkdir", "drive mkdir", true),
+            ("upload", "drive upload", true),
+        ];
+        for (stalls, label, ata_on_disk) in branches {
+            let base = provider_fake(stalls);
+            let ctx = Ctx {
+                anthropic: format!("{base}/v1/messages"),
+                oauth_default: format!("{base}/token"),
+                drive_files: format!("{base}/drive/v3/files"),
+                drive_upload: format!("{base}/upload/drive/v3/files"),
+                deadlines: Deadlines { connect: short, anthropic: short, oauth: short, drive_list: short, drive_upload: short },
+            };
+            let cfg = tempfile::tempdir().unwrap();
+            std::fs::write(cfg.path().join("google-oauth-client.json"), json!({"installed": {"client_id": "c", "client_secret": "s", "token_uri": format!("{base}/token")}}).to_string()).unwrap();
+            std::fs::write(cfg.path().join("google-token.json"), r#"{"refresh_token": "r"}"#).unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = session_in(tmp.path(), "20261107-143200", "processing", None, Some(4242));
+            std::fs::write(dir.join("system.wav"), [9u8, 8, 7, 6, 5]).unwrap();
+            std::fs::write(dir.join("transcript.md"), "# Transcricao\n\n**[00:01] Voce:** fechar sexta\n").unwrap();
+            let kept = ["mic.wav", "system.wav", "transcript.md"].map(|f| (f, std::fs::read(dir.join(f)).unwrap()));
+            let minutes = |_: &str| Ok(json!({"titulo": "Alinhamento", "resumo": "Fechar sexta.", "decisoes": [], "action_items": []}));
+            let raw = dir.join("minutes.json");
+            let creds = Credentials { anthropic_key: Some("k".into()), google: true };
+            let started = std::time::Instant::now();
+
+            let e = if stalls == "anthropic" {
+                let ask = |t: &str| summarize(&ctx, "k", "m", t, &raw).map(|(m, _)| m);
+                run_with_drive(&dir, &creds, &ask, &|t, md| upload_doc(&ctx, cfg.path(), t, md, "20261107-143200")).unwrap_err()
+            } else {
+                run_with_drive(&dir, &creds, &minutes, &|t, md| upload_doc(&ctx, cfg.path(), t, md, "20261107-143200")).unwrap_err()
+            };
+
+            assert!(started.elapsed() < std::time::Duration::from_millis(2500), "{stalls}: took {:?}", started.elapsed());
+            assert!(e.starts_with(label) && e.contains(crate::minutes::DEADLINE_MARK), "{stalls}: {e}");
+            let ata_after_minutes = std::fs::read(dir.join("ata.md")).ok();
+            assert_eq!(ata_after_minutes.is_some(), ata_on_disk, "{stalls}: ata.md is written before the first Drive call and not before the summary");
+            pipeline_failed(&dir, &e);
+
+            let m = read(&dir).unwrap();
+            assert_eq!((m["state"].as_str(), m["error"]["code"].as_str()), (Some("captured"), Some("provider_timeout")), "{stalls}");
+            assert_eq!(m["error"]["message"].as_str(), Some(e.as_str()), "{stalls}: the real transport error is the one recorded");
+            for (f, bytes) in &kept {
+                assert_eq!(&std::fs::read(dir.join(f)).unwrap(), bytes, "{stalls}: {f} changed");
+            }
+            assert_eq!(std::fs::read(dir.join("ata.md")).ok(), ata_after_minutes, "{stalls}: ata.md changed");
+            if let Some(ata) = ata_after_minutes {
+                assert!(String::from_utf8(ata).unwrap().contains("Fechar sexta."), "{stalls}");
+            }
+        }
     }
 
     #[test]

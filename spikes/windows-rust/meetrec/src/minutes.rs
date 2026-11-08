@@ -657,6 +657,49 @@ mod tests {
     }
 
     #[test]
+    fn a_stalled_drive_folder_create_ends_at_its_deadline() {
+        let _one_at_a_time = crate::test_lock();
+        // the list finds no folder, so the create is what stalls
+        let base = fake(|method, _, _| if method == "GET" { Reply::Json(200, r#"{"files": []}"#.into()) } else { Reply::Stall });
+        let ctx = ctx_at(&base, Duration::from_millis(300));
+
+        let t = std::time::Instant::now();
+        let e = ensure_folder(&ctx, "tok", FOLDER).unwrap_err();
+
+        assert!(e.starts_with("drive mkdir: no answer within 300 ms (deadline)"), "{e}");
+        assert!(t.elapsed() >= Duration::from_millis(250) && t.elapsed() < Duration::from_millis(2500), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn the_oauth_call_ends_at_its_real_thirty_second_deadline_when_the_endpoint_stalls_for_forty() {
+        let _one_at_a_time = crate::test_lock();
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut s = s;
+                    let mut r = BufReader::new(s.try_clone().unwrap());
+                    let mut line = String::new();
+                    while r.read_line(&mut line).unwrap_or(0) > 2 {
+                        line.clear();
+                    }
+                    std::thread::sleep(Duration::from_secs(40));
+                    let _ = s.write_all(b"");
+                });
+            }
+        });
+        let ctx = Ctx { anthropic: String::new(), oauth_default: format!("{base}/token"), drive_files: String::new(), drive_upload: String::new(), deadlines: DEADLINES };
+        let cfg = google_dir(&base);
+
+        let t = std::time::Instant::now();
+        let e = google_token(&ctx, cfg.path()).unwrap_err();
+
+        assert!(e.starts_with("google token: no answer within 30 s (deadline)"), "{e}");
+        assert!(t.elapsed() >= Duration::from_secs(29) && t.elapsed() < Duration::from_secs(32), "{:?}", t.elapsed());
+    }
+
+    #[test]
     fn a_stalled_anthropic_call_ends_at_its_deadline() {
         let _one_at_a_time = crate::test_lock();
         let base = fake(|_, _, _| Reply::Stall);

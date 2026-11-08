@@ -892,6 +892,79 @@ mod tests {
         assert!(failed.load(std::sync::atomic::Ordering::SeqCst), "the recording loop is told to end");
     }
 
+    // A failure during writing on a real `File`, with nothing filling a disk: the track file is locked
+    // from 1 MiB on through a second handle (`LockFileEx`), so the first flush that reaches the locked
+    // range fails by itself. The same recipe runs against the frozen `writer` in
+    // .specs/features/windows-port/frozen-repro/main.midwrite.rs.inc.
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        event: *mut std::ffi::c_void,
+    }
+
+    extern "system" {
+        fn LockFileEx(file: *mut std::ffi::c_void, flags: u32, reserved: u32, low: u32, high: u32, overlapped: *mut Overlapped) -> i32;
+    }
+
+    const LOCK_FROM: u32 = 1 << 20;
+
+    fn locked_track(dir: &std::path::Path) -> (std::path::PathBuf, std::fs::File) {
+        use std::os::windows::io::AsRawHandle;
+        let path = dir.join("mic.wav");
+        let locker = std::fs::File::create(&path).unwrap();
+        let mut o = Overlapped { internal: 0, internal_high: 0, offset: LOCK_FROM, offset_high: 0, event: std::ptr::null_mut() };
+        let ok = unsafe { LockFileEx(locker.as_raw_handle() as *mut _, 3, 0, u32::MAX, 0, &mut o) };
+        assert_ne!(ok, 0, "LockFileEx failed: {}", std::io::Error::last_os_error());
+        (path, locker)
+    }
+
+    fn quiet_chunks(count: usize) -> mpsc::Receiver<Chunk> {
+        let (tx, rx) = mpsc::channel();
+        for i in 0..count {
+            tx.send(Chunk { at: i as f64 * 0.25, mono: vec![0.25; 4096] }).unwrap();
+        }
+        rx
+    }
+
+    #[test]
+    fn a_track_below_the_locked_range_is_written_and_finalized_on_a_real_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _locker) = locked_track(tmp.path());
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let (written, _) = writer(path.clone(), 16_000, quiet_chunks(10), failed.clone()).join().unwrap().unwrap();
+
+        assert_eq!(written, 10 * 4096);
+        assert_eq!(hound::WavReader::open(&path).unwrap().len(), 10 * 4096);
+        assert!(!failed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_write_that_fails_in_the_middle_of_a_track_on_a_real_file_is_an_error_and_the_data_on_disk_is_recoverable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _locker) = locked_track(tmp.path());
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let ended = writer(path.clone(), 16_000, quiet_chunks(100), failed.clone()).join();
+
+        let e = ended.expect("the writer thread must not panic").unwrap_err();
+        assert!(e.starts_with("disk_write_error"), "{e}");
+        assert!(!e.contains("header repair failed"), "the header was repaired from the bytes on disk: {e}");
+        assert!(failed.load(std::sync::atomic::Ordering::SeqCst), "the recording loop is told to end");
+        // exactly the file's length: a read at the end of file would touch the locked range
+        let len = std::fs::metadata(&path).unwrap().len() as usize;
+        let mut bytes = vec![0u8; len];
+        std::io::Read::read_exact(&mut std::fs::File::open(&path).unwrap(), &mut bytes).unwrap();
+        assert_eq!(bytes.len() as u32, LOCK_FROM, "everything before the locked range reached the disk, nothing after it");
+        let data_at = bytes.windows(4).position(|w| w == b"data").unwrap() + 8;
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.len() as usize, (bytes.len() - data_at) / 4, "the header counts every whole sample that reached the disk");
+        assert!(reader.len() > 0);
+    }
+
     #[test]
     fn a_half_written_sample_at_the_end_is_left_out_of_the_header() {
         let (_, samples) = recorded_samples_after_a_full_disk(100 * 4 + 2);
