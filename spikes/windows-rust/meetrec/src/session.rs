@@ -287,7 +287,7 @@ fn start() -> Result<(), String> {
 /// A pipeline that failed: back to `captured` so the tray offers "Processar
 /// gravação"; every file stays.
 fn pipeline_failed(dir: &Path, e: &str) {
-    let code = if e.contains(crate::minutes::DEADLINE_MARK) { "provider_timeout" } else { "pipeline_error" };
+    let code = if e.contains(super::minutes::DEADLINE_MARK) { "provider_timeout" } else { "pipeline_error" };
     fail(dir, "captured", code, e);
 }
 
