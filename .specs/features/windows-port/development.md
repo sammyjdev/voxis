@@ -184,7 +184,7 @@ with `CUDAARCHS=89`, local only; builds in the fixer's own `D:` folders, the CI 
 | contract (`check-windows-contract.sh`) | 18 of 18 PASS |
 | Vulkan edition build of `meetrec` | exit 0, no warnings |
 | `check_proofs.py windows-port` | 160 run proofs and 3 builds pass, 0 fail, tree clean; 34 `walk` rows listed as `Walked`, which is a handoff marker, not an execution |
-| `frozen-repro.sh` on `889d48c` | 2 controls ok, 5 reproductions fail (`evidence/frozen/`) |
+| `frozen-repro.sh` on `889d48c` (round 1 run; 3 controls, not 2) | 3 controls ok, 5 reproductions fail (`evidence/frozen/`) |
 
 The Python suites of `packages/` and the Linux tray run in CI only; the PR's CI result for this head is not
 known to this document.
@@ -229,7 +229,7 @@ verifies six frozen blobs (`frozen-blobs.txt`), stores the hashes of the sources
 exact diff against the frozen tree (`frozen-test-patch.diff`: appended lines only, no frozen line removed or
 changed, so the frozen functions are the byte-identical production code), the raw output and the exit codes. The
 tests call the frozen `serve_http`, `start`, `stop`, `cli`, `writer`, `agent` and the tray's `snapshot`. Result of
-the last run: 13 red, 4 controls ok, 1 characterization ok, script exit 0.
+the last run: 12 red, 5 controls ok, 1 characterization ok, script exit 0.
 
 | Obligation | Frozen test (`889d48c`) | Kind | Candidate-path test (`361a965` + this round) |
 | --- | --- | --- | --- |
@@ -246,7 +246,7 @@ the last run: 13 red, 4 controls ok, 1 characterization ok, script exit 0.
 | AC 29-31, no finite deadline | `the_provider_client_carries_a_finite_connect_and_overall_deadline` (reads the frozen client; no host is called) | red | `every_provider_call_carries_its_deadline`, `a_stalled_anthropic_call_ends_at_its_deadline` |
 | AC 18, create failure only | `a_track_that_cannot_be_created_ends_in_an_error_not_a_panic` | red, create failure (not AC 18) | `a_track_that_cannot_be_created_ends_in_an_error_not_a_panic` |
 | AC 49 | `characterization_a_cut_plain_download_leaves_only_the_part_file` | characterization, green on the base | `a_cut_verify_download_keeps_the_old_file_and_removes_its_part` |
-| harness reach | `control_*` (4) | control | - |
+| harness reach | `control_*` (5) | control | - |
 
 Behavioural properties with no frozen red, and why (not reproducible, not waived):
 
@@ -276,8 +276,8 @@ The reproductions above add behavioural coverage at the frozen SHA, after the fa
 
 Same build host and local-only settings as round 1. Native 118 passed (CUDA), Windows tray 79, frontend 5, bench 37,
 contract 18 of 18, Vulkan build of `meetrec` exit 0 with no warnings. `check_proofs.py windows-port`: 166 run proofs
-and 3 builds pass, 0 fail, tree clean; the 34 `walk` rows are still only listed as `Walked`. Frozen reproduction: 13
-red, 4 controls ok, 1 characterization ok, script exit 0. The PR's CI for the new head is not known to this document.
+and 3 builds pass, 0 fail, tree clean; the 34 `walk` rows are still only listed as `Walked`. Frozen reproduction: 12
+red, 5 controls ok, 1 characterization ok, script exit 0. The PR's CI for the new head is not known to this document.
 
 ### Pending, counted honestly
 
