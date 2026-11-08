@@ -458,9 +458,9 @@ fn foreground_elevated() -> bool {
 /// or empty paste has no completion time to report.
 #[derive(Debug, Clone, PartialEq)]
 enum PasteOutcome {
-    /// Ctrl+V was sent at `injected_ms`; the previous clipboard text was back
-    /// at `restored_ms`, after the restore wait.
-    Pasted { injected_ms: u128, restored_ms: u128 },
+    /// Ctrl+V was sent at `injected_ms`; `restore` says what became of the
+    /// user's previous clipboard text.
+    Pasted { injected_ms: u128, restore: Restore },
     /// nothing was transcribed, so nothing was pasted
     Empty,
     /// the clipboard could not be opened or set (AC 42)
@@ -471,10 +471,22 @@ enum PasteOutcome {
     SkippedElevated,
 }
 
+/// What became of the clipboard text the user had before a paste.
+#[derive(Debug, Clone, PartialEq)]
+enum Restore {
+    /// the previous text was put back at this unix ms, after the restore wait
+    Done(u128),
+    /// the clipboard held no text before, so there was nothing to put back
+    NoPrevious,
+    /// putting it back failed: the dictated text is still on the clipboard
+    Failed(String),
+}
+
 impl PasteOutcome {
     /// The log lines of this outcome (never the text).
     fn log_lines(&self) -> Vec<String> {
         match self {
+            Self::Pasted { restore: Restore::Failed(e), .. } => vec![format!("paste restore failed: clipboard {e}")],
             Self::Pasted { .. } | Self::Empty => Vec::new(),
             Self::ClipboardFailed(e) => vec![format!("paste failed: clipboard {e}")],
             Self::InjectFailed(n) => vec![format!("paste failed: injected {n} of 4")],
@@ -511,10 +523,14 @@ fn paste_outcome_with(
     }
     let injected_ms = now();
     std::thread::sleep(wait);
-    if let Some(p) = previous {
-        let _ = cb.set(&p);
-    }
-    PasteOutcome::Pasted { injected_ms, restored_ms: now() }
+    let restore = match previous {
+        Some(p) => match cb.set(&p) {
+            Ok(()) => Restore::Done(now()),
+            Err(e) => Restore::Failed(e),
+        },
+        None => Restore::NoPrevious,
+    };
+    PasteOutcome::Pasted { injected_ms, restore }
 }
 
 /// `paste_outcome_with`, reduced to its log lines.
@@ -540,7 +556,8 @@ fn paste(text: &str) -> PasteOutcome {
 /// hides it in both modes (AC 42); otherwise only a push-to-talk utterance
 /// with nothing else being captured does.
 fn hide_orb_after(outcome: &PasteOutcome, hands_free: bool, idle: bool) -> bool {
-    matches!(outcome, PasteOutcome::ClipboardFailed(_)) || (!hands_free && idle)
+    matches!(outcome, PasteOutcome::ClipboardFailed(_) | PasteOutcome::Pasted { restore: Restore::Failed(_), .. })
+        || (!hands_free && idle)
 }
 
 /// The log line of one transcribed utterance.
@@ -560,8 +577,13 @@ fn utterance_log(mode: &str, audio_s: f64, proc_s: f64, text: &str, release_ms: 
 /// for a paste that happened; otherwise `paste=<why not>`.
 fn utterance_line(mode: &str, audio_s: f64, proc_s: f64, text: &str, release_ms: u128, outcome: &PasteOutcome) -> String {
     match outcome {
-        PasteOutcome::Pasted { injected_ms, restored_ms } => {
-            format!("{} restore_ms={restored_ms}", utterance_log(mode, audio_s, proc_s, text, release_ms, *injected_ms))
+        PasteOutcome::Pasted { injected_ms, restore } => {
+            let line = utterance_log(mode, audio_s, proc_s, text, release_ms, *injected_ms);
+            match restore {
+                Restore::Done(restored_ms) => format!("{line} restore_ms={restored_ms}"),
+                Restore::NoPrevious => format!("{line} restore=none"),
+                Restore::Failed(_) => format!("{line} restore=failed"),
+            }
         }
         other => {
             let why = match other {

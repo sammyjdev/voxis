@@ -461,7 +461,7 @@ fn a_completed_paste_reports_when_ctrl_v_was_sent_and_when_the_clipboard_came_ba
 
     let outcome = paste_outcome_with(Ok(&mut cb), "ditado ", &mut || 4, false, Duration::from_millis(1), &mut clock(1_000, 260));
 
-    assert_eq!(outcome, PasteOutcome::Pasted { injected_ms: 1_000, restored_ms: 1_260 });
+    assert_eq!(outcome, PasteOutcome::Pasted { injected_ms: 1_000, restore: Restore::Done(1_260) });
     assert_eq!(cb.sets, ["ditado ", "previous"]);
 }
 
@@ -489,7 +489,7 @@ fn a_paste_that_did_not_happen_has_no_completion_timestamp() {
 
 #[test]
 fn the_utterance_line_names_paste_and_restore_times_only_for_a_paste_that_happened() {
-    let pasted = utterance_line("ptt", 1.0, 0.2, "x", 5_000, &PasteOutcome::Pasted { injected_ms: 5_400, restored_ms: 5_650 });
+    let pasted = utterance_line("ptt", 1.0, 0.2, "x", 5_000, &PasteOutcome::Pasted { injected_ms: 5_400, restore: Restore::Done(5_650) });
     let failed = utterance_line("ptt", 1.0, 0.2, "x", 5_000, &PasteOutcome::ClipboardFailed("busy".into()));
     let empty = utterance_line("hf", 1.0, 0.2, "", 5_000, &PasteOutcome::Empty);
     let partial = utterance_line("hf", 1.0, 0.2, "x", 5_000, &PasteOutcome::InjectFailed(1));
@@ -506,7 +506,7 @@ fn the_utterance_line_names_paste_and_restore_times_only_for_a_paste_that_happen
 #[test]
 fn a_clipboard_failure_hides_the_orb_in_both_modes() {
     let failed = PasteOutcome::ClipboardFailed("clipboard busy".into());
-    let pasted = PasteOutcome::Pasted { injected_ms: 1, restored_ms: 2 };
+    let pasted = PasteOutcome::Pasted { injected_ms: 1, restore: Restore::Done(2) };
 
     assert!(hide_orb_after(&failed, true, false), "hands-free, still listening");
     assert!(hide_orb_after(&failed, false, true), "push-to-talk, idle");
@@ -582,4 +582,72 @@ fn the_log_hook_is_wired_to_whisper_cpp_itself() {
     assert!(loaded.is_err(), "a missing model does not load");
     let tail: Vec<String> = LOG_TAIL.lock().unwrap().iter().cloned().collect();
     assert!(tail.iter().any(|l| l.contains("no-such-model-for-the-log-hook.bin")), "whisper.cpp's own lines reach the hook: {tail:?}");
+}
+
+// ------------------------------------------------------------ review round 2: the clipboard restore (P5-4, P5-21)
+
+/// A clipboard whose first `set` works and whose later ones fail, like a clipboard another program grabs
+/// while the paste runs. Holds the text the paste put there.
+struct GrabbedAfterTheFirstSet {
+    text: Option<String>,
+    sets: usize,
+}
+
+impl Clip for GrabbedAfterTheFirstSet {
+    fn get(&mut self) -> Option<String> {
+        self.text.clone()
+    }
+    fn set(&mut self, text: &str) -> Result<(), String> {
+        self.sets += 1;
+        if self.sets > 1 {
+            return Err("clipboard busy".into());
+        }
+        self.text = Some(text.to_owned());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_restore_that_fails_keeps_the_injection_time_and_reports_no_restore_time() {
+    let mut cb = GrabbedAfterTheFirstSet { text: Some("what the user had copied".into()), sets: 0 };
+
+    let outcome = paste_outcome_with(Ok(&mut cb), "segredo do ditado ", &mut || 4, false, Duration::from_millis(1), &mut clock(7_000, 260));
+
+    assert_eq!(outcome, PasteOutcome::Pasted { injected_ms: 7_000, restore: Restore::Failed("clipboard busy".into()) });
+    assert_eq!(cb.text.as_deref(), Some("segredo do ditado "), "the dictated text is still there for the user");
+}
+
+#[test]
+fn a_restore_failure_is_logged_without_the_dictated_text_and_has_no_restore_timestamp() {
+    let outcome = PasteOutcome::Pasted { injected_ms: 7_000, restore: Restore::Failed("clipboard busy".into()) };
+
+    let log = outcome.log_lines();
+    let line = utterance_line("hf", 1.0, 0.2, "segredo do ditado", 6_500, &outcome);
+
+    assert_eq!(log, ["paste restore failed: clipboard clipboard busy"]);
+    assert!(line.contains("release_ms=6500 paste_ms=7000") && line.ends_with("restore=failed"), "{line}");
+    assert!(!line.contains("restore_ms=") && !line.contains("segredo"), "{line}");
+}
+
+#[test]
+fn a_paste_with_no_previous_clipboard_text_reports_no_restore_time() {
+    let mut cb = FakeClip { text: None, sets: Vec::new(), fail: false };
+
+    let outcome = paste_outcome_with(Ok(&mut cb), "ditado ", &mut || 4, false, Duration::from_millis(1), &mut clock(7_000, 260));
+
+    assert_eq!(outcome, PasteOutcome::Pasted { injected_ms: 7_000, restore: Restore::NoPrevious });
+    assert_eq!(cb.sets, ["ditado "], "nothing was put back");
+    let line = utterance_line("ptt", 1.0, 0.2, "x", 6_500, &outcome);
+    assert!(line.contains("paste_ms=7000") && line.ends_with("restore=none") && !line.contains("restore_ms="), "{line}");
+}
+
+#[test]
+fn a_restore_failure_hides_the_orb_in_both_modes() {
+    let failed = PasteOutcome::Pasted { injected_ms: 1, restore: Restore::Failed("clipboard busy".into()) };
+    let none = PasteOutcome::Pasted { injected_ms: 1, restore: Restore::NoPrevious };
+
+    assert!(hide_orb_after(&failed, true, false), "hands-free, still listening");
+    assert!(hide_orb_after(&failed, false, true), "push-to-talk, idle");
+    assert!(hide_orb_after(&failed, false, false), "push-to-talk, key held again");
+    assert!(!hide_orb_after(&none, true, false), "no previous text is not a failure");
 }
