@@ -379,17 +379,27 @@ fn pipeline_child(dir: &Path) -> Result<std::process::ExitStatus, String> {
 /// `process <id>` on its session folder, with the pipeline child passed in so a test can stand for it.
 fn process_with(dir: &Path, owners: &dyn Owners, child: impl FnOnce(&Path) -> Result<std::process::ExitStatus, String>) -> Result<(), String> {
     guard_inactive(dir, owners)?;
+    if read(dir)?["state"] == "interrupted" {
+        let id = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return Err(format!("session {id} is interrupted; run recover first"));
+    }
     run_pipeline_with(dir, child)
 }
 
-/// `run_pipeline` with the child passed in (as `stop_with` takes `pipeline`).
+/// `run_pipeline` with the child passed in (as `stop_with` takes `pipeline`). A child that ends non-zero
+/// while the manifest still says `processing` leaves the session `captured` with `pipeline_error`.
 fn run_pipeline_with(dir: &Path, child: impl FnOnce(&Path) -> Result<std::process::ExitStatus, String>) -> Result<(), String> {
     let status = child(dir)?;
     if status.success() {
-        Ok(())
-    } else {
-        Err(format!("pipeline failed ({status}); see {}", dir.join("session.json").display()))
+        return Ok(());
     }
+    if read(dir)?["state"] == "processing" {
+        update(dir, |m| {
+            m["state"] = json!("captured");
+            m["error"] = json!({"code": "pipeline_error", "message": format!("pipeline ended with {status}"), "occurred_at": now()});
+        })?;
+    }
+    Err(format!("pipeline failed ({status}); see {}", dir.join("session.json").display()))
 }
 
 fn newest_with_state(states: &[&str]) -> Option<PathBuf> {
