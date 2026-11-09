@@ -1991,4 +1991,47 @@ mod m7_tests {
         assert_eq!(r, Ok(()), "control: L = 4294967303 follows the ordinary rules");
         assert!(fits.writes.contains(&(4, u32::MAX.to_le_bytes().to_vec())), "control: R = L - 8 = 4294967295 written at 4");
     }
+
+    /// C24 (AC 12): a repair prints the old and new size fields in decimal.
+    #[test]
+    fn m7_12_recover_prints_the_old_and_new_size_fields() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let _dir = interrupted_with("m7_12", "20261109-121200", &[("mic.wav", &mic)]);
+
+        let (exit, out, err) = recover_to("20261109-121200");
+
+        eprintln!("m7_12 observed: exit={exit} stdout={out:?} stderr={err:?}");
+        assert!(out.lines().any(|l| l == "mic.wav: riff_size 0 -> 4060, data_size 0 -> 4000"), "behavior: stdout must hold the size line, got {out:?}");
+        assert_eq!(exit, 0, "behavior: exit");
+    }
+
+    /// C25 (AC 13): with no track holding audio, recover ends `failed` with `no_audio` and keeps every file.
+    #[test]
+    fn m7_13_no_track_with_audio_ends_failed_no_audio() {
+        let _one_at_a_time = crate::test_lock();
+        let cases: [(&str, Vec<u8>, Vec<u8>, &str); 3] = [
+            ("E + E", Vec::new(), Vec::new(), "failed"),
+            ("Hk + E", hk(), Vec::new(), "failed"),
+            ("K(1) + E", k(1).0, Vec::new(), "captured"),
+        ];
+        for (i, (name, mic, sys, want)) in cases.into_iter().enumerate() {
+            let id = format!("20261109-1213{i:02}");
+            let dir = interrupted_with("m7_13", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            let m = read(&dir).unwrap();
+            eprintln!("m7_13 {name} observed: exit={exit} state={} error={} stdout={out:?} stderr={err:?}", m["state"], m["error"]);
+            assert_eq!(exit, 0, "behavior: {name} exit");
+            assert_eq!(m["state"], want, "behavior: {name} state");
+            if want == "failed" {
+                assert_eq!(m["error"]["code"], "no_audio", "behavior: {name} error.code");
+                assert_eq!(m["error"]["message"], "no track holds audio; the files were kept", "behavior: {name} error.message");
+                assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: {name} mic.wav byte-identical");
+                assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+            }
+        }
+    }
 }
