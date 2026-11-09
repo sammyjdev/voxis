@@ -569,7 +569,7 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
                 let len = std::fs::metadata(&p).map_err(|e| e.to_string())?.len();
                 let head = read_head(&p)?;
                 let holds = product_header_holds(&head);
-                if (1..=67).contains(&len) && !holds {
+                if len >= 1 && !holds {
                     return Err(format!("{f}: unreadable (not a product WAV header)"));
                 }
                 tracks.push((f, p, len, holds, head));
