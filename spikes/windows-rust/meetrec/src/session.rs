@@ -517,9 +517,15 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
         "recover" => arg(0).and_then(session_dir).and_then(|d| {
             guard_inactive(&d, owners)?;
             for f in ["mic.wav", "system.wav"] {
-                if d.join(f).exists() {
-                    repair_wav(&d.join(f))?;
+                let p = d.join(f);
+                if !p.exists() {
+                    continue;
                 }
+                if std::fs::metadata(&p).map_err(|e| e.to_string())?.len() == 0 {
+                    writeln!(out, "{f}: empty (0 bytes), no audio captured, skipped").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
+                    continue;
+                }
+                repair_wav(&p)?;
             }
             update(&d, |m| {
                 m["state"] = json!("captured");
