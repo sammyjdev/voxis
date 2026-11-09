@@ -1686,4 +1686,133 @@ mod m7_tests {
             assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
         }
     }
+
+    /// A finalized product WAV of n samples from `sample(i)`; checked against the fixed fields, D = 4n, R = 60 + 4n.
+    fn v_with(n: usize, sample: impl Fn(usize) -> f32) -> Vec<u8> {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = hound::WavWriter::new(&mut c, spec).unwrap();
+            for i in 0..n {
+                w.write_sample(sample(i)).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let b = c.into_inner();
+        assert_product_header(&b, "V(n)");
+        assert_eq!((b.len(), le32(&b, 64) as usize, le32(&b, 4) as usize), (68 + 4 * n, 4 * n, 60 + 4 * n), "fixture: V({n}) L, D, R");
+        b
+    }
+
+    fn v(n: usize) -> Vec<u8> {
+        v_with(n, |i| ((i % 89) as f32 / 89.0) - 0.5)
+    }
+
+    /// The sample count hound reads, reading every sample.
+    fn samples_of(path: &Path) -> Result<u32, String> {
+        hound::WavReader::open(path).map_err(|e| e.to_string()).and_then(|r| {
+            let n = r.len();
+            r.into_samples::<f32>().collect::<Result<Vec<_>, _>>().map(|_| n).map_err(|e| e.to_string())
+        })
+    }
+
+    /// C13 (AC 5): a VALID track (all-zero, audible, or with a stale RIFF size) is kept and not called empty.
+    #[test]
+    fn m7_5_a_valid_track_silent_audible_or_stale_riff_is_kept() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut vr = v(400);
+        vr[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!((le32(&vr, 4), le32(&vr, 64), vr.len()), (0, 1600, 1668), "fixture: Vr(400) R, D, L (VALID: D = W)");
+        let cases = [("V0(48000)", v_with(48_000, |_| 0.0)), ("V(1000)", v(1000)), ("Vr(400)", vr)];
+        for (i, (name, sys)) in cases.into_iter().enumerate() {
+            let id = format!("20261109-1205{i:02}");
+            let dir = interrupted_with("m7_5", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_5 {name} observed: exit={exit} stdout={out:?} stderr={err:?}");
+            assert_eq!(exit, 0, "behavior: {name} exit");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+            assert!(!out.contains("system.wav: empty"), "behavior: {name} is not reported empty: {out:?}");
+            assert_eq!(read(&dir).unwrap()["state"], "captured", "behavior: {name} state");
+        }
+    }
+
+    /// C14 (AC 6): a track declaring more samples than present gets D = W and R = 60 + W, samples untouched.
+    #[test]
+    fn m7_6_a_truncated_track_declares_exactly_the_samples_present() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut t = v(400);
+        t[64..68].copy_from_slice(&4000u32.to_le_bytes());
+        t[4..8].copy_from_slice(&4060u32.to_le_bytes());
+        assert_eq!((le32(&t, 64), le32(&t, 4), t.len(), t.len() - 68), (4000, 4060, 1668, 1600), "fixture: T(1000, 400) D, R, L, W (REPAIRABLE: D > W)");
+        for (i, (name, sys)) in [("T(1000, 400)", t), ("T(400, 400)", v(400))].into_iter().enumerate() {
+            let id = format!("20261109-1206{i:02}");
+            let dir = interrupted_with("m7_6", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            let after = std::fs::read(dir.join("system.wav")).unwrap();
+            let n = samples_of(&dir.join("system.wav"));
+            eprintln!("m7_6 {name} observed: exit={exit} D={} R={} samples={n:?} stdout={out:?} stderr={err:?}", le32(&after, 64), le32(&after, 4));
+            assert_eq!(exit, 0, "behavior: {name} exit");
+            assert_eq!((le32(&after, 64), le32(&after, 4)), (1600, 1660), "behavior: {name} D and R after recover");
+            assert_eq!(&after[68..], &sys[68..], "behavior: {name} sample bytes identical");
+            assert_eq!(n, Ok(400), "behavior: {name} reads 400 samples");
+        }
+    }
+
+    /// C15 (AC 6): a header declaring 1000 samples with none present is HEADER-ONLY and kept.
+    #[test]
+    fn m7_6_a_declaration_with_no_samples_is_header_only() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut hd = hk();
+        hd[64..68].copy_from_slice(&4000u32.to_le_bytes());
+        assert_eq!((hd.len(), le32(&hd, 64)), (68, 4000), "fixture: Hd(4000) L, D (HEADER-ONLY)");
+        let dir = interrupted_with("m7_6h", "20261109-120610", &[("mic.wav", &mic), ("system.wav", &hd)]);
+
+        let (exit, out, err) = recover_to("20261109-120610");
+
+        eprintln!("m7_6h observed: exit={exit} stdout={out:?} stderr={err:?}");
+        assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), hd, "behavior: Hd(4000) byte-identical");
+        assert!(out.lines().any(|l| l == "system.wav: no samples, skipped"), "behavior: Hd(4000) no-samples line, got {out:?}");
+        assert_eq!(exit, 0, "behavior: exit");
+    }
+
+    /// C16 (AC 7): trailing bytes after the last whole sample stay; a second recover writes nothing.
+    #[test]
+    fn m7_7_trailing_bytes_stay_and_a_second_recover_writes_nothing() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let (mut kt, kt_class) = k(250);
+        assert_k(&kt, 250, kt_class);
+        kt.extend_from_slice(&[0x11, 0x22]);
+        assert_eq!((kt.len(), le32(&kt, 64)), (1070, 0), "fixture: Kt(250, 2) L, D (REPAIRABLE)");
+        let dir = interrupted_with("m7_7", "20261109-120700", &[("mic.wav", &mic), ("system.wav", &kt)]);
+
+        let (exit, out, err) = recover_to("20261109-120700");
+
+        let after = std::fs::read(dir.join("system.wav")).unwrap();
+        eprintln!("m7_7 Kt observed: exit={exit} len={} D={} R={} stdout={out:?} stderr={err:?}", after.len(), le32(&after, 64), le32(&after, 4));
+        assert_eq!(exit, 0, "behavior: Kt(250, 2) exit");
+        assert_eq!((after.len(), le32(&after, 64), le32(&after, 4)), (1070, 1000, 1060), "behavior: Kt(250, 2) L, D, R after recover");
+        assert_eq!(&after[68..], &kt[68..], "behavior: Kt(250, 2) samples and trailing bytes unchanged");
+        assert_eq!(samples_of(&dir.join("system.wav")), Ok(250), "behavior: Kt(250, 2) reads 250 samples");
+        let once = std::fs::read(dir.join("system.wav")).unwrap();
+        let (again, _, _) = recover_to("20261109-120700");
+        assert_eq!((again, std::fs::read(dir.join("system.wav")).unwrap()), (0, once), "behavior: a second recover writes nothing");
+
+        let mut vt = v(250);
+        vt.extend_from_slice(&[0x33, 0x44]);
+        let dir = interrupted_with("m7_7v", "20261109-120701", &[("mic.wav", &mic), ("system.wav", &vt)]);
+        assert_eq!(recover_to("20261109-120701").0, 0, "control: Vt(250, 2) exit");
+        assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), vt, "control: Vt(250, 2) byte-identical");
+    }
 }
