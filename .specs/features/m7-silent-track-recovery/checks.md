@@ -54,6 +54,7 @@ Fail-first: A at S0 - the oracle class differs from the stub's UNREADABLE on eve
 
 **C8** - The M7 case: mic K(1000) and system E on an `interrupted` session with a dead owner -> exit 0, only bytes 4..8 and 64..68 of `mic.wav` change, mic reads 1000 samples with sample bytes identical, `system.wav` stays 0 bytes with SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`, state `captured`, `error` null, stdout holds `system.wav: empty (0 bytes), no audio captured, skipped` (AC 1)
 Proof: run m7 | session::m7_tests::m7_1_recover_skips_an_empty_system_track_and_repairs_mic ... ok
+Proof: run m7 | session::m7_tests::m7_1_recover_prints_that_the_empty_system_track_is_skipped ... ok
 Fail-first: U at source, recipe row 1 - predicted exit 1, state `interrupted`, `mic.wav` already changed.
 Control: mic K(1000) + system K(500) passes at source (C12).
 
