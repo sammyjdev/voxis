@@ -463,6 +463,38 @@ pub(crate) fn repair_wav_in<F: std::io::Read + std::io::Write + std::io::Seek>(f
     f.flush().map_err(|e| e.to_string())
 }
 
+/// The bytes every track this recorder writes holds at the start (hound 3.5.1, 32-bit float
+/// mono, extensible header: 68 bytes); sizes, rate, byte rate and channel mask vary.
+const PRODUCT_HEADER_FIXED: [(usize, &[u8]); 12] = [
+    (0, b"RIFF"),
+    (8, b"WAVE"),
+    (12, b"fmt "),
+    (16, &[40, 0, 0, 0]),
+    (20, &[0xFE, 0xFF]),
+    (22, &[1, 0]),
+    (32, &[4, 0]),
+    (34, &[32, 0]),
+    (36, &[22, 0]),
+    (38, &[32, 0]),
+    (44, &[0x03, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]),
+    (60, b"data"),
+];
+
+/// True when every fixed header byte that `head` covers (at most its first 68) holds.
+fn product_header_holds(head: &[u8]) -> bool {
+    PRODUCT_HEADER_FIXED
+        .iter()
+        .all(|(at, want)| want.iter().enumerate().all(|(i, w)| head.get(at + i).map_or(true, |b| b == w)))
+}
+
+/// At most the first 68 bytes of a track.
+fn read_head(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    std::fs::File::open(path).and_then(|f| f.take(68).read_to_end(&mut head)).map_err(|e| e.to_string())?;
+    Ok(head)
+}
+
 /// A killed recorder leaves WAV headers with zero sizes; hound writes the
 /// 44-byte canonical header for f32 mono, so sizes follow from the file length.
 fn repair_wav(path: &Path) -> Result<(), String> {
@@ -516,16 +548,31 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
         }),
         "recover" => arg(0).and_then(session_dir).and_then(|d| {
             guard_inactive(&d, owners)?;
+            // every track is looked at before any is written, so a refusal changes nothing
+            let mut tracks = Vec::new();
             for f in ["mic.wav", "system.wav"] {
                 let p = d.join(f);
                 if !p.exists() {
                     continue;
                 }
-                if std::fs::metadata(&p).map_err(|e| e.to_string())?.len() == 0 {
-                    writeln!(out, "{f}: empty (0 bytes), no audio captured, skipped").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
-                    continue;
+                let len = std::fs::metadata(&p).map_err(|e| e.to_string())?.len();
+                let holds = product_header_holds(&read_head(&p)?);
+                if (1..=67).contains(&len) && !holds {
+                    return Err(format!("{f}: unreadable (not a product WAV header)"));
                 }
-                repair_wav(&p)?;
+                tracks.push((f, p, len, holds));
+            }
+            for (f, p, len, holds) in tracks {
+                let line = match len {
+                    0 => format!("{f}: empty (0 bytes), no audio captured, skipped"),
+                    1..=67 => format!("{f}: partial header ({len} bytes), no audio captured, skipped"),
+                    68..=71 if holds => format!("{f}: no samples, skipped"),
+                    _ => {
+                        repair_wav(&p)?;
+                        continue;
+                    }
+                };
+                writeln!(out, "{line}").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
             }
             update(&d, |m| {
                 m["state"] = json!("captured");
