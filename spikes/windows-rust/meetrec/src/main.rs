@@ -456,21 +456,24 @@ pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl F
 
 /// Mono f32 at RATE. Box-filter average then linear interpolation: good
 /// enough for speech in a spike, a real resampler comes with the port.
-fn load_16k(path: &Path) -> Vec<f32> {
-    let mut r = hound::WavReader::open(path).expect("open wav");
+/// A file that cannot be read gives an error naming it, never a panic.
+fn load_16k(path: &Path) -> Result<Vec<f32>, String> {
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let mut r = hound::WavReader::open(path).map_err(|e| format!("{name}: {e}"))?;
     let spec = r.spec();
     let ch = spec.channels as usize;
     let raw: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => r.samples::<f32>().map(Result::unwrap).collect(),
-        hound::SampleFormat::Int => r.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect(),
-    };
+        hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>(),
+        hound::SampleFormat::Int => r.samples::<i16>().map(|s| s.map(|s| s as f32 / 32768.0)).collect::<Result<_, _>>(),
+    }
+    .map_err(|e| format!("{name}: {e}"))?;
     let mono: Vec<f32> = raw.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect();
     if mono.is_empty() {
-        return mono;
+        return Ok(mono);
     }
     let ratio = spec.sample_rate as f64 / RATE as f64;
     if (ratio - 1.0).abs() < 1e-9 {
-        return mono;
+        return Ok(mono);
     }
     let k = ratio.floor().max(1.0) as usize;
     let smooth: Vec<f32> = (0..mono.len()).map(|i| {
@@ -479,13 +482,13 @@ fn load_16k(path: &Path) -> Vec<f32> {
         mono[lo..hi].iter().sum::<f32>() / (hi - lo) as f32
     }).collect();
     let n = (mono.len() as f64 / ratio) as usize;
-    (0..n).map(|i| {
+    Ok((0..n).map(|i| {
         let x = i as f64 * ratio;
         let j = x as usize;
         let f = (x - j as f64) as f32;
         let b = smooth.get(j + 1).copied().unwrap_or(smooth[j]);
         smooth[j] * (1.0 - f) + b * f
-    }).collect()
+    }).collect())
 }
 
 struct Line {
@@ -508,7 +511,8 @@ pub fn transcribe(dir: &Path, model: &str, vad: &str, lang: &str) {
         if !path.exists() {
             continue;
         }
-        let audio = load_16k(&path);
+        // a track that cannot be read still stops the transcription here, as before (AC 14 skip and AC 15 settle are later checks)
+        let audio = load_16k(&path).unwrap_or_else(|e| panic!("open wav: {e}"));
         if audio.len() < RATE as usize {
             println!("{file}: under 1 s of audio, skipped");
             continue;
