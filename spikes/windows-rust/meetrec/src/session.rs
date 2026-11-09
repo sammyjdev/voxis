@@ -540,7 +540,6 @@ pub(crate) enum Class {
 }
 
 /// The class of the track `r` holds; reads at most the first 68 bytes and the length, writes nothing.
-#[allow(dead_code)]
 pub(crate) fn classify<R: std::io::Read + std::io::Seek>(r: &mut R) -> Class {
     use std::io::{Read, SeekFrom};
     let Ok(len) = r.seek(SeekFrom::End(0)) else { return Class::Unreadable };
@@ -583,6 +582,8 @@ pub(crate) fn read_head(path: &Path) -> Result<Vec<u8>, String> {
 
 /// A killed recorder leaves WAV headers with zero sizes; hound writes the
 /// 44-byte canonical header for f32 mono, so sizes follow from the file length.
+// recover no longer calls this: only REPAIRABLE tracks are written, through write_sizes; kept for its existing tests
+#[cfg_attr(not(test), allow(dead_code))]
 fn repair_wav(path: &Path) -> Result<(), String> {
     use std::io::{Seek, SeekFrom, Write};
     let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
@@ -640,32 +641,35 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
                 }
                 let len = std::fs::metadata(&p).map_err(|e| e.to_string())?.len();
                 let head = read_head(&p)?;
-                let holds = product_header_holds(&head);
-                if len >= 1 && !holds {
-                    return Err(format!("{f}: unreadable (not a product WAV header)"));
-                }
-                tracks.push((f, p, len, holds, head));
-            }
-            let mut audio = false;
-            for (f, p, len, holds, head) in tracks {
+                let class = classify(&mut std::fs::File::open(&p).map_err(|e| format!("{f}: {e}"))?);
                 // W: bytes of whole samples present; D: the declared data size
                 let w = len.saturating_sub(68) / 4 * 4;
-                let declared = head.get(64..68).map(|b| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
-                audio |= holds && w >= 4;
-                let line = match len {
-                    0 => format!("{f}: empty (0 bytes), no audio captured, skipped"),
-                    1..=67 => format!("{f}: partial header ({len} bytes), no audio captured, skipped"),
-                    68..=71 if holds => format!("{f}: no samples, skipped"),
-                    _ if holds && w >= 4 && declared == Some(w) => continue,
-                    _ if holds && w >= 4 && declared.is_some_and(|d| d == 0 || d > w) => {
-                        write_sizes(f, &p, 60 + w, w)?;
-                        let old_riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
-                        format!("{f}: riff_size {old_riff} -> {}, data_size {} -> {w}", 60 + w, declared.unwrap_or(0))
-                    }
-                    _ => {
-                        repair_wav(&p)?;
+                let declared = head.get(64..68).map_or(0, |b| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+                match class {
+                    Class::Unreadable if product_header_holds(&head) && len >= 68 => return Err(format!("{f}: unreadable (larger than a WAV header can describe)")),
+                    Class::Unreadable => return Err(format!("{f}: unreadable (not a product WAV header)")),
+                    Class::Mismatch => return Err(format!("{f}: declared {declared} bytes but {w} bytes of samples are present")),
+                    _ => tracks.push((f, p, len, class, head, w, declared)),
+                }
+            }
+            let mut audio = false;
+            for (f, p, len, class, head, w, declared) in tracks {
+                let line = match class {
+                    Class::Empty => format!("{f}: empty (0 bytes), no audio captured, skipped"),
+                    Class::Fragment => format!("{f}: partial header ({len} bytes), no audio captured, skipped"),
+                    Class::HeaderOnly => format!("{f}: no samples, skipped"),
+                    Class::Valid => {
+                        audio = true;
                         continue;
                     }
+                    Class::Repairable => {
+                        audio = true;
+                        write_sizes(f, &p, 60 + w, w)?;
+                        let old_riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+                        format!("{f}: riff_size {old_riff} -> {}, data_size {declared} -> {w}", 60 + w)
+                    }
+                    // refused in the first loop, before any track was written
+                    Class::Unreadable | Class::Mismatch => unreachable!("refused before any write"),
                 };
                 writeln!(out, "{line}").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
             }
