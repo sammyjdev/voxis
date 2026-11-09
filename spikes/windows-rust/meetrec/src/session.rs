@@ -1498,4 +1498,41 @@ mod m7_tests {
             assert_eq!(hound::WavReader::open(dir.join(name)).unwrap().len(), n, "behavior: {name} sample count");
         }
     }
+
+    // ---------------------------------------------------------------- CP3 S1 slices (C8 onward)
+
+    /// An interrupted session under a new MIRIS_HOME holding the given tracks; the caller holds `test_lock`.
+    fn interrupted_with(tag: &str, id: &str, tracks: &[(&str, &[u8])]) -> PathBuf {
+        let home = run_folder(tag);
+        let dir = session_m7(&home, id, "interrupted");
+        for (name, bytes) in tracks {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        std::env::set_var("MIRIS_HOME", &home);
+        dir
+    }
+
+    /// `recover <id>` through `cli_to`: (exit, stdout, stderr).
+    fn recover_to(id: &str) -> (i32, String, String) {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let exit = cli_to(&Gone, "recover", &[id.to_owned()], &mut out, &mut err);
+        (exit, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned())
+    }
+
+    /// C8 (AC 1), printed half: the skip line for the empty system track.
+    #[test]
+    fn m7_1_recover_prints_that_the_empty_system_track_is_skipped() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let (sys, sys_class) = e();
+        assert_eq!((sys.len(), sys_class), (0, Oracle::Empty), "fixture: E length and oracle class");
+        let _dir = interrupted_with("m7_1p", "20261109-120011", &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+        let (exit, out, err) = recover_to("20261109-120011");
+
+        eprintln!("m7_1p observed: exit={exit} stdout={out:?} stderr={err:?}");
+        assert!(out.lines().any(|l| l == "system.wav: empty (0 bytes), no audio captured, skipped"), "behavior: stdout must hold the empty-track skip line, got {out:?}");
+        assert_eq!(exit, 0, "behavior: exit");
+    }
 }
