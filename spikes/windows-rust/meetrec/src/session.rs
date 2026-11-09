@@ -1925,4 +1925,67 @@ mod m7_tests {
         let _ = recover_to("20261109-120910");
         assert_eq!((std::fs::read(dir.join("mic.wav")).unwrap(), std::fs::read(dir.join("system.wav")).unwrap()), (v0, y), "control: V0(1000) + Y bytes identical");
     }
+
+    /// A virtual track of `len` bytes: `head` then zeros; every write is recorded, none is applied.
+    struct Virtual {
+        len: u64,
+        head: Vec<u8>,
+        pos: u64,
+        writes: Vec<(u64, Vec<u8>)>,
+    }
+
+    impl std::io::Read for Virtual {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let left = self.len.saturating_sub(self.pos);
+            let n = (buf.len() as u64).min(left) as usize;
+            for (i, b) in buf[..n].iter_mut().enumerate() {
+                let at = self.pos as usize + i;
+                *b = if (self.pos + i as u64) < self.head.len() as u64 { self.head[at] } else { 0 };
+            }
+            self.pos += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl std::io::Write for Virtual {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push((self.pos, buf.to_vec()));
+            self.pos += buf.len() as u64;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Seek for Virtual {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.pos = match to {
+                std::io::SeekFrom::Start(p) => p,
+                std::io::SeekFrom::End(d) => (self.len as i64 + d) as u64,
+                std::io::SeekFrom::Current(d) => (self.pos as i64 + d) as u64,
+            };
+            Ok(self.pos)
+        }
+    }
+
+    /// C21 (AC 10): `repair_wav_in` refuses a length whose RIFF size does not fit a u32 and writes nothing.
+    #[test]
+    fn m7_10_repair_refuses_a_length_above_u32_and_writes_nothing() {
+        let head = hk();
+        let mut over = Virtual { len: 4_294_967_304, head: head.clone(), pos: 0, writes: Vec::new() };
+        assert_eq!((over.len - 8, u64::from(u32::MAX)), (4_294_967_296, 4_294_967_295), "fixture: L - 8 is one above the largest u32");
+
+        let r = repair_wav_in(&mut over);
+
+        eprintln!("m7_10 L=4294967304 observed: result={r:?} writes={:?}", over.writes);
+        assert!(over.writes.is_empty(), "behavior: no write is issued for L = 4294967304, got {:?}", over.writes);
+        assert!(r.as_ref().is_err_and(|e| e.contains("larger than a WAV header can describe")), "behavior: the error names the limit, got {r:?}");
+
+        let mut fits = Virtual { len: 4_294_967_303, head, pos: 0, writes: Vec::new() };
+        let r = repair_wav_in(&mut fits);
+        eprintln!("m7_10 L=4294967303 observed: result={r:?} writes={:?}", fits.writes);
+        assert_eq!(r, Ok(()), "control: L = 4294967303 follows the ordinary rules");
+        assert!(fits.writes.contains(&(4, u32::MAX.to_le_bytes().to_vec())), "control: R = L - 8 = 4294967295 written at 4");
+    }
 }
