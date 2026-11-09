@@ -45,11 +45,11 @@ Recipe: C; owner Dani keeps them green; a fixture of these tests is not edited t
 ### S1 - recover classifies, skips and refuses (AC 1-13; AC 29 and 30 built here first, plan tag S6)
 
 **C6** - `classify` returns the class of each of the 16 rows of the boundary table, including L 4294967303 with D 0 as REPAIRABLE and L 4294967304 as UNREADABLE through a virtual reader, and writes nothing (AC 29)
-Proof: run m7 | session::m7_tests::m7_29_every_boundary_row_gives_its_class ... ok
+Proof: run m7 | session::m7_cp5::m7_29_every_boundary_row_gives_its_class ... ok
 Fail-first: A at S0 - the stub returns UNREADABLE, so every non-UNREADABLE row fails; UNREADABLE rows pass at S0 and are recorded as measured, not as reds.
 
 **C7** - For every class row, R in {0, 60, D + 60} gives the oracle class: R alone never changes the class (AC 29)
-Proof: run m7 | session::m7_tests::m7_29_riff_size_alone_never_changes_the_class ... ok
+Proof: run m7 | session::m7_cp5::m7_29_riff_size_alone_never_changes_the_class ... ok
 Fail-first: A at S0 - the oracle class differs from the stub's UNREADABLE on every non-UNREADABLE row.
 
 **C8** - The M7 case: mic K(1000) and system E on an `interrupted` session with a dead owner -> exit 0, only bytes 4..8 and 64..68 of `mic.wav` change, mic reads 1000 samples with sample bytes identical, `system.wav` stays 0 bytes with SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`, state `captured`, `error` null, stdout holds `system.wav: empty (0 bytes), no audio captured, skipped` (AC 1)
@@ -107,7 +107,7 @@ Fail-first: U at source, recipe row 9 - predicted `mic.wav` rewritten before `no
 Control: mic V0(1000) + system Y, no write needed, passes on bytes.
 
 **C20** - System T(400, 1000) with mic K(1000) -> exit 1 with `system.wav: declared 1600 bytes but 4000 bytes of samples are present`, both byte-identical, no `recover.journal*` file, state `interrupted`; the declaration is neither shortened nor extended (AC 30, AC 9)
-Proof: run m7 | session::m7_tests::m7_30_a_mismatch_track_refuses_the_whole_recovery ... ok
+Proof: run m7 | session::m7_cp5b::m7_30_a_mismatch_track_refuses_the_whole_recovery ... ok
 Fail-first: U at source, recipe row 30 - predicted exit 0, state `captured`, only 400 of 1000 samples readable.
 Control: T(1000, 400) is REPAIRABLE (C14).
 
