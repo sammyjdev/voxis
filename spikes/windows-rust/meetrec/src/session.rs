@@ -1835,4 +1835,94 @@ mod m7_tests {
         assert_eq!(recover_to("20261109-120701").0, 0, "control: Vt(250, 2) exit");
         assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), vt, "control: Vt(250, 2) byte-identical");
     }
+
+    /// X: 100 bytes, `x` x 40, `data`, `x` x 56; not a product header, oracle UNREADABLE.
+    fn x100() -> Vec<u8> {
+        let mut b = vec![b'x'; 40];
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&[b'x'; 56]);
+        assert!(b.len() == 100 && &b[40..44] == b"data" && b[0] != b'R', "fixture: X is 100 bytes with data at 40 and no RIFF");
+        b
+    }
+
+    /// Y: 100 bytes of `x` with no `data`; oracle UNREADABLE.
+    fn y100() -> Vec<u8> {
+        let b = vec![b'x'; 100];
+        assert!(b.len() == 100 && !b.windows(4).any(|w| w == b"data"), "fixture: Y is 100 bytes with no data tag");
+        b
+    }
+
+    fn journal_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("recover.journal")).collect()
+    }
+
+    /// C17 (AC 8): a non-header file with the bytes `data` in it is never written.
+    #[test]
+    fn m7_8_a_non_header_file_with_data_bytes_is_never_written() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let x = x100();
+        let dir = interrupted_with("m7_8x", "20261109-120800", &[("mic.wav", &mic), ("system.wav", &x)]);
+
+        let (exit, out, err) = recover_to("20261109-120800");
+
+        eprintln!("m7_8x observed: exit={exit} stdout={out:?} stderr={err:?}");
+        assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), x, "behavior: X byte-identical");
+        assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: mic.wav byte-identical when the recovery is refused");
+        assert!(err.lines().any(|l| l.starts_with("system.wav: unreadable (") && l.ends_with(')')), "behavior: stderr names system.wav as unreadable, got {err:?}");
+        assert_eq!(exit, 1, "behavior: exit");
+    }
+
+    /// C18 (AC 8): only a REPAIRABLE track is written, and only its bytes 4..8 and 64..68.
+    #[test]
+    fn m7_8_only_a_repairable_track_is_written_and_only_eight_bytes() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut hf = hk();
+        hf[4..8].copy_from_slice(&60u32.to_le_bytes());
+        let cases = [("E", Vec::new()), ("F(1)", f(1)), ("F(64)", f(64)), ("Hf", hf), ("Hk", hk()), ("V0(1000)", v_with(1000, |_| 0.0))];
+        for (i, (name, sys)) in cases.into_iter().enumerate() {
+            let id = format!("20261109-1208{:02}", 10 + i);
+            let dir = interrupted_with("m7_8", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            let mic_after = std::fs::read(dir.join("mic.wav")).unwrap();
+            let changed = changed_offsets(&mic, &mic_after);
+            eprintln!("m7_8 {name} observed: exit={exit} mic_changed={changed:?} stdout={out:?} stderr={err:?}");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+            assert!(!changed.is_empty() && changed.iter().all(|&o| (4..8).contains(&o) || (64..68).contains(&o)), "behavior: REPAIRABLE mic.wav changes only bytes 4..8 and 64..68: {changed:?}");
+            assert_eq!(exit, 0, "behavior: {name} exit");
+        }
+    }
+
+    /// C19 (AC 9): an UNREADABLE track refuses the whole recovery before any byte is written.
+    #[test]
+    fn m7_9_an_unreadable_track_refuses_the_whole_recovery() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        for (i, (name, sys)) in [("Y", y100()), ("Z(30)", z(30))].into_iter().enumerate() {
+            let id = format!("20261109-1209{i:02}");
+            let dir = interrupted_with("m7_9", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+            let manifest = std::fs::read(dir.join("session.json")).unwrap();
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_9 {name} observed: exit={exit} stdout={out:?} stderr={err:?}");
+            assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: {name} mic.wav byte-identical");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+            assert_eq!(std::fs::read(dir.join("session.json")).unwrap(), manifest, "behavior: {name} session.json byte-identical");
+            assert!(journal_files(&dir).is_empty(), "behavior: {name} no recover.journal* file");
+            assert!(err.lines().any(|l| l.starts_with("system.wav: unreadable (") && l.ends_with(')')), "behavior: {name} stderr names system.wav as unreadable, got {err:?}");
+            assert_eq!(exit, 1, "behavior: {name} exit");
+        }
+        let v0 = v_with(1000, |_| 0.0);
+        let y = y100();
+        let dir = interrupted_with("m7_9c", "20261109-120910", &[("mic.wav", &v0), ("system.wav", &y)]);
+        let _ = recover_to("20261109-120910");
+        assert_eq!((std::fs::read(dir.join("mic.wav")).unwrap(), std::fs::read(dir.join("system.wav")).unwrap()), (v0, y), "control: V0(1000) + Y bytes identical");
+    }
 }
