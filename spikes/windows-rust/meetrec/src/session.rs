@@ -527,6 +527,24 @@ fn write_sizes(name: &str, path: &Path, riff: u64, data: u64) -> Result<(), Stri
     f.flush().map_err(|e| format!("{name}: {e}"))
 }
 
+/// The class of a track, decided by its bytes alone (plan "Track classes and outcomes").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Class {
+    Empty,
+    Fragment,
+    Unreadable,
+    HeaderOnly,
+    Valid,
+    Repairable,
+    Mismatch,
+}
+
+/// The class of the track `r` holds; reads at most the first 68 bytes and the length, writes nothing.
+#[allow(dead_code)]
+pub(crate) fn classify<R: std::io::Read + std::io::Seek>(_r: &mut R) -> Class {
+    Class::Unreadable
+}
+
 /// At most the first 68 bytes of a track.
 pub(crate) fn read_head(path: &Path) -> Result<Vec<u8>, String> {
     use std::io::Read;
