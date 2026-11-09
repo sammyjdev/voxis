@@ -577,10 +577,12 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
                 }
                 tracks.push((f, p, len, holds, head));
             }
+            let mut audio = false;
             for (f, p, len, holds, head) in tracks {
                 // W: bytes of whole samples present; D: the declared data size
                 let w = len.saturating_sub(68) / 4 * 4;
                 let declared = head.get(64..68).map(|b| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+                audio |= holds && w >= 4;
                 let line = match len {
                     0 => format!("{f}: empty (0 bytes), no audio captured, skipped"),
                     1..=67 => format!("{f}: partial header ({len} bytes), no audio captured, skipped"),
@@ -588,7 +590,8 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
                     _ if holds && w >= 4 && declared == Some(w) => continue,
                     _ if holds && w >= 4 && declared.is_some_and(|d| d == 0 || d > w) => {
                         write_sizes(f, &p, 60 + w, w)?;
-                        continue;
+                        let old_riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+                        format!("{f}: riff_size {old_riff} -> {}, data_size {} -> {w}", 60 + w, declared.unwrap_or(0))
                     }
                     _ => {
                         repair_wav(&p)?;
@@ -598,8 +601,13 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
                 writeln!(out, "{line}").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
             }
             update(&d, |m| {
-                m["state"] = json!("captured");
-                m["error"] = Value::Null;
+                if audio {
+                    m["state"] = json!("captured");
+                    m["error"] = Value::Null;
+                } else {
+                    m["state"] = json!("failed");
+                    m["error"] = json!({"code": "no_audio", "message": "no track holds audio; the files were kept", "occurred_at": now()});
+                }
             })
         }),
         "miris.recorder" => arg(0).map(PathBuf::from).and_then(|d| recorder(&d).inspect_err(|e| recorder_failed(&d, e))),
