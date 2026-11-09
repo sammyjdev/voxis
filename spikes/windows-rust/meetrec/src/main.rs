@@ -310,19 +310,36 @@ fn writer(
 /// the writer before it can update the header, so a failure is followed by a
 /// repair of the sizes from the bytes on disk, through `reopen`, which needs
 /// no free space.
-fn write_wav<W, R>(inner: W, rate: u32, rx: mpsc::Receiver<Chunk>, reopen: impl FnOnce() -> std::io::Result<R>) -> Result<(u64, f32), String>
+fn write_wav<W, R>(mut inner: W, rate: u32, rx: mpsc::Receiver<Chunk>, reopen: impl FnOnce() -> std::io::Result<R>) -> Result<(u64, f32), String>
 where
     W: std::io::Write + std::io::Seek,
     R: std::io::Read + std::io::Write + std::io::Seek,
 {
-    let w = hound::WavWriter::new(std::io::BufWriter::new(inner), track_spec(rate)).map_err(|e| format!("disk_write_error: {e}"))?;
-    let result = write_track(w, rate, rx);
+    // the header reaches the file before the first chunk, so a recorder killed before any sample leaves a 68-byte
+    // track; it is written straight to the file and the buffered writer starts at 0 as before, so its writes keep
+    // their alignment and a failure loses no more than before
+    let result = match write_header_through(&mut inner, rate) {
+        Err(e) => Err(format!("disk_write_error: {e}")),
+        Ok(()) => {
+            let w = hound::WavWriter::new(std::io::BufWriter::new(inner), track_spec(rate)).map_err(|e| format!("disk_write_error: {e}"))?;
+            write_track(w, rate, rx)
+        }
+    };
     if result.is_err() {
         if let Err(repair) = reopen().map_err(|e| e.to_string()).and_then(|mut f| session::repair_wav_in(&mut f)) {
             return result.map_err(|e| format!("{e}; header repair failed: {repair}"));
         }
     }
     result
+}
+
+/// The header hound writes for a track, written to `inner` and flushed, then `inner` back at 0.
+fn write_header_through<W: std::io::Write + std::io::Seek>(inner: &mut W, rate: u32) -> std::io::Result<()> {
+    let mut head = std::io::Cursor::new(Vec::new());
+    drop(hound::WavWriter::new(&mut head, track_spec(rate)).map_err(std::io::Error::other)?);
+    inner.write_all(head.get_ref())?;
+    inner.flush()?;
+    inner.seek(std::io::SeekFrom::Start(0)).map(|_| ())
 }
 
 fn track_spec(rate: u32) -> hound::WavSpec {
