@@ -484,7 +484,7 @@ const PRODUCT_HEADER_FIXED: [(usize, &[u8]); 12] = [
 ];
 
 /// True when every fixed header byte that `head` covers (at most its first 68) holds.
-fn product_header_holds(head: &[u8]) -> bool {
+pub(crate) fn product_header_holds(head: &[u8]) -> bool {
     PRODUCT_HEADER_FIXED
         .iter()
         .all(|(at, want)| want.iter().enumerate().all(|(i, w)| head.get(at + i).map_or(true, |b| b == w)))
@@ -502,7 +502,7 @@ fn write_sizes(name: &str, path: &Path, riff: u64, data: u64) -> Result<(), Stri
 }
 
 /// At most the first 68 bytes of a track.
-fn read_head(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_head(path: &Path) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut head = Vec::new();
     std::fs::File::open(path).and_then(|f| f.take(68).read_to_end(&mut head)).map_err(|e| e.to_string())?;

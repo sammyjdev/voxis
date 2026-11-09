@@ -504,7 +504,13 @@ fn track_audio(dir: &Path, file: &str, out: &mut dyn std::io::Write) -> Option<V
     if !path.exists() {
         return None;
     }
-    // a track that cannot be read still stops the transcription here, as before (AC 14 skip and AC 15 settle are later checks)
+    // EMPTY, FRAGMENT and HEADER-ONLY tracks hold no audio: skipped with a line, never read
+    let len = std::fs::metadata(&path).map(|m| m.len()).ok();
+    if len == Some(0) || (len.is_some_and(|l| l <= 71) && session::read_head(&path).is_ok_and(|h| session::product_header_holds(&h))) {
+        writeln!(out, "{file}: no audio, skipped").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
+        return None;
+    }
+    // a track that cannot be read still stops the transcription here, as before (the AC 15 settle is a later check)
     let audio = load_16k(&path).unwrap_or_else(|e| panic!("open wav: {e}"));
     if audio.len() < RATE as usize {
         writeln!(out, "{file}: under 1 s of audio, skipped").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
