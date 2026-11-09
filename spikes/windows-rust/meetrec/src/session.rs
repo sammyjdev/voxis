@@ -1541,4 +1541,102 @@ mod m7_tests {
         assert!(out.lines().any(|l| l == "system.wav: empty (0 bytes), no audio captured, skipped"), "behavior: stdout must hold the empty-track skip line, got {out:?}");
         assert_eq!(exit, 0, "behavior: exit");
     }
+
+    /// Hk: the 68-byte product header a killed writer leaves (R = 0, D = 0); checked against the fixed fields.
+    fn hk() -> Vec<u8> {
+        let (mut b, _) = k(1);
+        b.truncate(68);
+        assert_product_header(&b, "Hk");
+        assert_eq!((b.len(), le32(&b, 4), le32(&b, 64)), (68, 0, 0), "fixture: Hk L, R, D");
+        b
+    }
+
+    /// F(n): the first n bytes (1 to 67) of a product header; oracle FRAGMENT.
+    fn f(n: usize) -> Vec<u8> {
+        let h = hk();
+        let b = h[..n].to_vec();
+        assert_eq!((b.len(), &b[..], "FRAGMENT"), (n, &h[..n], "FRAGMENT"), "fixture: F({n}) length and covered prefix");
+        b
+    }
+
+    /// Z(n): n bytes of ASCII `x`; byte 0 disagrees with `R` of `RIFF`, oracle UNREADABLE.
+    fn z(n: usize) -> Vec<u8> {
+        let b = vec![b'x'; n];
+        assert!(b.len() == n && b[0] != b'R', "fixture: Z({n}) is {n} bytes that disagree with the fixed fields");
+        b
+    }
+
+    /// C9 (AC 2): a partial product header is skipped, kept and named.
+    #[test]
+    fn m7_2_a_partial_header_is_skipped_and_kept() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        for (i, n) in [1usize, 43, 44, 63, 67].into_iter().enumerate() {
+            let sys = f(n);
+            let id = format!("20261109-1202{i:02}");
+            let dir = interrupted_with("m7_2f", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_2f F({n}) observed: exit={exit} stdout={out:?} stderr={err:?}");
+            let line = format!("system.wav: partial header ({n} bytes), no audio captured, skipped");
+            assert!(out.lines().any(|l| l == line), "behavior: F({n}) stdout must hold {line:?}, got {out:?}");
+            assert_eq!(exit, 0, "behavior: F({n}) exit");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: F({n}) system.wav byte-identical");
+        }
+    }
+
+    /// C10 (AC 2, AC 9): a short file that disagrees with the fixed fields is UNREADABLE and refuses the recovery.
+    #[test]
+    fn m7_2_a_short_non_header_file_is_unreadable() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        for (i, n) in [1usize, 30, 67].into_iter().enumerate() {
+            let sys = z(n);
+            let id = format!("20261109-1203{i:02}");
+            let dir = interrupted_with("m7_2z", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+            let manifest = std::fs::read(dir.join("session.json")).unwrap();
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_2z Z({n}) observed: exit={exit} stdout={out:?} stderr={err:?}");
+            assert!(err.lines().any(|l| l.starts_with("system.wav: unreadable (") && l.ends_with(')')), "behavior: Z({n}) stderr must name system.wav as unreadable (<reason>), got {err:?}");
+            assert_eq!(exit, 1, "behavior: Z({n}) exit");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: Z({n}) system.wav byte-identical");
+            assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: Z({n}) mic.wav byte-identical");
+            assert_eq!(std::fs::read(dir.join("session.json")).unwrap(), manifest, "behavior: Z({n}) session.json byte-identical");
+            let records: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("recover.journal")).collect();
+            assert!(records.is_empty(), "behavior: Z({n}) no recover.journal* file");
+        }
+    }
+
+    /// C11 (AC 3): a header-only track (68 to 71 bytes) is skipped and kept.
+    #[test]
+    fn m7_3_a_header_only_track_is_skipped_and_kept() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut hf = hk();
+        hf[4..8].copy_from_slice(&60u32.to_le_bytes());
+        let mut hd = hk();
+        hd[64..68].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut h70 = hk();
+        h70.extend_from_slice(&[0, 0]);
+        let cases = [("Hk", hk()), ("Hf", hf), ("Hd(4294967295)", hd), ("70 bytes", h70)];
+        for (i, (name, sys)) in cases.into_iter().enumerate() {
+            assert_product_header(&sys, name);
+            assert!((68..=71).contains(&sys.len()), "fixture: {name} is HEADER-ONLY by length");
+            let id = format!("20261109-1204{i:02}");
+            let dir = interrupted_with("m7_3", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_3 {name} observed: exit={exit} stdout={out:?} stderr={err:?}");
+            assert!(out.lines().any(|l| l == "system.wav: no samples, skipped"), "behavior: {name} stdout must hold the no-samples line, got {out:?}");
+            assert_eq!(exit, 0, "behavior: {name} exit");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+        }
+    }
 }
