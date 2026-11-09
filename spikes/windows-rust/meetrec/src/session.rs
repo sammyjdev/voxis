@@ -487,6 +487,17 @@ fn product_header_holds(head: &[u8]) -> bool {
         .all(|(at, want)| want.iter().enumerate().all(|(i, w)| head.get(at + i).map_or(true, |b| b == w)))
 }
 
+/// Writes the RIFF size at bytes 4..8 and the data size at bytes 64..68 of a track, and nothing else.
+fn write_sizes(name: &str, path: &Path, riff: u64, data: u64) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+    let too_big = || format!("{name}: unreadable (larger than a WAV header can describe)");
+    let (riff, data) = (u32::try_from(riff).map_err(|_| too_big())?, u32::try_from(data).map_err(|_| too_big())?);
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).map_err(|e| format!("{name}: {e}"))?;
+    f.seek(SeekFrom::Start(4)).and_then(|_| f.write_all(&riff.to_le_bytes())).map_err(|e| format!("{name}: {e}"))?;
+    f.seek(SeekFrom::Start(64)).and_then(|_| f.write_all(&data.to_le_bytes())).map_err(|e| format!("{name}: {e}"))?;
+    f.flush().map_err(|e| format!("{name}: {e}"))
+}
+
 /// At most the first 68 bytes of a track.
 fn read_head(path: &Path) -> Result<Vec<u8>, String> {
     use std::io::Read;
@@ -556,17 +567,26 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
                     continue;
                 }
                 let len = std::fs::metadata(&p).map_err(|e| e.to_string())?.len();
-                let holds = product_header_holds(&read_head(&p)?);
+                let head = read_head(&p)?;
+                let holds = product_header_holds(&head);
                 if (1..=67).contains(&len) && !holds {
                     return Err(format!("{f}: unreadable (not a product WAV header)"));
                 }
-                tracks.push((f, p, len, holds));
+                tracks.push((f, p, len, holds, head));
             }
-            for (f, p, len, holds) in tracks {
+            for (f, p, len, holds, head) in tracks {
+                // W: bytes of whole samples present; D: the declared data size
+                let w = len.saturating_sub(68) / 4 * 4;
+                let declared = head.get(64..68).map(|b| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
                 let line = match len {
                     0 => format!("{f}: empty (0 bytes), no audio captured, skipped"),
                     1..=67 => format!("{f}: partial header ({len} bytes), no audio captured, skipped"),
                     68..=71 if holds => format!("{f}: no samples, skipped"),
+                    _ if holds && w >= 4 && declared == Some(w) => continue,
+                    _ if holds && w >= 4 && declared.is_some_and(|d| d == 0 || d > w) => {
+                        write_sizes(f, &p, 60 + w, w)?;
+                        continue;
+                    }
                     _ => {
                         repair_wav(&p)?;
                         continue;
