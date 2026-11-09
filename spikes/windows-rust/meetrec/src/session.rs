@@ -500,6 +500,12 @@ pub fn cli(cmd: &str, args: &[String]) -> i32 {
 /// `cli` with the owner check passed in, so a test can reach `process` and
 /// `recover` through their real routing.
 fn cli_with(owners: &dyn Owners, cmd: &str, args: &[String]) -> i32 {
+    cli_to(owners, cmd, args, &mut std::io::stdout(), &mut std::io::stderr())
+}
+
+/// `cli_with` with its printed lines going to `out` and its error line to `err`, so a test can
+/// read what the person at the console sees.
+fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> i32 {
     let arg = |i: usize| args.get(i).map(String::as_str).ok_or_else(|| format!("{cmd}: missing argument"));
     let result = match cmd {
         "start" => start(),
@@ -523,7 +529,7 @@ fn cli_with(owners: &dyn Owners, cmd: &str, args: &[String]) -> i32 {
         "miris.recorder" => arg(0).map(PathBuf::from).and_then(|d| recorder(&d).inspect_err(|e| recorder_failed(&d, e))),
         "miris.pipeline" => arg(0).map(PathBuf::from).and_then(|d| match pipeline(&d) {
             Ok(note) => {
-                println!("note: {}", note.display());
+                writeln!(out, "note: {}", note.display()).unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
                 Ok(())
             }
             Err(e) => {
@@ -536,7 +542,7 @@ fn cli_with(owners: &dyn Owners, cmd: &str, args: &[String]) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{e}");
+            writeln!(err, "{e}").unwrap_or_else(|e| panic!("failed printing to stderr: {e}"));
             1
         }
     }
