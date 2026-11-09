@@ -139,7 +139,7 @@ Proof: run m7 | m7_tests::m7_14_load_16k_does_not_panic_on_an_empty_or_partial_t
 Fail-first: U at source, recipe row 14 - predicted panic at `main.rs:443` with `Failed to read enough bytes`; Hf is the control.
 
 **C27** - The per-track read extracted from `transcribe` prints `<file>: no audio, skipped` for 0, 1, 67 and 68 byte tracks and still reads the other track; a VALID track under 1 s keeps `under 1 s of audio, skipped` (AC 14)
-Proof: run m7 | m7_tests::m7_14_the_per_track_read_skips_a_track_with_no_audio ... ok
+Proof: run m7 | m7_s2_tests::m7_14_the_per_track_read_skips_a_track_with_no_audio ... ok
 Fail-first: S at S0, recipe row 14 - predicted panic or no skip line.
 
 **C28** - The per-track read on X and on T(1000, 400) returns an error naming the file and does not panic under `catch_unwind` (AC 15)
@@ -151,15 +151,15 @@ Proof: run m7 | session::m7_tests::m7_15_a_track_read_error_settles_captured_wit
 Fail-first: S at S0, recipe row 15 (pipeline half is row 16's seam) - predicted a panic that bypasses `pipeline_failed`. Feasibility to confirm at S0: if the pipeline cannot reach the per-track read without a model, this check falls back to Vera's integration row and the disposition goes to Otto before its red.
 
 **C30** - The spawn closure returns status 101 and writes nothing while `session.json` says `processing` -> after `process` the state is `captured`, `error.code` `pipeline_error`, the message names exit status 101, every file kept, exit 1 (AC 16)
-Proof: run m7 | session::m7_tests::m7_16_a_failed_child_settles_captured_with_pipeline_error ... ok
+Proof: run m7 | session::m7_s2::m7_16_a_failed_child_settles_captured_with_pipeline_error ... ok
 Fail-first: S at S0, recipe row 16 - predicted state stays `processing`.
 
 **C31** - A child that already wrote `captured` with `provider_timeout` and exits non-zero keeps `provider_timeout` (AC 16)
-Proof: run m7 | session::m7_tests::m7_16_a_child_written_error_code_is_kept ... ok
+Proof: run m7 | session::m7_s2::m7_16_a_child_written_error_code_is_kept ... ok
 Recipe: C at S0 - predicted to pass at S0 (`process` does not touch it); recorded as a control.
 
 **C32** - `process <id>` on an `interrupted` session -> exit 1 with `session <id> is interrupted; run recover first`, `session.json` byte-identical, the spawn closure never called (AC 17)
-Proof: run m7 | session::m7_tests::m7_17_process_refuses_an_interrupted_session ... ok
+Proof: run m7 | session::m7_s2::m7_17_process_refuses_an_interrupted_session ... ok
 Fail-first: S at S0, recipe row 17 - predicted the child is spawned and sets `processing`.
 
 **C33** - `process <id>` on an `interrupted` session with `recover.journal`, and separately with `recover.journal.tmp`, present -> exit 1 with `session <id> has a recovery pending; run recover first`, nothing changed, the closure never called (AC 17)
@@ -188,11 +188,11 @@ Fail-first: U at source, recipe row 20 - predicted buffer length 0 (`BufWriter` 
 ### S4 - nothing is lost (AC 21-23)
 
 **C38** - For each class pair, the byte map of the session folder before and after `recover` differs only in the 8 recover names (`session.json`, `.session.json.tmp`, `recover.lock`, `recover.journal.tmp`, `recover.journal`, `recover.done.json`, `recover.journal.rejected`, and bytes 4..8 and 64..68 of a REPAIRABLE track) (AC 21)
-Proof: run m7 | session::m7_tests::m7_21_recover_changes_only_its_allowlisted_names_and_eight_bytes ... ok
+Proof: run m7 | session::m7_cp4::m7_21_recover_changes_only_its_allowlisted_names_and_eight_bytes ... ok
 Fail-first: U at source, recipe row 21 - predicted red for the refused case (row 9) and killed Hk (row 3); the new names are feature-absent. May be green at HEAD after C11 and C19; the frozen red is the evidence.
 
 **C39** - The byte map before and after `process` (spawn closure writing a transcript) differs only in the 8 process names `transcript.md`, `ata.md`, `minutes.json`, `note.path`, the `.url` shortcut, `session.json`, `.session.json.tmp`, `recover.lock` (AC 21)
-Proof: run m7 | session::m7_tests::m7_21_process_changes_only_its_allowlisted_names ... ok
+Proof: run m7 | session::m7_s2::m7_21_process_changes_only_its_allowlisted_names ... ok
 Recipe: C at S0 for today's names; `recover.lock` is feature-absent until C64.
 
 **C40** - Across every S6 schedule and fault row, the op log of the `RecoverIo` and `ChildIo` doubles holds no delete and no rename onto an existing name for the 5 retained names (`recover.lock`, `recover.journal.tmp`, `recover.journal`, `recover.done.json`, `recover.journal.rejected`); a leftover `.session.json.tmp` is overwritten and never read as data; a leftover `recover.journal.tmp` is read only as a candidate record (AC 21)
@@ -201,7 +201,7 @@ Proof: walk - Rita checks by source that no `remove_file`, `remove_dir` or repla
 Fail-first: S at S0 - feature-absent for the record names; the leftover-tmp half is red where today's code writes the tmp manifest without reading it (control).
 
 **C41** - `recover` twice on mic K(1000) + system E -> second run exit 0, no track byte changes, `recover.done.json` byte-identical (not rewritten) (AC 22)
-Proof: run m7 | session::m7_tests::m7_22_a_second_recover_changes_nothing ... ok
+Proof: run m7 | session::m7_cp4::m7_22_a_second_recover_changes_nothing ... ok
 Fail-first: U at source, recipe row 22 - predicted the first run fails. Control: K(1000) + K(500) twice keeps the bytes today.
 
 **C42** - With a live owner, `recover` and `process` refuse with `session is active: <dir>` and change nothing, and a refused attempt creates at most the 0-byte `recover.lock` (AC 23)
