@@ -541,8 +541,36 @@ pub(crate) enum Class {
 
 /// The class of the track `r` holds; reads at most the first 68 bytes and the length, writes nothing.
 #[allow(dead_code)]
-pub(crate) fn classify<R: std::io::Read + std::io::Seek>(_r: &mut R) -> Class {
-    Class::Unreadable
+pub(crate) fn classify<R: std::io::Read + std::io::Seek>(r: &mut R) -> Class {
+    use std::io::{Read, SeekFrom};
+    let Ok(len) = r.seek(SeekFrom::End(0)) else { return Class::Unreadable };
+    if len == 0 {
+        return Class::Empty;
+    }
+    let mut head = Vec::new();
+    if r.seek(SeekFrom::Start(0)).is_err() || r.by_ref().take(68).read_to_end(&mut head).is_err() {
+        return Class::Unreadable;
+    }
+    let holds = product_header_holds(&head);
+    if len <= 67 {
+        return if holds { Class::Fragment } else { Class::Unreadable };
+    }
+    // a length whose RIFF size does not fit a u32 cannot be described by any header
+    if !holds || head.len() < 68 || len - 8 > u64::from(u32::MAX) {
+        return Class::Unreadable;
+    }
+    if len <= 71 {
+        return Class::HeaderOnly;
+    }
+    let w = (len - 68) / 4 * 4;
+    let d = u64::from(u32::from_le_bytes([head[64], head[65], head[66], head[67]]));
+    if d == w {
+        Class::Valid
+    } else if d == 0 || d > w {
+        Class::Repairable
+    } else {
+        Class::Mismatch
+    }
 }
 
 /// At most the first 68 bytes of a track.
