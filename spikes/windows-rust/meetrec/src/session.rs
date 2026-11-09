@@ -448,6 +448,9 @@ pub(crate) fn repair_wav_in<F: std::io::Read + std::io::Write + std::io::Seek>(f
     if len < 44 {
         return Err(format!("only {len} bytes reached the file, too short to repair"));
     }
+    if len - 8 > u64::from(u32::MAX) {
+        return Err(format!("{len} bytes: larger than a WAV header can describe"));
+    }
     f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut head = Vec::new();
     f.take(4096).read_to_end(&mut head).map_err(|e| e.to_string())?;
