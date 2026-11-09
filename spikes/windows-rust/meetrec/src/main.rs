@@ -497,6 +497,22 @@ struct Line {
     text: String,
 }
 
+/// One track's audio for `transcribe`, read without the model: None when the track is absent or skipped,
+/// with the skip line written to `out`.
+fn track_audio(dir: &Path, file: &str, out: &mut dyn std::io::Write) -> Option<Vec<f32>> {
+    let path = dir.join(file);
+    if !path.exists() {
+        return None;
+    }
+    // a track that cannot be read still stops the transcription here, as before (AC 14 skip and AC 15 settle are later checks)
+    let audio = load_16k(&path).unwrap_or_else(|e| panic!("open wav: {e}"));
+    if audio.len() < RATE as usize {
+        writeln!(out, "{file}: under 1 s of audio, skipped").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
+        return None;
+    }
+    Some(audio)
+}
+
 pub fn transcribe(dir: &Path, model: &str, vad: &str, lang: &str) {
     let mut cp = WhisperContextParameters::default();
     cp.use_gpu(true);
@@ -507,17 +523,10 @@ pub fn transcribe(dir: &Path, model: &str, vad: &str, lang: &str) {
 
     let mut lines = Vec::new();
     for (file, who) in [("mic.wav", "Você"), ("system.wav", "Outros")] {
-        let path = dir.join(file);
-        if !path.exists() {
+        let Some(audio) = track_audio(dir, file, &mut std::io::stdout()) else {
             continue;
-        }
-        // a track that cannot be read still stops the transcription here, as before (AC 14 skip and AC 15 settle are later checks)
-        let audio = load_16k(&path).unwrap_or_else(|e| panic!("open wav: {e}"));
-        if audio.len() < RATE as usize {
-            println!("{file}: under 1 s of audio, skipped");
-            continue;
-        }
-        let mut p = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
+        };
+        let mut p =FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
         p.set_language(Some(lang));
         p.set_print_progress(false);
         p.set_print_realtime(false);
