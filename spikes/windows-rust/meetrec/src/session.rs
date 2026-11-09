@@ -368,12 +368,38 @@ fn finish(dir: &Path, ata: super::minutes::Ata) -> Result<PathBuf, String> {
 /// Runs the pipeline as a `miris.pipeline <dir>` child so the tray can see it
 /// alive; its stdout (ending in "note: ...") goes straight to our caller.
 fn run_pipeline(dir: &Path) -> Result<(), String> {
-    let status = spawn_child("miris.pipeline", dir, false)?.wait().map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("pipeline failed ({status}); see {}", dir.join("session.json").display()))
+    run_pipeline_with(dir, pipeline_child)
+}
+
+/// The `miris.pipeline <dir>` child, run to its exit.
+fn pipeline_child(dir: &Path) -> Result<std::process::ExitStatus, String> {
+    spawn_child("miris.pipeline", dir, false)?.wait().map_err(|e| e.to_string())
+}
+
+/// `process <id>` on its session folder, with the pipeline child passed in so a test can stand for it.
+fn process_with(dir: &Path, owners: &dyn Owners, child: impl FnOnce(&Path) -> Result<std::process::ExitStatus, String>) -> Result<(), String> {
+    guard_inactive(dir, owners)?;
+    if read(dir)?["state"] == "interrupted" {
+        let id = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return Err(format!("session {id} is interrupted; run recover first"));
     }
+    run_pipeline_with(dir, child)
+}
+
+/// `run_pipeline` with the child passed in (as `stop_with` takes `pipeline`). A child that ends non-zero
+/// while the manifest still says `processing` leaves the session `captured` with `pipeline_error`.
+fn run_pipeline_with(dir: &Path, child: impl FnOnce(&Path) -> Result<std::process::ExitStatus, String>) -> Result<(), String> {
+    let status = child(dir)?;
+    if status.success() {
+        return Ok(());
+    }
+    if read(dir)?["state"] == "processing" {
+        update(dir, |m| {
+            m["state"] = json!("captured");
+            m["error"] = json!({"code": "pipeline_error", "message": format!("pipeline ended with {status}"), "occurred_at": now()});
+        })?;
+    }
+    Err(format!("pipeline failed ({status}); see {}", dir.join("session.json").display()))
 }
 
 fn newest_with_state(states: &[&str]) -> Option<PathBuf> {
@@ -448,6 +474,9 @@ pub(crate) fn repair_wav_in<F: std::io::Read + std::io::Write + std::io::Seek>(f
     if len < 44 {
         return Err(format!("only {len} bytes reached the file, too short to repair"));
     }
+    if len - 8 > u64::from(u32::MAX) {
+        return Err(format!("{len} bytes: larger than a WAV header can describe"));
+    }
     f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut head = Vec::new();
     f.take(4096).read_to_end(&mut head).map_err(|e| e.to_string())?;
@@ -463,8 +492,98 @@ pub(crate) fn repair_wav_in<F: std::io::Read + std::io::Write + std::io::Seek>(f
     f.flush().map_err(|e| e.to_string())
 }
 
+/// The bytes every track this recorder writes holds at the start (hound 3.5.1, 32-bit float
+/// mono, extensible header: 68 bytes); sizes, rate, byte rate and channel mask vary.
+const PRODUCT_HEADER_FIXED: [(usize, &[u8]); 12] = [
+    (0, b"RIFF"),
+    (8, b"WAVE"),
+    (12, b"fmt "),
+    (16, &[40, 0, 0, 0]),
+    (20, &[0xFE, 0xFF]),
+    (22, &[1, 0]),
+    (32, &[4, 0]),
+    (34, &[32, 0]),
+    (36, &[22, 0]),
+    (38, &[32, 0]),
+    (44, &[0x03, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]),
+    (60, b"data"),
+];
+
+/// True when every fixed header byte that `head` covers (at most its first 68) holds.
+pub(crate) fn product_header_holds(head: &[u8]) -> bool {
+    PRODUCT_HEADER_FIXED
+        .iter()
+        .all(|(at, want)| want.iter().enumerate().all(|(i, w)| head.get(at + i).map_or(true, |b| b == w)))
+}
+
+/// Writes the RIFF size at bytes 4..8 and the data size at bytes 64..68 of a track, and nothing else.
+fn write_sizes(name: &str, path: &Path, riff: u64, data: u64) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+    let too_big = || format!("{name}: unreadable (larger than a WAV header can describe)");
+    let (riff, data) = (u32::try_from(riff).map_err(|_| too_big())?, u32::try_from(data).map_err(|_| too_big())?);
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).map_err(|e| format!("{name}: {e}"))?;
+    f.seek(SeekFrom::Start(4)).and_then(|_| f.write_all(&riff.to_le_bytes())).map_err(|e| format!("{name}: {e}"))?;
+    f.seek(SeekFrom::Start(64)).and_then(|_| f.write_all(&data.to_le_bytes())).map_err(|e| format!("{name}: {e}"))?;
+    f.flush().map_err(|e| format!("{name}: {e}"))
+}
+
+/// The class of a track, decided by its bytes alone (plan "Track classes and outcomes").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Class {
+    Empty,
+    Fragment,
+    Unreadable,
+    HeaderOnly,
+    Valid,
+    Repairable,
+    Mismatch,
+}
+
+/// The class of the track `r` holds; reads at most the first 68 bytes and the length, writes nothing.
+pub(crate) fn classify<R: std::io::Read + std::io::Seek>(r: &mut R) -> Class {
+    use std::io::{Read, SeekFrom};
+    let Ok(len) = r.seek(SeekFrom::End(0)) else { return Class::Unreadable };
+    if len == 0 {
+        return Class::Empty;
+    }
+    let mut head = Vec::new();
+    if r.seek(SeekFrom::Start(0)).is_err() || r.by_ref().take(68).read_to_end(&mut head).is_err() {
+        return Class::Unreadable;
+    }
+    let holds = product_header_holds(&head);
+    if len <= 67 {
+        return if holds { Class::Fragment } else { Class::Unreadable };
+    }
+    // a length whose RIFF size does not fit a u32 cannot be described by any header
+    if !holds || head.len() < 68 || len - 8 > u64::from(u32::MAX) {
+        return Class::Unreadable;
+    }
+    if len <= 71 {
+        return Class::HeaderOnly;
+    }
+    let w = (len - 68) / 4 * 4;
+    let d = u64::from(u32::from_le_bytes([head[64], head[65], head[66], head[67]]));
+    if d == w {
+        Class::Valid
+    } else if d == 0 || d > w {
+        Class::Repairable
+    } else {
+        Class::Mismatch
+    }
+}
+
+/// At most the first 68 bytes of a track.
+pub(crate) fn read_head(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    std::fs::File::open(path).and_then(|f| f.take(68).read_to_end(&mut head)).map_err(|e| e.to_string())?;
+    Ok(head)
+}
+
 /// A killed recorder leaves WAV headers with zero sizes; hound writes the
 /// 44-byte canonical header for f32 mono, so sizes follow from the file length.
+// recover no longer calls this: only REPAIRABLE tracks are written, through write_sizes; kept for its existing tests
+#[cfg_attr(not(test), allow(dead_code))]
 fn repair_wav(path: &Path) -> Result<(), String> {
     use std::io::{Seek, SeekFrom, Write};
     let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
@@ -500,30 +619,74 @@ pub fn cli(cmd: &str, args: &[String]) -> i32 {
 /// `cli` with the owner check passed in, so a test can reach `process` and
 /// `recover` through their real routing.
 fn cli_with(owners: &dyn Owners, cmd: &str, args: &[String]) -> i32 {
+    cli_to(owners, cmd, args, &mut std::io::stdout(), &mut std::io::stderr())
+}
+
+/// `cli_with` with its printed lines going to `out` and its error line to `err`, so a test can
+/// read what the person at the console sees.
+fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> i32 {
     let arg = |i: usize| args.get(i).map(String::as_str).ok_or_else(|| format!("{cmd}: missing argument"));
     let result = match cmd {
         "start" => start(),
         "stop" => stop(),
-        "process" => arg(0).and_then(session_dir).and_then(|d| {
-            guard_inactive(&d, owners)?;
-            run_pipeline(&d)
-        }),
+        "process" => arg(0).and_then(session_dir).and_then(|d| process_with(&d, owners, pipeline_child)),
         "recover" => arg(0).and_then(session_dir).and_then(|d| {
             guard_inactive(&d, owners)?;
+            // every track is looked at before any is written, so a refusal changes nothing
+            let mut tracks = Vec::new();
             for f in ["mic.wav", "system.wav"] {
-                if d.join(f).exists() {
-                    repair_wav(&d.join(f))?;
+                let p = d.join(f);
+                if !p.exists() {
+                    continue;
+                }
+                let len = std::fs::metadata(&p).map_err(|e| e.to_string())?.len();
+                let head = read_head(&p)?;
+                let class = classify(&mut std::fs::File::open(&p).map_err(|e| format!("{f}: {e}"))?);
+                // W: bytes of whole samples present; D: the declared data size
+                let w = len.saturating_sub(68) / 4 * 4;
+                let declared = head.get(64..68).map_or(0, |b| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+                match class {
+                    Class::Unreadable if product_header_holds(&head) && len >= 68 => return Err(format!("{f}: unreadable (larger than a WAV header can describe)")),
+                    Class::Unreadable => return Err(format!("{f}: unreadable (not a product WAV header)")),
+                    Class::Mismatch => return Err(format!("{f}: declared {declared} bytes but {w} bytes of samples are present")),
+                    _ => tracks.push((f, p, len, class, head, w, declared)),
                 }
             }
+            let mut audio = false;
+            for (f, p, len, class, head, w, declared) in tracks {
+                let line = match class {
+                    Class::Empty => format!("{f}: empty (0 bytes), no audio captured, skipped"),
+                    Class::Fragment => format!("{f}: partial header ({len} bytes), no audio captured, skipped"),
+                    Class::HeaderOnly => format!("{f}: no samples, skipped"),
+                    Class::Valid => {
+                        audio = true;
+                        continue;
+                    }
+                    Class::Repairable => {
+                        audio = true;
+                        write_sizes(f, &p, 60 + w, w)?;
+                        let old_riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+                        format!("{f}: riff_size {old_riff} -> {}, data_size {declared} -> {w}", 60 + w)
+                    }
+                    // refused in the first loop, before any track was written
+                    Class::Unreadable | Class::Mismatch => unreachable!("refused before any write"),
+                };
+                writeln!(out, "{line}").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
+            }
             update(&d, |m| {
-                m["state"] = json!("captured");
-                m["error"] = Value::Null;
+                if audio {
+                    m["state"] = json!("captured");
+                    m["error"] = Value::Null;
+                } else {
+                    m["state"] = json!("failed");
+                    m["error"] = json!({"code": "no_audio", "message": "no track holds audio; the files were kept", "occurred_at": now()});
+                }
             })
         }),
         "miris.recorder" => arg(0).map(PathBuf::from).and_then(|d| recorder(&d).inspect_err(|e| recorder_failed(&d, e))),
         "miris.pipeline" => arg(0).map(PathBuf::from).and_then(|d| match pipeline(&d) {
             Ok(note) => {
-                println!("note: {}", note.display());
+                writeln!(out, "note: {}", note.display()).unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
                 Ok(())
             }
             Err(e) => {
@@ -536,7 +699,7 @@ fn cli_with(owners: &dyn Owners, cmd: &str, args: &[String]) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{e}");
+            writeln!(err, "{e}").unwrap_or_else(|e| panic!("failed printing to stderr: {e}"));
             1
         }
     }
@@ -1287,5 +1450,1180 @@ mod tests {
         assert!(out.lines().any(|l| l.strip_prefix("stopped ").is_some_and(|t| t.parse::<u128>().is_ok())), "{out}");
         assert!(marks.lines().any(|l| l.strip_prefix("transcript_ready ").is_some_and(|t| t.parse::<u128>().is_ok())), "{marks}");
         assert_eq!(read(&dir).unwrap()["transcript_ready"], true);
+    }
+}
+
+// M7 test-only module (checks C8 and C12 of .specs/features/m7-silent-track-recovery/checks.md).
+// Appended to session.rs; it adds tests only, no production line. Fixtures are synthetic bytes,
+// created in a new folder under the run's TEMP and never removed by the test.
+#[cfg(test)]
+mod m7_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// The expected class of a fixture, written from the plan's truth table; never computed by product code.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Oracle {
+        Empty,
+        Repairable,
+    }
+
+    const IEEE_FLOAT_GUID: [u8; 16] = [0x03, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71];
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn le32(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+    }
+
+    fn le16(b: &[u8], at: usize) -> u16 {
+        u16::from_le_bytes([b[at], b[at + 1]])
+    }
+
+    fn sha256_hex(b: &[u8]) -> String {
+        Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// The fixed fields of the product header (plan, "Track classes and outcomes").
+    fn assert_product_header(b: &[u8], what: &str) {
+        assert!(b.len() >= 68, "fixture: {what} is {} bytes, below the 68-byte product header", b.len());
+        assert_eq!(&b[0..4], b"RIFF", "fixture: {what} bytes 0..4");
+        assert_eq!(&b[8..12], b"WAVE", "fixture: {what} bytes 8..12");
+        assert_eq!(&b[12..16], b"fmt ", "fixture: {what} bytes 12..16");
+        assert_eq!(le32(b, 16), 40, "fixture: {what} bytes 16..20");
+        assert_eq!(le16(b, 20), 0xFFFE, "fixture: {what} bytes 20..22");
+        assert_eq!(le16(b, 22), 1, "fixture: {what} bytes 22..24");
+        assert_eq!(le16(b, 32), 4, "fixture: {what} bytes 32..34");
+        assert_eq!(le16(b, 34), 32, "fixture: {what} bytes 34..36");
+        assert_eq!(le16(b, 36), 22, "fixture: {what} bytes 36..38");
+        assert_eq!(le16(b, 38), 32, "fixture: {what} bytes 38..40");
+        assert_eq!(&b[44..60], &IEEE_FLOAT_GUID, "fixture: {what} bytes 44..60");
+        assert_eq!(&b[60..64], b"data", "fixture: {what} bytes 60..64");
+    }
+
+    /// K(n): n samples as the recorder writes them (hound 3.5.1, 32-bit float mono), then R = 0 and D = 0.
+    fn k(n: usize) -> (Vec<u8>, Oracle) {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = hound::WavWriter::new(&mut c, spec).unwrap();
+            for i in 0..n {
+                w.write_sample(((i % 97) as f32 / 97.0) - 0.5).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let mut b = c.into_inner();
+        assert_product_header(&b, "V(n) before the kill");
+        assert_eq!(le32(&b, 64) as usize, 4 * n, "fixture: V({n}) D before the kill");
+        assert_eq!(le32(&b, 4) as usize, 60 + 4 * n, "fixture: V({n}) R before the kill");
+        b[4..8].copy_from_slice(&0u32.to_le_bytes());
+        b[64..68].copy_from_slice(&0u32.to_le_bytes());
+        (b, Oracle::Repairable)
+    }
+
+    /// Fixture assertion for K(n): L, D, R, W and the oracle class of the truth table.
+    fn assert_k(b: &[u8], n: usize, class: Oracle) {
+        assert_product_header(b, "K(n)");
+        let l = b.len();
+        let w = (l - 68) - (l - 68) % 4;
+        assert_eq!(l, 68 + 4 * n, "fixture: K({n}) length L");
+        assert_eq!(le32(b, 64), 0, "fixture: K({n}) D (bytes 64..68)");
+        assert_eq!(le32(b, 4), 0, "fixture: K({n}) R (bytes 4..8)");
+        assert_eq!(w, 4 * n, "fixture: K({n}) W");
+        // truth table: product header, L >= 72, W >= 4, D = 0 -> REPAIRABLE
+        assert!(l >= 72 && w >= 4, "fixture: K({n}) is too short for REPAIRABLE");
+        assert_eq!(class, Oracle::Repairable, "fixture: K({n}) oracle class");
+    }
+
+    /// E: the empty file.
+    fn e() -> (Vec<u8>, Oracle) {
+        (Vec::new(), Oracle::Empty)
+    }
+
+    /// A new folder under the run's TEMP; created new, never removed by the test.
+    fn run_folder(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = root.join(format!("{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        assert!(dir.starts_with(&root), "fixture: {} is outside {}", dir.display(), root.display());
+        dir
+    }
+
+    /// A schema 1 manifest in `<home>/sessions/<id>`, left `interrupted` by a dead recorder.
+    fn session_m7(home: &Path, id: &str, state: &str) -> PathBuf {
+        let dir = home.join("sessions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, &json!({
+            "schema_version": 1, "session_id": id, "state": state, "created_at": "x", "updated_at": "x",
+            "recorder_pid": 4242, "processing_pid": null, "channels": {"mic": null, "system": null},
+            "error": {"code": "owner_died", "message": "x"}, "note_path": null, "transcript_ready": false,
+        }))
+        .unwrap();
+        dir
+    }
+
+    /// No owner of any session is alive.
+    struct Gone;
+
+    impl Owners for Gone {
+        fn live(&self, _: Option<u64>, _: &str, _: &Path) -> bool {
+            false
+        }
+        fn end(&self, _: u64) -> bool {
+            false
+        }
+    }
+
+    fn changed_offsets(before: &[u8], after: &[u8]) -> Vec<usize> {
+        (0..before.len().min(after.len())).filter(|&i| before[i] != after[i]).collect()
+    }
+
+    /// C8 (AC 1): mic K(1000) and system E on an interrupted session with a dead owner.
+    #[test]
+    fn m7_1_recover_skips_an_empty_system_track_and_repairs_mic() {
+        let _one_at_a_time = crate::test_lock();
+        let home = run_folder("m7_1");
+        let id = "20261109-120001";
+        let dir = session_m7(&home, id, "interrupted");
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let (sys, sys_class) = e();
+        assert_eq!((sys.len(), sys_class), (0, Oracle::Empty), "fixture: E length and oracle class");
+        std::fs::write(dir.join("mic.wav"), &mic).unwrap();
+        std::fs::write(dir.join("system.wav"), &sys).unwrap();
+        std::env::set_var("MIRIS_HOME", &home);
+
+        let exit = cli_with(&Gone, "recover", &[id.to_owned()]);
+
+        let m = read(&dir).unwrap();
+        let mic_after = std::fs::read(dir.join("mic.wav")).unwrap();
+        let sys_after = std::fs::read(dir.join("system.wav")).unwrap();
+        let changed = changed_offsets(&mic, &mic_after);
+        let samples = hound::WavReader::open(dir.join("mic.wav")).map(|r| r.len());
+        eprintln!(
+            "m7_1 observed: exit={exit} state={} error={} mic_len={}->{} mic_changed_offsets={changed:?} mic_R={} mic_D={} mic_samples={samples:?} system_len={} system_sha256={}",
+            m["state"],
+            m["error"],
+            mic.len(),
+            mic_after.len(),
+            le32(&mic_after, 4),
+            le32(&mic_after, 64),
+            sys_after.len(),
+            sha256_hex(&sys_after)
+        );
+
+        assert_eq!(exit, 0, "behavior: recover of mic REPAIRABLE + system EMPTY must exit 0");
+        assert_eq!(m["state"], "captured", "behavior: state after recover");
+        assert!(m["error"].is_null(), "behavior: error must be null, got {}", m["error"]);
+        assert_eq!(mic_after.len(), mic.len(), "behavior: mic.wav length unchanged");
+        assert!(changed.iter().all(|&i| (4..8).contains(&i) || (64..68).contains(&i)), "behavior: only bytes 4..8 and 64..68 of mic.wav may change: {changed:?}");
+        assert_eq!(&mic_after[68..], &mic[68..], "behavior: mic.wav sample bytes identical");
+        assert_eq!(samples.as_ref().ok(), Some(&1000), "behavior: mic.wav reads 1000 samples");
+        assert_eq!(sys_after.len(), 0, "behavior: system.wav stays 0 bytes");
+        assert_eq!(sha256_hex(&sys_after), EMPTY_SHA256, "behavior: system.wav SHA-256");
+    }
+
+    /// C12 (AC 4), the control of C8: mic K(1000) and system K(500), both repaired.
+    #[test]
+    fn m7_4_two_repairable_tracks_are_both_repaired() {
+        let _one_at_a_time = crate::test_lock();
+        let home = run_folder("m7_4");
+        let id = "20261109-120004";
+        let dir = session_m7(&home, id, "interrupted");
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let (sys, sys_class) = k(500);
+        assert_k(&sys, 500, sys_class);
+        std::fs::write(dir.join("mic.wav"), &mic).unwrap();
+        std::fs::write(dir.join("system.wav"), &sys).unwrap();
+        std::env::set_var("MIRIS_HOME", &home);
+
+        let exit = cli_with(&Gone, "recover", &[id.to_owned()]);
+
+        let m = read(&dir).unwrap();
+        eprintln!("m7_4 observed: exit={exit} state={} error={}", m["state"], m["error"]);
+        assert_eq!(exit, 0, "behavior: recover of two REPAIRABLE tracks exits 0");
+        assert_eq!(m["state"], "captured", "behavior: state after recover");
+        for (name, before, n) in [("mic.wav", &mic, 1000u32), ("system.wav", &sys, 500u32)] {
+            let after = std::fs::read(dir.join(name)).unwrap();
+            let changed = changed_offsets(before, &after);
+            assert_eq!(after.len(), before.len(), "behavior: {name} length unchanged");
+            assert!(changed.iter().all(|&i| (4..8).contains(&i) || (64..68).contains(&i)), "behavior: {name} changed outside the size fields: {changed:?}");
+            assert_eq!(&after[68..], &before[68..], "behavior: {name} sample bytes identical");
+            assert_eq!(le32(&after, 64), 4 * n, "behavior: {name} D' = W");
+            assert_eq!(le32(&after, 4), 60 + 4 * n, "behavior: {name} R' = 60 + W");
+            assert_eq!(hound::WavReader::open(dir.join(name)).unwrap().len(), n, "behavior: {name} sample count");
+        }
+    }
+
+    // ---------------------------------------------------------------- CP3 S1 slices (C8 onward)
+
+    /// An interrupted session under a new MIRIS_HOME holding the given tracks; the caller holds `test_lock`.
+    fn interrupted_with(tag: &str, id: &str, tracks: &[(&str, &[u8])]) -> PathBuf {
+        let home = run_folder(tag);
+        let dir = session_m7(&home, id, "interrupted");
+        for (name, bytes) in tracks {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        std::env::set_var("MIRIS_HOME", &home);
+        dir
+    }
+
+    /// `recover <id>` through `cli_to`: (exit, stdout, stderr).
+    fn recover_to(id: &str) -> (i32, String, String) {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let exit = cli_to(&Gone, "recover", &[id.to_owned()], &mut out, &mut err);
+        (exit, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned())
+    }
+
+    /// C8 (AC 1), printed half: the skip line for the empty system track.
+    #[test]
+    fn m7_1_recover_prints_that_the_empty_system_track_is_skipped() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let (sys, sys_class) = e();
+        assert_eq!((sys.len(), sys_class), (0, Oracle::Empty), "fixture: E length and oracle class");
+        let _dir = interrupted_with("m7_1p", "20261109-120011", &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+        let (exit, out, err) = recover_to("20261109-120011");
+
+        eprintln!("m7_1p observed: exit={exit} stdout={out:?} stderr={err:?}");
+        assert!(out.lines().any(|l| l == "system.wav: empty (0 bytes), no audio captured, skipped"), "behavior: stdout must hold the empty-track skip line, got {out:?}");
+        assert_eq!(exit, 0, "behavior: exit");
+    }
+
+    /// Hk: the 68-byte product header a killed writer leaves (R = 0, D = 0); checked against the fixed fields.
+    fn hk() -> Vec<u8> {
+        let (mut b, _) = k(1);
+        b.truncate(68);
+        assert_product_header(&b, "Hk");
+        assert_eq!((b.len(), le32(&b, 4), le32(&b, 64)), (68, 0, 0), "fixture: Hk L, R, D");
+        b
+    }
+
+    /// F(n): the first n bytes (1 to 67) of a product header; oracle FRAGMENT.
+    fn f(n: usize) -> Vec<u8> {
+        let h = hk();
+        let b = h[..n].to_vec();
+        assert_eq!((b.len(), &b[..], "FRAGMENT"), (n, &h[..n], "FRAGMENT"), "fixture: F({n}) length and covered prefix");
+        b
+    }
+
+    /// Z(n): n bytes of ASCII `x`; byte 0 disagrees with `R` of `RIFF`, oracle UNREADABLE.
+    fn z(n: usize) -> Vec<u8> {
+        let b = vec![b'x'; n];
+        assert!(b.len() == n && b[0] != b'R', "fixture: Z({n}) is {n} bytes that disagree with the fixed fields");
+        b
+    }
+
+    /// C9 (AC 2): a partial product header is skipped, kept and named.
+    #[test]
+    fn m7_2_a_partial_header_is_skipped_and_kept() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        for (i, n) in [1usize, 43, 44, 63, 67].into_iter().enumerate() {
+            let sys = f(n);
+            let id = format!("20261109-1202{i:02}");
+            let dir = interrupted_with("m7_2f", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_2f F({n}) observed: exit={exit} stdout={out:?} stderr={err:?}");
+            let line = format!("system.wav: partial header ({n} bytes), no audio captured, skipped");
+            assert!(out.lines().any(|l| l == line), "behavior: F({n}) stdout must hold {line:?}, got {out:?}");
+            assert_eq!(exit, 0, "behavior: F({n}) exit");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: F({n}) system.wav byte-identical");
+        }
+    }
+
+    /// C10 (AC 2, AC 9): a short file that disagrees with the fixed fields is UNREADABLE and refuses the recovery.
+    #[test]
+    fn m7_2_a_short_non_header_file_is_unreadable() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        for (i, n) in [1usize, 30, 67].into_iter().enumerate() {
+            let sys = z(n);
+            let id = format!("20261109-1203{i:02}");
+            let dir = interrupted_with("m7_2z", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+            let manifest = std::fs::read(dir.join("session.json")).unwrap();
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_2z Z({n}) observed: exit={exit} stdout={out:?} stderr={err:?}");
+            assert!(err.lines().any(|l| l.starts_with("system.wav: unreadable (") && l.ends_with(')')), "behavior: Z({n}) stderr must name system.wav as unreadable (<reason>), got {err:?}");
+            assert_eq!(exit, 1, "behavior: Z({n}) exit");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: Z({n}) system.wav byte-identical");
+            assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: Z({n}) mic.wav byte-identical");
+            assert_eq!(std::fs::read(dir.join("session.json")).unwrap(), manifest, "behavior: Z({n}) session.json byte-identical");
+            let records: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("recover.journal")).collect();
+            assert!(records.is_empty(), "behavior: Z({n}) no recover.journal* file");
+        }
+    }
+
+    /// C11 (AC 3): a header-only track (68 to 71 bytes) is skipped and kept.
+    #[test]
+    fn m7_3_a_header_only_track_is_skipped_and_kept() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut hf = hk();
+        hf[4..8].copy_from_slice(&60u32.to_le_bytes());
+        let mut hd = hk();
+        hd[64..68].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut h70 = hk();
+        h70.extend_from_slice(&[0, 0]);
+        let cases = [("Hk", hk()), ("Hf", hf), ("Hd(4294967295)", hd), ("70 bytes", h70)];
+        for (i, (name, sys)) in cases.into_iter().enumerate() {
+            assert_product_header(&sys, name);
+            assert!((68..=71).contains(&sys.len()), "fixture: {name} is HEADER-ONLY by length");
+            let id = format!("20261109-1204{i:02}");
+            let dir = interrupted_with("m7_3", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_3 {name} observed: exit={exit} stdout={out:?} stderr={err:?}");
+            assert!(out.lines().any(|l| l == "system.wav: no samples, skipped"), "behavior: {name} stdout must hold the no-samples line, got {out:?}");
+            assert_eq!(exit, 0, "behavior: {name} exit");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+        }
+    }
+
+    /// A finalized product WAV of n samples from `sample(i)`; checked against the fixed fields, D = 4n, R = 60 + 4n.
+    fn v_with(n: usize, sample: impl Fn(usize) -> f32) -> Vec<u8> {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = hound::WavWriter::new(&mut c, spec).unwrap();
+            for i in 0..n {
+                w.write_sample(sample(i)).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let b = c.into_inner();
+        assert_product_header(&b, "V(n)");
+        assert_eq!((b.len(), le32(&b, 64) as usize, le32(&b, 4) as usize), (68 + 4 * n, 4 * n, 60 + 4 * n), "fixture: V({n}) L, D, R");
+        b
+    }
+
+    fn v(n: usize) -> Vec<u8> {
+        v_with(n, |i| ((i % 89) as f32 / 89.0) - 0.5)
+    }
+
+    /// The sample count hound reads, reading every sample.
+    fn samples_of(path: &Path) -> Result<u32, String> {
+        hound::WavReader::open(path).map_err(|e| e.to_string()).and_then(|r| {
+            let n = r.len();
+            r.into_samples::<f32>().collect::<Result<Vec<_>, _>>().map(|_| n).map_err(|e| e.to_string())
+        })
+    }
+
+    /// C13 (AC 5): a VALID track (all-zero, audible, or with a stale RIFF size) is kept and not called empty.
+    #[test]
+    fn m7_5_a_valid_track_silent_audible_or_stale_riff_is_kept() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut vr = v(400);
+        vr[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!((le32(&vr, 4), le32(&vr, 64), vr.len()), (0, 1600, 1668), "fixture: Vr(400) R, D, L (VALID: D = W)");
+        let cases = [("V0(48000)", v_with(48_000, |_| 0.0)), ("V(1000)", v(1000)), ("Vr(400)", vr)];
+        for (i, (name, sys)) in cases.into_iter().enumerate() {
+            let id = format!("20261109-1205{i:02}");
+            let dir = interrupted_with("m7_5", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_5 {name} observed: exit={exit} stdout={out:?} stderr={err:?}");
+            assert_eq!(exit, 0, "behavior: {name} exit");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+            assert!(!out.contains("system.wav: empty"), "behavior: {name} is not reported empty: {out:?}");
+            assert_eq!(read(&dir).unwrap()["state"], "captured", "behavior: {name} state");
+        }
+    }
+
+    /// C14 (AC 6): a track declaring more samples than present gets D = W and R = 60 + W, samples untouched.
+    #[test]
+    fn m7_6_a_truncated_track_declares_exactly_the_samples_present() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut t = v(400);
+        t[64..68].copy_from_slice(&4000u32.to_le_bytes());
+        t[4..8].copy_from_slice(&4060u32.to_le_bytes());
+        assert_eq!((le32(&t, 64), le32(&t, 4), t.len(), t.len() - 68), (4000, 4060, 1668, 1600), "fixture: T(1000, 400) D, R, L, W (REPAIRABLE: D > W)");
+        for (i, (name, sys)) in [("T(1000, 400)", t), ("T(400, 400)", v(400))].into_iter().enumerate() {
+            let id = format!("20261109-1206{i:02}");
+            let dir = interrupted_with("m7_6", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            let after = std::fs::read(dir.join("system.wav")).unwrap();
+            let n = samples_of(&dir.join("system.wav"));
+            eprintln!("m7_6 {name} observed: exit={exit} D={} R={} samples={n:?} stdout={out:?} stderr={err:?}", le32(&after, 64), le32(&after, 4));
+            assert_eq!(exit, 0, "behavior: {name} exit");
+            assert_eq!((le32(&after, 64), le32(&after, 4)), (1600, 1660), "behavior: {name} D and R after recover");
+            assert_eq!(&after[68..], &sys[68..], "behavior: {name} sample bytes identical");
+            assert_eq!(n, Ok(400), "behavior: {name} reads 400 samples");
+        }
+    }
+
+    /// C15 (AC 6): a header declaring 1000 samples with none present is HEADER-ONLY and kept.
+    #[test]
+    fn m7_6_a_declaration_with_no_samples_is_header_only() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut hd = hk();
+        hd[64..68].copy_from_slice(&4000u32.to_le_bytes());
+        assert_eq!((hd.len(), le32(&hd, 64)), (68, 4000), "fixture: Hd(4000) L, D (HEADER-ONLY)");
+        let dir = interrupted_with("m7_6h", "20261109-120610", &[("mic.wav", &mic), ("system.wav", &hd)]);
+
+        let (exit, out, err) = recover_to("20261109-120610");
+
+        eprintln!("m7_6h observed: exit={exit} stdout={out:?} stderr={err:?}");
+        assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), hd, "behavior: Hd(4000) byte-identical");
+        assert!(out.lines().any(|l| l == "system.wav: no samples, skipped"), "behavior: Hd(4000) no-samples line, got {out:?}");
+        assert_eq!(exit, 0, "behavior: exit");
+    }
+
+    /// C16 (AC 7): trailing bytes after the last whole sample stay; a second recover writes nothing.
+    #[test]
+    fn m7_7_trailing_bytes_stay_and_a_second_recover_writes_nothing() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let (mut kt, kt_class) = k(250);
+        assert_k(&kt, 250, kt_class);
+        kt.extend_from_slice(&[0x11, 0x22]);
+        assert_eq!((kt.len(), le32(&kt, 64)), (1070, 0), "fixture: Kt(250, 2) L, D (REPAIRABLE)");
+        let dir = interrupted_with("m7_7", "20261109-120700", &[("mic.wav", &mic), ("system.wav", &kt)]);
+
+        let (exit, out, err) = recover_to("20261109-120700");
+
+        let after = std::fs::read(dir.join("system.wav")).unwrap();
+        eprintln!("m7_7 Kt observed: exit={exit} len={} D={} R={} stdout={out:?} stderr={err:?}", after.len(), le32(&after, 64), le32(&after, 4));
+        assert_eq!(exit, 0, "behavior: Kt(250, 2) exit");
+        assert_eq!((after.len(), le32(&after, 64), le32(&after, 4)), (1070, 1000, 1060), "behavior: Kt(250, 2) L, D, R after recover");
+        assert_eq!(&after[68..], &kt[68..], "behavior: Kt(250, 2) samples and trailing bytes unchanged");
+        assert_eq!(samples_of(&dir.join("system.wav")), Ok(250), "behavior: Kt(250, 2) reads 250 samples");
+        let once = std::fs::read(dir.join("system.wav")).unwrap();
+        let (again, _, _) = recover_to("20261109-120700");
+        assert_eq!((again, std::fs::read(dir.join("system.wav")).unwrap()), (0, once), "behavior: a second recover writes nothing");
+
+        let mut vt = v(250);
+        vt.extend_from_slice(&[0x33, 0x44]);
+        let dir = interrupted_with("m7_7v", "20261109-120701", &[("mic.wav", &mic), ("system.wav", &vt)]);
+        assert_eq!(recover_to("20261109-120701").0, 0, "control: Vt(250, 2) exit");
+        assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), vt, "control: Vt(250, 2) byte-identical");
+    }
+
+    /// X: 100 bytes, `x` x 40, `data`, `x` x 56; not a product header, oracle UNREADABLE.
+    fn x100() -> Vec<u8> {
+        let mut b = vec![b'x'; 40];
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&[b'x'; 56]);
+        assert!(b.len() == 100 && &b[40..44] == b"data" && b[0] != b'R', "fixture: X is 100 bytes with data at 40 and no RIFF");
+        b
+    }
+
+    /// Y: 100 bytes of `x` with no `data`; oracle UNREADABLE.
+    fn y100() -> Vec<u8> {
+        let b = vec![b'x'; 100];
+        assert!(b.len() == 100 && !b.windows(4).any(|w| w == b"data"), "fixture: Y is 100 bytes with no data tag");
+        b
+    }
+
+    fn journal_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("recover.journal")).collect()
+    }
+
+    /// C17 (AC 8): a non-header file with the bytes `data` in it is never written.
+    #[test]
+    fn m7_8_a_non_header_file_with_data_bytes_is_never_written() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let x = x100();
+        let dir = interrupted_with("m7_8x", "20261109-120800", &[("mic.wav", &mic), ("system.wav", &x)]);
+
+        let (exit, out, err) = recover_to("20261109-120800");
+
+        eprintln!("m7_8x observed: exit={exit} stdout={out:?} stderr={err:?}");
+        assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), x, "behavior: X byte-identical");
+        assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: mic.wav byte-identical when the recovery is refused");
+        assert!(err.lines().any(|l| l.starts_with("system.wav: unreadable (") && l.ends_with(')')), "behavior: stderr names system.wav as unreadable, got {err:?}");
+        assert_eq!(exit, 1, "behavior: exit");
+    }
+
+    /// C18 (AC 8): only a REPAIRABLE track is written, and only its bytes 4..8 and 64..68.
+    #[test]
+    fn m7_8_only_a_repairable_track_is_written_and_only_eight_bytes() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let mut hf = hk();
+        hf[4..8].copy_from_slice(&60u32.to_le_bytes());
+        let cases = [("E", Vec::new()), ("F(1)", f(1)), ("F(64)", f(64)), ("Hf", hf), ("Hk", hk()), ("V0(1000)", v_with(1000, |_| 0.0))];
+        for (i, (name, sys)) in cases.into_iter().enumerate() {
+            let id = format!("20261109-1208{:02}", 10 + i);
+            let dir = interrupted_with("m7_8", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            let mic_after = std::fs::read(dir.join("mic.wav")).unwrap();
+            let changed = changed_offsets(&mic, &mic_after);
+            eprintln!("m7_8 {name} observed: exit={exit} mic_changed={changed:?} stdout={out:?} stderr={err:?}");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+            assert!(!changed.is_empty() && changed.iter().all(|&o| (4..8).contains(&o) || (64..68).contains(&o)), "behavior: REPAIRABLE mic.wav changes only bytes 4..8 and 64..68: {changed:?}");
+            assert_eq!(exit, 0, "behavior: {name} exit");
+        }
+    }
+
+    /// C19 (AC 9): an UNREADABLE track refuses the whole recovery before any byte is written.
+    #[test]
+    fn m7_9_an_unreadable_track_refuses_the_whole_recovery() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        for (i, (name, sys)) in [("Y", y100()), ("Z(30)", z(30))].into_iter().enumerate() {
+            let id = format!("20261109-1209{i:02}");
+            let dir = interrupted_with("m7_9", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+            let manifest = std::fs::read(dir.join("session.json")).unwrap();
+
+            let (exit, out, err) = recover_to(&id);
+
+            eprintln!("m7_9 {name} observed: exit={exit} stdout={out:?} stderr={err:?}");
+            assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: {name} mic.wav byte-identical");
+            assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+            assert_eq!(std::fs::read(dir.join("session.json")).unwrap(), manifest, "behavior: {name} session.json byte-identical");
+            assert!(journal_files(&dir).is_empty(), "behavior: {name} no recover.journal* file");
+            assert!(err.lines().any(|l| l.starts_with("system.wav: unreadable (") && l.ends_with(')')), "behavior: {name} stderr names system.wav as unreadable, got {err:?}");
+            assert_eq!(exit, 1, "behavior: {name} exit");
+        }
+        let v0 = v_with(1000, |_| 0.0);
+        let y = y100();
+        let dir = interrupted_with("m7_9c", "20261109-120910", &[("mic.wav", &v0), ("system.wav", &y)]);
+        let _ = recover_to("20261109-120910");
+        assert_eq!((std::fs::read(dir.join("mic.wav")).unwrap(), std::fs::read(dir.join("system.wav")).unwrap()), (v0, y), "control: V0(1000) + Y bytes identical");
+    }
+
+    /// A virtual track of `len` bytes: `head` then zeros; every write is recorded, none is applied.
+    struct Virtual {
+        len: u64,
+        head: Vec<u8>,
+        pos: u64,
+        writes: Vec<(u64, Vec<u8>)>,
+    }
+
+    impl std::io::Read for Virtual {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let left = self.len.saturating_sub(self.pos);
+            let n = (buf.len() as u64).min(left) as usize;
+            for (i, b) in buf[..n].iter_mut().enumerate() {
+                let at = self.pos as usize + i;
+                *b = if (self.pos + i as u64) < self.head.len() as u64 { self.head[at] } else { 0 };
+            }
+            self.pos += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl std::io::Write for Virtual {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push((self.pos, buf.to_vec()));
+            self.pos += buf.len() as u64;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Seek for Virtual {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.pos = match to {
+                std::io::SeekFrom::Start(p) => p,
+                std::io::SeekFrom::End(d) => (self.len as i64 + d) as u64,
+                std::io::SeekFrom::Current(d) => (self.pos as i64 + d) as u64,
+            };
+            Ok(self.pos)
+        }
+    }
+
+    /// C21 (AC 10): `repair_wav_in` refuses a length whose RIFF size does not fit a u32 and writes nothing.
+    #[test]
+    fn m7_10_repair_refuses_a_length_above_u32_and_writes_nothing() {
+        let head = hk();
+        let mut over = Virtual { len: 4_294_967_304, head: head.clone(), pos: 0, writes: Vec::new() };
+        assert_eq!((over.len - 8, u64::from(u32::MAX)), (4_294_967_296, 4_294_967_295), "fixture: L - 8 is one above the largest u32");
+
+        let r = repair_wav_in(&mut over);
+
+        eprintln!("m7_10 L=4294967304 observed: result={r:?} writes={:?}", over.writes);
+        assert!(over.writes.is_empty(), "behavior: no write is issued for L = 4294967304, got {:?}", over.writes);
+        assert!(r.as_ref().is_err_and(|e| e.contains("larger than a WAV header can describe")), "behavior: the error names the limit, got {r:?}");
+
+        let mut fits = Virtual { len: 4_294_967_303, head, pos: 0, writes: Vec::new() };
+        let r = repair_wav_in(&mut fits);
+        eprintln!("m7_10 L=4294967303 observed: result={r:?} writes={:?}", fits.writes);
+        assert_eq!(r, Ok(()), "control: L = 4294967303 follows the ordinary rules");
+        assert!(fits.writes.contains(&(4, u32::MAX.to_le_bytes().to_vec())), "control: R = L - 8 = 4294967295 written at 4");
+    }
+
+    /// C24 (AC 12): a repair prints the old and new size fields in decimal.
+    #[test]
+    fn m7_12_recover_prints_the_old_and_new_size_fields() {
+        let _one_at_a_time = crate::test_lock();
+        let (mic, mic_class) = k(1000);
+        assert_k(&mic, 1000, mic_class);
+        let _dir = interrupted_with("m7_12", "20261109-121200", &[("mic.wav", &mic)]);
+
+        let (exit, out, err) = recover_to("20261109-121200");
+
+        eprintln!("m7_12 observed: exit={exit} stdout={out:?} stderr={err:?}");
+        assert!(out.lines().any(|l| l == "mic.wav: riff_size 0 -> 4060, data_size 0 -> 4000"), "behavior: stdout must hold the size line, got {out:?}");
+        assert_eq!(exit, 0, "behavior: exit");
+    }
+
+    /// C25 (AC 13): with no track holding audio, recover ends `failed` with `no_audio` and keeps every file.
+    #[test]
+    fn m7_13_no_track_with_audio_ends_failed_no_audio() {
+        let _one_at_a_time = crate::test_lock();
+        let cases: [(&str, Vec<u8>, Vec<u8>, &str); 3] = [
+            ("E + E", Vec::new(), Vec::new(), "failed"),
+            ("Hk + E", hk(), Vec::new(), "failed"),
+            ("K(1) + E", k(1).0, Vec::new(), "captured"),
+        ];
+        for (i, (name, mic, sys, want)) in cases.into_iter().enumerate() {
+            let id = format!("20261109-1213{i:02}");
+            let dir = interrupted_with("m7_13", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+
+            let (exit, out, err) = recover_to(&id);
+
+            let m = read(&dir).unwrap();
+            eprintln!("m7_13 {name} observed: exit={exit} state={} error={} stdout={out:?} stderr={err:?}", m["state"], m["error"]);
+            assert_eq!(exit, 0, "behavior: {name} exit");
+            assert_eq!(m["state"], want, "behavior: {name} state");
+            if want == "failed" {
+                assert_eq!(m["error"]["code"], "no_audio", "behavior: {name} error.code");
+                assert_eq!(m["error"]["message"], "no track holds audio; the files were kept", "behavior: {name} error.message");
+                assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: {name} mic.wav byte-identical");
+                assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: {name} system.wav byte-identical");
+            }
+        }
+    }
+}
+
+// M7 CP4 test-only module for session.rs (check C38 and the byte half of C41 of .specs/features/m7-silent-track-recovery/checks.md).
+// Self-contained so it compiles unchanged at c2d7b6c and at HEAD; tests only, no production line. Fixtures are
+// synthetic bytes in a new folder under the run's TEMP, never removed by the test.
+#[cfg(test)]
+mod m7_cp4 {
+    use super::*;
+
+    fn le32(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+    }
+
+    /// V(n) finalized, from hound 3.5.1 32-bit float mono (68-byte header).
+    fn v(n: usize) -> Vec<u8> {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = hound::WavWriter::new(&mut c, spec).unwrap();
+            for i in 0..n {
+                w.write_sample(((i % 97) as f32 / 97.0) - 0.5).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let b = c.into_inner();
+        assert_eq!((b.len(), &b[60..64], le32(&b, 64) as usize, le32(&b, 4) as usize), (68 + 4 * n, &b"data"[..], 4 * n, 60 + 4 * n), "fixture: V({n}) L, data tag, D, R");
+        b
+    }
+
+    /// K(n): V(n) with R = 0 and D = 0 (killed writer); oracle REPAIRABLE.
+    fn k(n: usize) -> Vec<u8> {
+        let mut b = v(n);
+        b[4..8].copy_from_slice(&0u32.to_le_bytes());
+        b[64..68].copy_from_slice(&0u32.to_le_bytes());
+        assert!(b.len() >= 72 && le32(&b, 64) == 0, "fixture: K({n}) is REPAIRABLE");
+        b
+    }
+
+    /// Hk: the 68-byte header of a killed writer; oracle HEADER-ONLY.
+    fn hk() -> Vec<u8> {
+        let mut b = k(1);
+        b.truncate(68);
+        assert_eq!((b.len(), le32(&b, 4), le32(&b, 64)), (68, 0, 0), "fixture: Hk L, R, D");
+        b
+    }
+
+    fn run_folder(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = root.join(format!("{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        assert!(dir.starts_with(&root), "fixture: {} is outside {}", dir.display(), root.display());
+        dir
+    }
+
+    struct Gone;
+
+    impl Owners for Gone {
+        fn live(&self, _: Option<u64>, _: &str, _: &Path) -> bool {
+            false
+        }
+        fn end(&self, _: u64) -> bool {
+            false
+        }
+    }
+
+    /// An interrupted session under a new MIRIS_HOME with the given tracks; the caller holds `test_lock`.
+    fn interrupted(tag: &str, id: &str, tracks: &[(&str, &[u8])]) -> PathBuf {
+        let home = run_folder(tag);
+        let dir = home.join("sessions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, &json!({
+            "schema_version": 1, "session_id": id, "state": "interrupted", "created_at": "x", "updated_at": "x",
+            "recorder_pid": 4242, "processing_pid": null, "channels": {"mic": null, "system": null},
+            "error": {"code": "owner_died", "message": "x"}, "note_path": null, "transcript_ready": false,
+        }))
+        .unwrap();
+        for (name, bytes) in tracks {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        std::env::set_var("MIRIS_HOME", &home);
+        dir
+    }
+
+    /// Every file directly in `dir` with its bytes.
+    fn folder_bytes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+            .collect()
+    }
+
+    const RECOVER_NAMES: [&str; 7] = ["session.json", ".session.json.tmp", "recover.lock", "recover.journal.tmp", "recover.journal", "recover.done.json", "recover.journal.rejected"];
+
+    /// The changes outside the allowlist: a name outside RECOVER_NAMES that appeared, vanished or changed,
+    /// except bytes 4..8 and 64..68 of a track the oracle calls REPAIRABLE when the recovery succeeded.
+    fn outside_allowlist(before: &std::collections::BTreeMap<String, Vec<u8>>, after: &std::collections::BTreeMap<String, Vec<u8>>, repairable: &[&str], ok: bool) -> Vec<String> {
+        let mut bad = Vec::new();
+        let names: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+        for n in names {
+            if RECOVER_NAMES.contains(&n.as_str()) {
+                continue;
+            }
+            match (before.get(n), after.get(n)) {
+                (Some(b), Some(a)) if b == a => {}
+                (Some(b), Some(a)) if ok && repairable.contains(&n.as_str()) && b.len() == a.len() => {
+                    let off: Vec<usize> = (0..b.len()).filter(|&i| b[i] != a[i] && !(4..8).contains(&i) && !(64..68).contains(&i)).collect();
+                    if !off.is_empty() {
+                        bad.push(format!("{n}: bytes outside the size fields changed at {:?}", &off[..off.len().min(8)]));
+                    }
+                }
+                (b, a) => bad.push(format!("{n}: {} -> {}", b.map_or("absent".into(), |b| format!("{} bytes", b.len())), a.map_or("absent".into(), |a| format!("{} bytes", a.len())))),
+            }
+        }
+        bad
+    }
+
+    /// C38 (AC 21): `recover` changes only its allowlisted names and the two size fields of a REPAIRABLE track,
+    /// and a refused recovery changes no track byte.
+    #[test]
+    fn m7_21_recover_changes_only_its_allowlisted_names_and_eight_bytes() {
+        let _one_at_a_time = crate::test_lock();
+        let mic = k(1000);
+        let y = vec![b'x'; 100];
+        let cases: [(&str, Vec<u8>, &[&str]); 5] = [
+            ("K(1000) + E", Vec::new(), &["mic.wav"]),
+            ("K(1000) + Hk", hk(), &["mic.wav"]),
+            ("K(1000) + F(10)", hk()[..10].to_vec(), &["mic.wav"]),
+            ("K(1000) + V(400)", v(400), &["mic.wav"]),
+            ("K(1000) + Y (refused)", y, &["mic.wav"]),
+        ];
+        let mut failures = Vec::new();
+        for (i, (name, sys, repairable)) in cases.into_iter().enumerate() {
+            let id = format!("20261109-1321{i:02}");
+            let dir = interrupted("m7_21", &id, &[("mic.wav", &mic), ("system.wav", &sys)]);
+            let before = folder_bytes(&dir);
+
+            let exit = cli_with(&Gone, "recover", &[id.clone()]);
+
+            let after = folder_bytes(&dir);
+            let bad = outside_allowlist(&before, &after, repairable, exit == 0);
+            eprintln!("m7_21 {name} observed: exit={exit} outside_allowlist={bad:?}");
+            if !bad.is_empty() {
+                failures.push(format!("{name}: {bad:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "behavior: recover changed bytes outside its allowlist: {failures:?}");
+    }
+
+    /// C41 (AC 22), byte half: a second `recover` exits 0 and changes no byte (the recover.done.json half is S6, held).
+    #[test]
+    fn m7_22_a_second_recover_changes_nothing() {
+        let _one_at_a_time = crate::test_lock();
+        let mic = k(1000);
+        let dir = interrupted("m7_22", "20261109-132200", &[("mic.wav", &mic), ("system.wav", &[])]);
+        let first = cli_with(&Gone, "recover", &["20261109-132200".to_owned()]);
+        let once = folder_bytes(&dir);
+
+        let second = cli_with(&Gone, "recover", &["20261109-132200".to_owned()]);
+
+        let twice = folder_bytes(&dir);
+        let changed: Vec<&String> = once.keys().chain(twice.keys()).filter(|n| !RECOVER_NAMES.contains(&n.as_str()) && once.get(*n) != twice.get(*n)).collect();
+        eprintln!("m7_22 observed: first={first} second={second} changed_by_second={changed:?}");
+        assert_eq!(second, 0, "behavior: the second recover exits 0");
+        assert!(changed.is_empty(), "behavior: the second recover changed {changed:?}");
+
+        let control = interrupted("m7_22c", "20261109-132201", &[("mic.wav", &mic), ("system.wav", &k(500))]);
+        let _ = cli_with(&Gone, "recover", &["20261109-132201".to_owned()]);
+        let tracks_once = (std::fs::read(control.join("mic.wav")).unwrap(), std::fs::read(control.join("system.wav")).unwrap());
+        let _ = cli_with(&Gone, "recover", &["20261109-132201".to_owned()]);
+        assert_eq!((std::fs::read(control.join("mic.wav")).unwrap(), std::fs::read(control.join("system.wav")).unwrap()), tracks_once, "control: K(1000) + K(500) twice keeps the track bytes");
+    }
+}
+
+// M7 CP4 test-only module for session.rs over the S0 pipeline-child seam (checks C30, C31, C32, C39). Needs S0
+// 8db41ea (process_with), so its red is measured at S0, not at c2d7b6c, where a process test would start the
+// real child (the test binary). The child here is a closure; no process is started. Synthetic fixtures under TEMP.
+#[cfg(test)]
+mod m7_s2 {
+    use super::*;
+    use std::os::windows::process::ExitStatusExt;
+
+    fn status(code: u32) -> std::process::ExitStatus {
+        std::process::ExitStatus::from_raw(code)
+    }
+
+    fn run_folder(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = root.join(format!("{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        assert!(dir.starts_with(&root), "fixture: {} is outside {}", dir.display(), root.display());
+        dir
+    }
+
+    struct Gone;
+
+    impl Owners for Gone {
+        fn live(&self, _: Option<u64>, _: &str, _: &Path) -> bool {
+            false
+        }
+        fn end(&self, _: u64) -> bool {
+            false
+        }
+    }
+
+    /// A session folder in `state` (dead pipeline owner 4242) holding a synthetic mic track.
+    fn session(tag: &str, id: &str, state: &str) -> PathBuf {
+        let dir = run_folder(tag).join("sessions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, &json!({
+            "schema_version": 1, "session_id": id, "state": state, "created_at": "x", "updated_at": "x",
+            "recorder_pid": null, "processing_pid": 4242, "channels": {"mic": null, "system": null},
+            "error": null, "note_path": null, "transcript_ready": false,
+        }))
+        .unwrap();
+        std::fs::write(dir.join("mic.wav"), b"RIFF synthetic track bytes").unwrap();
+        dir
+    }
+
+    fn folder_bytes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.path().is_file()).map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap())).collect()
+    }
+
+    /// C30 (AC 16): a child that exits 101 while the manifest says `processing` leaves the session `captured`
+    /// with `pipeline_error` naming the exit status; files kept; process fails.
+    #[test]
+    fn m7_16_a_failed_child_settles_captured_with_pipeline_error() {
+        let dir = session("m7_16", "20261109-141600", "processing");
+        let mic = std::fs::read(dir.join("mic.wav")).unwrap();
+
+        let r = process_with(&dir, &Gone, |_| Ok(status(101)));
+
+        let m = read(&dir).unwrap();
+        eprintln!("m7_16 observed: result={r:?} state={} error={}", m["state"], m["error"]);
+        assert!(r.is_err(), "behavior: process fails");
+        assert_eq!(m["state"], "captured", "behavior: state after a failed child");
+        assert_eq!(m["error"]["code"], "pipeline_error", "behavior: error.code");
+        assert!(m["error"]["message"].as_str().is_some_and(|s| s.contains("101")), "behavior: the message names exit status 101, got {}", m["error"]);
+        assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: files kept");
+    }
+
+    /// C31 (AC 16): a child that already settled `captured` with its own error keeps that code.
+    #[test]
+    fn m7_16_a_child_written_error_code_is_kept() {
+        let dir = session("m7_16k", "20261109-141601", "processing");
+
+        let r = process_with(&dir, &Gone, |d| {
+            update(d, |m| {
+                m["state"] = json!("captured");
+                m["error"] = json!({"code": "provider_timeout", "message": "x"});
+            })
+            .unwrap();
+            Ok(status(101))
+        });
+
+        let m = read(&dir).unwrap();
+        eprintln!("m7_16k observed: result={r:?} state={} error={}", m["state"], m["error"]);
+        assert_eq!((m["state"].as_str(), m["error"]["code"].as_str()), (Some("captured"), Some("provider_timeout")), "behavior: the child's own code is kept");
+    }
+
+    /// C32 (AC 17): `process` on an `interrupted` session is refused, changes nothing and starts no child.
+    #[test]
+    fn m7_17_process_refuses_an_interrupted_session() {
+        let dir = session("m7_17", "20261109-141700", "interrupted");
+        let before = folder_bytes(&dir);
+        let called = std::cell::Cell::new(false);
+
+        let r = process_with(&dir, &Gone, |_| {
+            called.set(true);
+            Ok(status(101))
+        });
+
+        eprintln!("m7_17 observed: result={r:?} child_called={}", called.get());
+        assert!(!called.get(), "behavior: no pipeline child is started for an interrupted session");
+        assert_eq!(r, Err("session 20261109-141700 is interrupted; run recover first".to_owned()), "behavior: refusal message");
+        assert_eq!(folder_bytes(&dir), before, "behavior: nothing in the folder changes");
+    }
+
+    /// C39 (AC 21): `process` changes only its allowlisted names (the child writes a transcript, minutes, note and manifest).
+    #[test]
+    fn m7_21_process_changes_only_its_allowlisted_names() {
+        let dir = session("m7_21p", "20261109-142100", "captured");
+        let before = folder_bytes(&dir);
+
+        let r = process_with(&dir, &Gone, |d| {
+            for (name, bytes) in [("transcript.md", "# Transcrição\n"), ("ata.md", "# Ata\n"), ("minutes.json", "{}"), ("note.path", "x"), ("ata.url", "[InternetShortcut]\n")] {
+                std::fs::write(d.join(name), bytes).unwrap();
+            }
+            update(d, |m| m["state"] = json!("completed")).unwrap();
+            Ok(status(0))
+        });
+
+        let after = folder_bytes(&dir);
+        let allowed = |n: &str| ["transcript.md", "ata.md", "minutes.json", "note.path", "session.json", ".session.json.tmp", "recover.lock"].contains(&n) || n.ends_with(".url");
+        let outside: Vec<&String> = before.keys().chain(after.keys()).filter(|n| !allowed(n) && before.get(*n) != after.get(*n)).collect();
+        eprintln!("m7_21p observed: result={r:?} outside_allowlist={outside:?}");
+        assert_eq!(r, Ok(()), "behavior: process succeeds");
+        assert!(outside.is_empty(), "behavior: process changed {outside:?}");
+    }
+}
+
+// M7 CP5 test-only module for session.rs: the classifier truth table (C6, C7) over virtual readers.
+// Needs the S0 classify stub (4ea06d8), so its red is measured at S0, not at c2d7b6c. No real large file.
+#[cfg(test)]
+mod m7_cp5 {
+    use super::*;
+
+    /// A virtual track of `len` bytes: `head`, then zeros. Read and Seek only.
+    struct Virtual {
+        len: u64,
+        head: Vec<u8>,
+        pos: u64,
+    }
+
+    impl std::io::Read for Virtual {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (buf.len() as u64).min(self.len.saturating_sub(self.pos)) as usize;
+            for (i, b) in buf[..n].iter_mut().enumerate() {
+                let at = self.pos + i as u64;
+                *b = if at < self.head.len() as u64 { self.head[at as usize] } else { 0 };
+            }
+            self.pos += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl std::io::Seek for Virtual {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.pos = match to {
+                std::io::SeekFrom::Start(p) => p,
+                std::io::SeekFrom::End(d) => (self.len as i64 + d) as u64,
+                std::io::SeekFrom::Current(d) => (self.pos as i64 + d) as u64,
+            };
+            Ok(self.pos)
+        }
+    }
+
+    /// The 68-byte product header (hound 3.5.1, 32-bit float mono) with the given R and D; fixed fields checked.
+    fn header(r: u32, d: u32) -> Vec<u8> {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        hound::WavWriter::new(&mut c, spec).unwrap().finalize().unwrap();
+        let mut b = c.into_inner();
+        assert_eq!((b.len(), &b[0..4], &b[8..12], &b[12..16], &b[60..64]), (68, &b"RIFF"[..], &b"WAVE"[..], &b"fmt "[..], &b"data"[..]), "fixture: product header");
+        b[4..8].copy_from_slice(&r.to_le_bytes());
+        b[64..68].copy_from_slice(&d.to_le_bytes());
+        b
+    }
+
+    fn class_of(len: u64, head: Vec<u8>) -> Class {
+        classify(&mut Virtual { len, head, pos: 0 })
+    }
+
+    /// The boundary table of the plan, each row with the class the truth table gives (the oracle).
+    fn boundary_rows() -> Vec<(&'static str, u64, Vec<u8>, Class)> {
+        let h = header(0, 0);
+        vec![
+            ("L=0", 0, Vec::new(), Class::Empty),
+            ("L=1 F(1)", 1, h[..1].to_vec(), Class::Fragment),
+            ("L=43 F(43)", 43, h[..43].to_vec(), Class::Fragment),
+            ("L=67 F(67)", 67, h[..67].to_vec(), Class::Fragment),
+            ("L=30 Z(30)", 30, vec![b'x'; 30], Class::Unreadable),
+            ("L=68 D=0 R=0", 68, header(0, 0), Class::HeaderOnly),
+            ("L=68 D=0 R=60", 68, header(60, 0), Class::HeaderOnly),
+            ("L=68 D=4294967295", 68, header(0, u32::MAX), Class::HeaderOnly),
+            ("L=69", 69, header(0, 0), Class::HeaderOnly),
+            ("L=71", 71, header(0, 8), Class::HeaderOnly),
+            ("L=72 D=0", 72, header(0, 0), Class::Repairable),
+            ("L=72 D=4 R=64", 72, header(64, 4), Class::Valid),
+            ("L=72 D=4 R=0", 72, header(0, 4), Class::Valid),
+            ("L=72 D=8", 72, header(0, 8), Class::Repairable),
+            ("L=76 D=4", 76, header(0, 4), Class::Mismatch),
+            ("L=76 D=6", 76, header(0, 6), Class::Mismatch),
+            ("L=73 D=4", 73, header(0, 4), Class::Valid),
+            ("L=75 D=4", 75, header(0, 4), Class::Valid),
+            ("L=73 D=0", 73, header(0, 0), Class::Repairable),
+            ("L=75 D=0", 75, header(0, 0), Class::Repairable),
+            ("L=4294967304", 4_294_967_304, header(0, 0), Class::Unreadable),
+            ("L=4294967303 D=0", 4_294_967_303, header(0, 0), Class::Repairable),
+            ("L=100 Y (no product header)", 100, vec![b'x'; 100], Class::Unreadable),
+        ]
+    }
+
+    /// C6 (AC 29): every row of the boundary table gives exactly its class.
+    #[test]
+    fn m7_29_every_boundary_row_gives_its_class() {
+        let rows = boundary_rows();
+        assert_eq!(rows.len(), 23, "fixture: 23 rows cover the 16 rows of the boundary table");
+        let wrong: Vec<String> = rows
+            .into_iter()
+            .filter_map(|(name, len, head, want)| {
+                let got = class_of(len, head);
+                (got != want).then(|| format!("{name}: {got:?}, want {want:?}"))
+            })
+            .collect();
+        eprintln!("m7_29 observed wrong rows: {wrong:?}");
+        assert!(wrong.is_empty(), "behavior: {} rows give the wrong class: {wrong:?}", wrong.len());
+    }
+
+    /// C7 (AC 29): R in {0, 60, D + 60} gives the oracle class on every product-header row.
+    #[test]
+    fn m7_29_riff_size_alone_never_changes_the_class() {
+        let mut wrong = Vec::new();
+        for (name, len, head, want) in boundary_rows() {
+            if head.len() < 68 {
+                continue;
+            }
+            let d = u32::from_le_bytes([head[64], head[65], head[66], head[67]]);
+            for r in [0u32, 60, d.wrapping_add(60)] {
+                let mut h = head.clone();
+                h[4..8].copy_from_slice(&r.to_le_bytes());
+                let got = class_of(len, h);
+                if got != want {
+                    wrong.push(format!("{name} R={r}: {got:?}, want {want:?}"));
+                }
+            }
+        }
+        eprintln!("m7_29r observed wrong rows: {wrong:?}");
+        assert!(wrong.is_empty(), "behavior: {} cases give the wrong class: {wrong:?}", wrong.len());
+    }
+}
+
+// M7 CP5 test-only module for session.rs: C20, the MISMATCH refusal before any write. Uses the CP3 S0 output
+// seam cli_to (3184165), so it cannot run at c2d7b6c. Synthetic fixtures under the run's TEMP, never removed.
+#[cfg(test)]
+mod m7_cp5b {
+    use super::*;
+
+    fn le32(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+    }
+
+    /// V(n): a finalized product WAV of n samples.
+    fn v(n: usize) -> Vec<u8> {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = hound::WavWriter::new(&mut c, spec).unwrap();
+            for i in 0..n {
+                w.write_sample(((i % 97) as f32 / 97.0) - 0.5).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let b = c.into_inner();
+        assert_eq!((b.len(), &b[60..64], le32(&b, 64) as usize), (68 + 4 * n, &b"data"[..], 4 * n), "fixture: V({n}) L, data tag, D");
+        b
+    }
+
+    fn run_folder(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = root.join(format!("{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        assert!(dir.starts_with(&root), "fixture: {} is outside {}", dir.display(), root.display());
+        dir
+    }
+
+    struct Gone;
+
+    impl Owners for Gone {
+        fn live(&self, _: Option<u64>, _: &str, _: &Path) -> bool {
+            false
+        }
+        fn end(&self, _: u64) -> bool {
+            false
+        }
+    }
+
+    /// C20 (AC 30, AC 9): a MISMATCH track refuses the whole recovery before any byte of either track is written.
+    #[test]
+    fn m7_30_a_mismatch_track_refuses_the_whole_recovery() {
+        let _one_at_a_time = crate::test_lock();
+        let mut mic = v(1000);
+        mic[4..8].copy_from_slice(&0u32.to_le_bytes());
+        mic[64..68].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!((mic.len(), le32(&mic, 64)), (4068, 0), "fixture: K(1000) L, D (REPAIRABLE)");
+        let mut sys = v(1000);
+        sys[64..68].copy_from_slice(&1600u32.to_le_bytes());
+        sys[4..8].copy_from_slice(&1660u32.to_le_bytes());
+        assert_eq!((le32(&sys, 64), sys.len(), sys.len() - 68), (1600, 4068, 4000), "fixture: T(400, 1000) D, L, W (MISMATCH: 0 < D < W)");
+        let home = run_folder("m7_30");
+        let id = "20261109-143000";
+        let dir = home.join("sessions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, &json!({
+            "schema_version": 1, "session_id": id, "state": "interrupted", "created_at": "x", "updated_at": "x",
+            "recorder_pid": 4242, "processing_pid": null, "channels": {"mic": null, "system": null},
+            "error": {"code": "owner_died", "message": "x"}, "note_path": null, "transcript_ready": false,
+        }))
+        .unwrap();
+        std::fs::write(dir.join("mic.wav"), &mic).unwrap();
+        std::fs::write(dir.join("system.wav"), &sys).unwrap();
+        let manifest = std::fs::read(dir.join("session.json")).unwrap();
+        std::env::set_var("MIRIS_HOME", &home);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        let exit = cli_to(&Gone, "recover", &[id.to_owned()], &mut out, &mut err);
+
+        let (out, err) = (String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned());
+        let journal: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("recover.journal")).collect();
+        eprintln!("m7_30 observed: exit={exit} stdout={out:?} stderr={err:?} journal={journal:?}");
+        assert_eq!(std::fs::read(dir.join("mic.wav")).unwrap(), mic, "behavior: mic.wav byte-identical (no write before the refusal)");
+        assert_eq!(std::fs::read(dir.join("system.wav")).unwrap(), sys, "behavior: system.wav byte-identical (declaration neither shortened nor extended)");
+        assert_eq!(std::fs::read(dir.join("session.json")).unwrap(), manifest, "behavior: session.json unchanged, state interrupted");
+        assert!(journal.is_empty(), "behavior: no recover.journal* file");
+        assert!(err.lines().any(|l| l == "system.wav: declared 1600 bytes but 4000 bytes of samples are present"), "behavior: exact refusal text, got {err:?}");
+        assert_eq!(exit, 1, "behavior: exit");
     }
 }

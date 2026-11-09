@@ -310,19 +310,36 @@ fn writer(
 /// the writer before it can update the header, so a failure is followed by a
 /// repair of the sizes from the bytes on disk, through `reopen`, which needs
 /// no free space.
-fn write_wav<W, R>(inner: W, rate: u32, rx: mpsc::Receiver<Chunk>, reopen: impl FnOnce() -> std::io::Result<R>) -> Result<(u64, f32), String>
+fn write_wav<W, R>(mut inner: W, rate: u32, rx: mpsc::Receiver<Chunk>, reopen: impl FnOnce() -> std::io::Result<R>) -> Result<(u64, f32), String>
 where
     W: std::io::Write + std::io::Seek,
     R: std::io::Read + std::io::Write + std::io::Seek,
 {
-    let w = hound::WavWriter::new(std::io::BufWriter::new(inner), track_spec(rate)).map_err(|e| format!("disk_write_error: {e}"))?;
-    let result = write_track(w, rate, rx);
+    // the header reaches the file before the first chunk, so a recorder killed before any sample leaves a 68-byte
+    // track; it is written straight to the file and the buffered writer starts at 0 as before, so its writes keep
+    // their alignment and a failure loses no more than before
+    let result = match write_header_through(&mut inner, rate) {
+        Err(e) => Err(format!("disk_write_error: {e}")),
+        Ok(()) => {
+            let w = hound::WavWriter::new(std::io::BufWriter::new(inner), track_spec(rate)).map_err(|e| format!("disk_write_error: {e}"))?;
+            write_track(w, rate, rx)
+        }
+    };
     if result.is_err() {
         if let Err(repair) = reopen().map_err(|e| e.to_string()).and_then(|mut f| session::repair_wav_in(&mut f)) {
             return result.map_err(|e| format!("{e}; header repair failed: {repair}"));
         }
     }
     result
+}
+
+/// The header hound writes for a track, written to `inner` and flushed, then `inner` back at 0.
+fn write_header_through<W: std::io::Write + std::io::Seek>(inner: &mut W, rate: u32) -> std::io::Result<()> {
+    let mut head = std::io::Cursor::new(Vec::new());
+    drop(hound::WavWriter::new(&mut head, track_spec(rate)).map_err(std::io::Error::other)?);
+    inner.write_all(head.get_ref())?;
+    inner.flush()?;
+    inner.seek(std::io::SeekFrom::Start(0)).map(|_| ())
 }
 
 fn track_spec(rate: u32) -> hound::WavSpec {
@@ -439,21 +456,24 @@ pub fn record(dir: &Path, mic_want: Option<&str>, stop: Stop, on_started: impl F
 
 /// Mono f32 at RATE. Box-filter average then linear interpolation: good
 /// enough for speech in a spike, a real resampler comes with the port.
-fn load_16k(path: &Path) -> Vec<f32> {
-    let mut r = hound::WavReader::open(path).expect("open wav");
+/// A file that cannot be read gives an error naming it, never a panic.
+fn load_16k(path: &Path) -> Result<Vec<f32>, String> {
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let mut r = hound::WavReader::open(path).map_err(|e| format!("{name}: {e}"))?;
     let spec = r.spec();
     let ch = spec.channels as usize;
     let raw: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => r.samples::<f32>().map(Result::unwrap).collect(),
-        hound::SampleFormat::Int => r.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect(),
-    };
+        hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>(),
+        hound::SampleFormat::Int => r.samples::<i16>().map(|s| s.map(|s| s as f32 / 32768.0)).collect::<Result<_, _>>(),
+    }
+    .map_err(|e| format!("{name}: {e}"))?;
     let mono: Vec<f32> = raw.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect();
     if mono.is_empty() {
-        return mono;
+        return Ok(mono);
     }
     let ratio = spec.sample_rate as f64 / RATE as f64;
     if (ratio - 1.0).abs() < 1e-9 {
-        return mono;
+        return Ok(mono);
     }
     let k = ratio.floor().max(1.0) as usize;
     let smooth: Vec<f32> = (0..mono.len()).map(|i| {
@@ -462,19 +482,41 @@ fn load_16k(path: &Path) -> Vec<f32> {
         mono[lo..hi].iter().sum::<f32>() / (hi - lo) as f32
     }).collect();
     let n = (mono.len() as f64 / ratio) as usize;
-    (0..n).map(|i| {
+    Ok((0..n).map(|i| {
         let x = i as f64 * ratio;
         let j = x as usize;
         let f = (x - j as f64) as f32;
         let b = smooth.get(j + 1).copied().unwrap_or(smooth[j]);
         smooth[j] * (1.0 - f) + b * f
-    }).collect()
+    }).collect())
 }
 
 struct Line {
     t0: i64,
     who: &'static str,
     text: String,
+}
+
+/// One track's audio for `transcribe`, read without the model: None when the track is absent or skipped,
+/// with the skip line written to `out`.
+fn track_audio(dir: &Path, file: &str, out: &mut dyn std::io::Write) -> Option<Vec<f32>> {
+    let path = dir.join(file);
+    if !path.exists() {
+        return None;
+    }
+    // EMPTY, FRAGMENT and HEADER-ONLY tracks hold no audio: skipped with a line, never read
+    let len = std::fs::metadata(&path).map(|m| m.len()).ok();
+    if len == Some(0) || (len.is_some_and(|l| l <= 71) && session::read_head(&path).is_ok_and(|h| session::product_header_holds(&h))) {
+        writeln!(out, "{file}: no audio, skipped").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
+        return None;
+    }
+    // a track that cannot be read still stops the transcription here, as before (the AC 15 settle is a later check)
+    let audio = load_16k(&path).unwrap_or_else(|e| panic!("open wav: {e}"));
+    if audio.len() < RATE as usize {
+        writeln!(out, "{file}: under 1 s of audio, skipped").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
+        return None;
+    }
+    Some(audio)
 }
 
 pub fn transcribe(dir: &Path, model: &str, vad: &str, lang: &str) {
@@ -487,16 +529,10 @@ pub fn transcribe(dir: &Path, model: &str, vad: &str, lang: &str) {
 
     let mut lines = Vec::new();
     for (file, who) in [("mic.wav", "Você"), ("system.wav", "Outros")] {
-        let path = dir.join(file);
-        if !path.exists() {
+        let Some(audio) = track_audio(dir, file, &mut std::io::stdout()) else {
             continue;
-        }
-        let audio = load_16k(&path);
-        if audio.len() < RATE as usize {
-            println!("{file}: under 1 s of audio, skipped");
-            continue;
-        }
-        let mut p = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
+        };
+        let mut p =FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
         p.set_language(Some(lang));
         p.set_print_progress(false);
         p.set_print_realtime(false);
@@ -983,5 +1019,246 @@ mod tests {
         let e = write_wav(disk, 16_000, rx, || Ok::<_, std::io::Error>(again)).unwrap_err();
 
         assert!(e.starts_with("disk_write_error") && e.contains("header repair failed"), "{e}");
+    }
+}
+
+// M7 CP4 test-only module for main.rs (checks C26, C28 and C37 of .specs/features/m7-silent-track-recovery/checks.md).
+// Appended unchanged to main.rs at c2d7b6c and at HEAD; tests only, no production line. Fixtures are synthetic
+// bytes in a new folder under the run's TEMP, never removed by the test.
+#[cfg(test)]
+mod m7_tests {
+    use super::*;
+    use std::io::{Seek, Write};
+
+    fn le32(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+    }
+
+    /// The 68-byte product header (hound 3.5.1, 32-bit float mono) with R = 0 and D = 0; fixed fields checked.
+    fn hk() -> Vec<u8> {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        hound::WavWriter::new(&mut c, spec).unwrap().finalize().unwrap();
+        let mut b = c.into_inner();
+        assert_eq!((b.len(), &b[0..4], &b[8..12], &b[60..64], le32(&b, 16)), (68, &b"RIFF"[..], &b"WAVE"[..], &b"data"[..], 40), "fixture: product header");
+        b[4..8].copy_from_slice(&0u32.to_le_bytes());
+        b
+    }
+
+    /// V(n): a finalized product WAV of n samples.
+    fn v(n: usize) -> Vec<u8> {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = hound::WavWriter::new(&mut c, spec).unwrap();
+            for i in 0..n {
+                w.write_sample(((i % 89) as f32 / 89.0) - 0.5).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let b = c.into_inner();
+        assert_eq!((b.len(), le32(&b, 64) as usize), (68 + 4 * n, 4 * n), "fixture: V({n}) L and D");
+        b
+    }
+
+    fn run_folder(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = root.join(format!("{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        assert!(dir.starts_with(&root), "fixture: {} is outside {}", dir.display(), root.display());
+        dir
+    }
+
+    /// `load_16k` on a file, with any panic caught: Ok(debug text of the return value) or Err(panic text).
+    fn load_caught(path: &Path) -> Result<String, String> {
+        let p = path.to_path_buf();
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let r = std::panic::catch_unwind(move || {
+            let shown = format!("{:?}", load_16k(&p));
+            shown.chars().take(120).collect::<String>()
+        });
+        std::panic::set_hook(prev);
+        r.map_err(|e| e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())
+    }
+
+    /// C26 (AC 14): `load_16k` on an empty or partial track returns without a panic; Hf is the control.
+    #[test]
+    fn m7_14_load_16k_does_not_panic_on_an_empty_or_partial_track() {
+        let _one_at_a_time = crate::test_lock();
+        let dir = run_folder("m7_14");
+        let h = hk();
+        let cases: [(&str, Vec<u8>); 4] = [("E", Vec::new()), ("F(1)", h[..1].to_vec()), ("F(67)", h[..67].to_vec()), ("Hf", {
+            let mut f = h.clone();
+            f[4..8].copy_from_slice(&60u32.to_le_bytes());
+            f
+        })];
+        let mut panicked = Vec::new();
+        for (name, bytes) in &cases {
+            let p = dir.join(format!("{}.wav", name.replace(['(', ')'], "_")));
+            std::fs::write(&p, bytes).unwrap();
+            let r = load_caught(&p);
+            eprintln!("m7_14 {name} observed: {r:?}");
+            if r.is_err() {
+                panicked.push(*name);
+            }
+        }
+        assert!(panicked.is_empty(), "behavior: load_16k panicked on {panicked:?}");
+    }
+
+    /// C28 (AC 15): an unreadable track (X, or T(1000, 400) whose samples end early) gives an error naming the file, no panic.
+    #[test]
+    fn m7_15_an_unreadable_track_returns_an_error_naming_the_file() {
+        let _one_at_a_time = crate::test_lock();
+        let dir = run_folder("m7_15");
+        let mut x = vec![b'x'; 40];
+        x.extend_from_slice(b"data");
+        x.extend_from_slice(&[b'x'; 56]);
+        let mut t = v(400);
+        t[64..68].copy_from_slice(&4000u32.to_le_bytes());
+        t[4..8].copy_from_slice(&4060u32.to_le_bytes());
+        assert_eq!((x.len(), t.len(), le32(&t, 64)), (100, 1668, 4000), "fixture: X length, T(1000, 400) L and D");
+        for (name, bytes) in [("X", x), ("T(1000, 400)", t)] {
+            let sub = dir.join(name.replace(['(', ')', ',', ' '], "_"));
+            std::fs::create_dir(&sub).unwrap();
+            let p = sub.join("system.wav");
+            std::fs::write(&p, &bytes).unwrap();
+            let r = load_caught(&p);
+            eprintln!("m7_15 {name} observed: {r:?}");
+            let shown = r.unwrap_or_else(|e| panic!("behavior: {name} panicked: {e}"));
+            assert!(shown.starts_with("Err(") && shown.contains("system.wav"), "behavior: {name} must give an error naming system.wav, got {shown}");
+        }
+    }
+
+    /// An in-memory file shared with the test, so the bytes that reached the underlying writer can be read.
+    #[derive(Clone)]
+    struct Shared(std::sync::Arc<std::sync::Mutex<std::io::Cursor<Vec<u8>>>>);
+
+    impl std::io::Write for Shared {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(b)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Seek for Shared {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.0.lock().unwrap().seek(to)
+        }
+    }
+
+    /// C37 (AC 20): the 68-byte header reaches the underlying writer before the first chunk is received.
+    #[test]
+    fn m7_20_the_header_reaches_the_file_before_the_first_chunk() {
+        let file = Shared(std::sync::Arc::new(std::sync::Mutex::new(std::io::Cursor::new(Vec::new()))));
+        let (tx, rx) = mpsc::channel::<Chunk>();
+        let inner = file.clone();
+        let writer = std::thread::spawn(move || write_wav(inner, 48_000, rx, || Ok(std::io::Cursor::new(Vec::new()))));
+        let started = std::time::Instant::now();
+        let mut seen = Vec::new();
+        while started.elapsed() < std::time::Duration::from_secs(2) {
+            seen = file.0.lock().unwrap().get_ref().clone();
+            if seen.len() >= 68 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(tx);
+        let _ = writer.join();
+        eprintln!("m7_20 observed: {} bytes reached the writer within {:?}", seen.len(), started.elapsed());
+        assert!(seen.len() >= 68, "behavior: the underlying writer holds {} bytes within 2 s, not the 68-byte header", seen.len());
+        assert_eq!(&seen[60..64], b"data", "behavior: data tag at 60..64");
+    }
+}
+
+// M7 CP4 test-only module for main.rs over the S0 per-track read (check C27). Needs S0 240045b (track_audio),
+// so its red is measured at S0, not at c2d7b6c. Tests only; fixtures are synthetic bytes under the run's TEMP.
+#[cfg(test)]
+mod m7_s2_tests {
+    use super::*;
+
+    fn le32(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+    }
+
+    /// V(n) at 48 kHz, finalized; 48000 samples are 1 s.
+    fn v48k(n: usize) -> Vec<u8> {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut c = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = hound::WavWriter::new(&mut c, spec).unwrap();
+            for i in 0..n {
+                w.write_sample(((i % 89) as f32 / 89.0) - 0.5).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let b = c.into_inner();
+        assert_eq!((b.len(), &b[0..4], &b[60..64], le32(&b, 64) as usize), (68 + 4 * n, &b"RIFF"[..], &b"data"[..], 4 * n), "fixture: V({n}) L, tags, D");
+        b
+    }
+
+    fn run_folder(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = root.join(format!("{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        assert!(dir.starts_with(&root), "fixture: {} is outside {}", dir.display(), root.display());
+        dir
+    }
+
+    /// `track_audio` with any panic caught: Ok((samples or None, printed text)) or Err(panic text).
+    fn read_caught(dir: &Path, file: &str) -> Result<(Option<usize>, String), String> {
+        let (d, f) = (dir.to_path_buf(), file.to_owned());
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let r = std::panic::catch_unwind(move || {
+            let mut out = Vec::new();
+            let a = track_audio(&d, &f, &mut out).map(|a| a.len());
+            (a, String::from_utf8_lossy(&out).into_owned())
+        });
+        std::panic::set_hook(prev);
+        r.map_err(|e| e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())
+    }
+
+    /// C27 (AC 14): the per-track read skips an EMPTY, FRAGMENT or HEADER-ONLY track with its line, without a
+    /// panic, and still reads the other track; a VALID track under 1 s keeps today's line.
+    #[test]
+    fn m7_14_the_per_track_read_skips_a_track_with_no_audio() {
+        let _one_at_a_time = crate::test_lock();
+        let one_second = v48k(48_000);
+        let mut hk = v48k(1);
+        hk.truncate(68);
+        hk[4..8].copy_from_slice(&0u32.to_le_bytes());
+        hk[64..68].copy_from_slice(&0u32.to_le_bytes());
+        let cases: [(&str, Vec<u8>); 4] = [("0 bytes", Vec::new()), ("1 byte", hk[..1].to_vec()), ("67 bytes", hk[..67].to_vec()), ("68 bytes", hk.clone())];
+        let mut failures = Vec::new();
+        for (name, sys) in cases {
+            let dir = run_folder("m7_14s");
+            std::fs::write(dir.join("mic.wav"), &one_second).unwrap();
+            std::fs::write(dir.join("system.wav"), &sys).unwrap();
+
+            let system = read_caught(&dir, "system.wav");
+            let mic = read_caught(&dir, "mic.wav");
+
+            eprintln!("m7_14s {name} observed: system={system:?} mic={mic:?}");
+            match system {
+                Ok((None, out)) if out.lines().any(|l| l == "system.wav: no audio, skipped") => {}
+                other => failures.push(format!("{name}: system.wav must be skipped with 'system.wav: no audio, skipped', got {other:?}")),
+            }
+            if !matches!(mic, Ok((Some(n), _)) if n >= 16_000) {
+                failures.push(format!("{name}: mic.wav must still be read, got {mic:?}"));
+            }
+        }
+        let dir = run_folder("m7_14u");
+        std::fs::write(dir.join("system.wav"), v48k(100)).unwrap();
+        let short = read_caught(&dir, "system.wav");
+        eprintln!("m7_14s under 1 s observed: {short:?}");
+        if !matches!(&short, Ok((None, out)) if out.lines().any(|l| l == "system.wav: under 1 s of audio, skipped")) {
+            failures.push(format!("a VALID track under 1 s keeps its line, got {short:?}"));
+        }
+        assert!(failures.is_empty(), "behavior: {failures:?}");
     }
 }
