@@ -368,7 +368,23 @@ fn finish(dir: &Path, ata: super::minutes::Ata) -> Result<PathBuf, String> {
 /// Runs the pipeline as a `miris.pipeline <dir>` child so the tray can see it
 /// alive; its stdout (ending in "note: ...") goes straight to our caller.
 fn run_pipeline(dir: &Path) -> Result<(), String> {
-    let status = spawn_child("miris.pipeline", dir, false)?.wait().map_err(|e| e.to_string())?;
+    run_pipeline_with(dir, pipeline_child)
+}
+
+/// The `miris.pipeline <dir>` child, run to its exit.
+fn pipeline_child(dir: &Path) -> Result<std::process::ExitStatus, String> {
+    spawn_child("miris.pipeline", dir, false)?.wait().map_err(|e| e.to_string())
+}
+
+/// `process <id>` on its session folder, with the pipeline child passed in so a test can stand for it.
+fn process_with(dir: &Path, owners: &dyn Owners, child: impl FnOnce(&Path) -> Result<std::process::ExitStatus, String>) -> Result<(), String> {
+    guard_inactive(dir, owners)?;
+    run_pipeline_with(dir, child)
+}
+
+/// `run_pipeline` with the child passed in (as `stop_with` takes `pipeline`).
+fn run_pipeline_with(dir: &Path, child: impl FnOnce(&Path) -> Result<std::process::ExitStatus, String>) -> Result<(), String> {
+    let status = child(dir)?;
     if status.success() {
         Ok(())
     } else {
@@ -556,10 +572,7 @@ fn cli_to(owners: &dyn Owners, cmd: &str, args: &[String], out: &mut dyn std::io
     let result = match cmd {
         "start" => start(),
         "stop" => stop(),
-        "process" => arg(0).and_then(session_dir).and_then(|d| {
-            guard_inactive(&d, owners)?;
-            run_pipeline(&d)
-        }),
+        "process" => arg(0).and_then(session_dir).and_then(|d| process_with(&d, owners, pipeline_child)),
         "recover" => arg(0).and_then(session_dir).and_then(|d| {
             guard_inactive(&d, owners)?;
             // every track is looked at before any is written, so a refusal changes nothing
